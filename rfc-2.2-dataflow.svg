@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 860" width="1060" height="860" preserveAspectRatio="xMidYMid meet" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#334155"/>
+    </marker>
+    <marker id="arrowReq" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowRes" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#0e7490"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1060" height="860" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="30" y="40" font-size="22" font-weight="700" fill="#0f172a">Meridian News — end-to-end data flow</text>
+  <text x="30" y="64" font-size="13" fill="#64748b">Phase 2.2 Architecture RFC §4.1 · two deployables, two planes · the only cross-deployable hops are the two /v1 calls</text>
+
+  <!-- ================= LANES ================= -->
+  <!-- App lane -->
+  <rect x="24" y="86" width="470" height="590" rx="12" fill="#eef4fb" stroke="#cfe0f2"/>
+  <text x="44" y="112" font-size="14" font-weight="700" fill="#1d4ed8">MERIDIAN APP</text>
+  <text x="44" y="130" font-size="11.5" fill="#3b6cb3">enrichment pipeline · write path · freshness in minutes (FR-I1) · stateful</text>
+
+  <!-- Platform lane -->
+  <rect x="612" y="86" width="424" height="590" rx="12" fill="#f4effc" stroke="#e0d3f5"/>
+  <text x="632" y="112" font-size="14" font-weight="700" fill="#7c3aed">PLATFORM</text>
+  <text x="632" y="130" font-size="11.5" fill="#8b5cf6">local models · stateless request/response · replicable · §8 API</text>
+
+  <!-- ================= APP STAGE BOXES ================= -->
+  <!-- helper: box w=380 x=54 -->
+  <!-- 1 Discovery -->
+  <rect x="54" y="150" width="380" height="44" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="66" y="170" font-size="12.5" font-weight="600" fill="#0f172a">Discovery</text>
+  <text x="66" y="186" font-size="11" fill="#475569">RSS/Atom → sitemap → section-scrape (ScrapeFlow) · WebSub</text>
+
+  <!-- 2 Acquisition -->
+  <rect x="54" y="210" width="380" height="44" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="66" y="230" font-size="12.5" font-weight="600" fill="#0f172a">Acquisition</text>
+  <text x="66" y="246" font-size="11" fill="#475569">tier 1 full-feed / tier 2 pub API / tier 3 extract (permitted)</text>
+
+  <!-- 3 Normalize -->
+  <rect x="54" y="270" width="380" height="44" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="66" y="290" font-size="12.5" font-weight="600" fill="#0f172a">Normalize → Canonical record (FR-I4)</text>
+  <text x="66" y="306" font-size="11" fill="#475569">title · body · lede · rights · content_hash · simhash</text>
+
+  <!-- 4 Dedup -->
+  <rect x="54" y="330" width="380" height="44" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="66" y="350" font-size="12.5" font-weight="600" fill="#0f172a">Dedup / collapse (FR-I5)</text>
+  <text x="66" y="366" font-size="11" fill="#475569">exact → SimHash · collapse → 1 canonical + provenance</text>
+
+  <!-- 5 Classify (call) -->
+  <rect x="54" y="390" width="380" height="44" rx="8" fill="#ffffff" stroke="#7c3aed" stroke-width="1.6"/>
+  <text x="66" y="410" font-size="12.5" font-weight="600" fill="#0f172a">Classify  <tspan fill="#7c3aed">→ Platform</tspan></text>
+  <text x="66" y="426" font-size="11" fill="#475569">per canonical record</text>
+
+  <!-- 6 Cluster -->
+  <rect x="54" y="470" width="380" height="52" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="66" y="490" font-size="12.5" font-weight="600" fill="#0f172a">Cluster (FR-K1–K4)</text>
+  <text x="66" y="506" font-size="11" fill="#475569">embed(title+lede) · leader-follower + reconcile ·</text>
+  <text x="66" y="518" font-size="11" fill="#475569">cluster-topic = confidence-weighted vote</text>
+
+  <!-- 7 Summarize (call) -->
+  <rect x="54" y="558" width="380" height="44" rx="8" fill="#ffffff" stroke="#7c3aed" stroke-width="1.6"/>
+  <text x="66" y="578" font-size="12.5" font-weight="600" fill="#0f172a">Summarize  <tspan fill="#7c3aed">→ Platform</tspan></text>
+  <text x="66" y="594" font-size="11" fill="#475569">per cluster · rights-permitted members only</text>
+
+  <!-- 8 Project -->
+  <rect x="54" y="620" width="380" height="40" rx="8" fill="#eef7f0" stroke="#86c39b"/>
+  <text x="66" y="644" font-size="12.5" font-weight="600" fill="#14532d">Project → Read Model  (topics → clusters → detail)</text>
+
+  <!-- App spine arrows -->
+  <g stroke="#334155" stroke-width="1.4" marker-end="url(#arrow)" fill="none">
+    <path d="M244,194 L244,210"/>
+    <path d="M244,254 L244,270"/>
+    <path d="M244,314 L244,330"/>
+    <path d="M244,374 L244,390"/>
+    <path d="M244,434 L244,470"/>
+    <path d="M244,522 L244,558"/>
+    <path d="M244,602 L244,620"/>
+  </g>
+
+  <!-- ================= PLATFORM MODEL BOXES ================= -->
+  <!-- classify model -->
+  <rect x="640" y="386" width="372" height="52" rx="8" fill="#ffffff" stroke="#7c3aed"/>
+  <text x="654" y="406" font-size="12.5" font-weight="600" fill="#4c1d95">POST /v1/classify</text>
+  <text x="654" y="422" font-size="11" fill="#5b21b6">DeBERTa-v3 · 8-way + Other rejection · temperature-scaled</text>
+
+  <!-- summarize model -->
+  <rect x="640" y="546" width="372" height="66" rx="8" fill="#ffffff" stroke="#7c3aed"/>
+  <text x="654" y="566" font-size="12.5" font-weight="600" fill="#4c1d95">POST /v1/summarize</text>
+  <text x="654" y="582" font-size="11" fill="#5b21b6">hybrid: LexRank+MMR extract → small abstractor</text>
+  <text x="654" y="598" font-size="11" fill="#5b21b6">+ faithfulness gate (AlignScore / SummaC) — production model</text>
+
+  <!-- embedder note -->
+  <rect x="640" y="632" width="372" height="30" rx="8" fill="#faf5ff" stroke="#c4b5e8" stroke-dasharray="4 3"/>
+  <text x="654" y="651" font-size="10.5" fill="#6d28d9">BGE-small embedder — one pinned version loaded in BOTH lanes (§3.2)</text>
+
+  <!-- ================= CROSS-DEPLOYABLE CALLS ================= -->
+  <!-- classify request -->
+  <path d="M434,404 L640,400" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#arrowReq)"/>
+  <!-- classify response -->
+  <path d="M640,424 L434,420" stroke="#0e7490" stroke-width="1.6" fill="none" marker-end="url(#arrowRes)"/>
+  <text x="470" y="392" font-size="10" fill="#7c3aed">request: text</text>
+  <text x="470" y="440" font-size="10" fill="#0e7490">response: topic + calibrated confidence</text>
+
+  <!-- summarize request -->
+  <path d="M434,572 L640,566" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#arrowReq)"/>
+  <!-- summarize response -->
+  <path d="M640,592 L434,588" stroke="#0e7490" stroke-width="1.6" fill="none" marker-end="url(#arrowRes)"/>
+  <text x="470" y="560" font-size="10" fill="#7c3aed">request: cluster documents</text>
+  <text x="470" y="610" font-size="10" fill="#0e7490">response: summary + faithfulness + withheld</text>
+
+  <!-- ================= SERVING PLANE ================= -->
+  <rect x="24" y="700" width="1012" height="132" rx="12" fill="#eef7f0" stroke="#bfe0cb"/>
+  <text x="44" y="726" font-size="14" font-weight="700" fill="#15803d">SERVING PLANE</text>
+  <text x="44" y="744" font-size="11.5" fill="#2f855a">read path · interactive · NO model calls on the reader surface</text>
+
+  <!-- reader surface -->
+  <rect x="54" y="758" width="330" height="56" rx="8" fill="#ffffff" stroke="#86c39b"/>
+  <text x="68" y="780" font-size="12.5" font-weight="600" fill="#14532d">Reader surface (FR-V1)</text>
+  <text x="68" y="798" font-size="11" fill="#3f6d51">browse topic → clusters → detail · reads the Read Model</text>
+
+  <!-- arrow read model -> reader -->
+  <path d="M244,660 L244,700 M244,700 L200,758" stroke="#15803d" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <text x="252" y="690" font-size="10" fill="#15803d">pre-computed</text>
+
+  <!-- digest -->
+  <rect x="660" y="758" width="330" height="56" rx="8" fill="#ffffff" stroke="#86c39b"/>
+  <text x="674" y="780" font-size="12.5" font-weight="600" fill="#14532d">Digest team (external consumer)</text>
+  <text x="674" y="798" font-size="11" fill="#3f6d51">calls the SAME endpoints → POST /v1/{classify, summarize}</text>
+
+  <!-- arrow digest -> platform -->
+  <path d="M825,758 L825,660" stroke="#7c3aed" stroke-width="1.4" fill="none" marker-end="url(#arrowReq)" stroke-dasharray="5 3"/>
+  <text x="832" y="720" font-size="10" fill="#7c3aed">same /v1 API</text>
+</svg>

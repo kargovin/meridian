@@ -1,0 +1,40 @@
+# Environment / secrets
+.env
+.env.local
+*.token
+
+# Process docs live in Confluence, not here. These are local working state.
+CLAUDE.md
+HANDOFF.md
+MARCUS-DECISIONS.md
+docs/
+.scratch/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+.uv/
+
+# Claude Code local machine state
+.claude/settings.local.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
