@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# Prefix the commit subject with the Jira issue key taken from the branch name,
+# so the commit shows up in that issue's Development panel.
+#
+#   branch MER-14-schema-migrations + "add claim index"
+#     -> "MER-14: add claim index"
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+#
+# Left untouched: merge and squash messages, fixup!/squash!/revert subjects,
+# a subject that already names the key, and any branch without a key in its name.
+
+msg_file="$1"
+src="$2"
+
+case "$src" in
+  merge|squash) exit 0 ;;
+esac
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null) || exit 0
+
+key=$(printf '%s' "$branch" | grep -oE '[A-Za-z][A-Za-z0-9]*-[0-9]+' | head -n 1)
+[ -n "$key" ] || exit 0
+key=$(printf '%s' "$key" | tr 'a-z' 'A-Z')
+
+subject=$(grep -v '^#' "$msg_file" | grep -m 1 .)
+[ -n "$subject" ] || exit 0
+
+case "$subject" in
+  fixup!*|squash!*|amend!*|Revert\ *|Merge\ *) exit 0 ;;
+esac
+
+# Already carries this key.
+if printf '%s' "$subject" | grep -qE "(^|[^A-Za-z0-9])${key}([^0-9]|$)"; then
+  exit 0
+fi
+
+awk -v key="$key" '
+  !done && !/^#/ && NF { print key ": " $0; done = 1; next }
+  { print }
+' "$msg_file" > "$msg_file.tmp" && mv "$msg_file.tmp" "$msg_file"
