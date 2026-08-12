@@ -62,6 +62,50 @@ def test_concurrent_claims_are_disjoint(session: Session, migrated: sa.Engine) -
     assert len(results[0]) + len(results[1]) == 10
 
 
+def test_a_locked_row_does_not_block_another_worker(session: Session, migrated: sa.Engine) -> None:
+    """AC2, the half disjointness does not cover.
+
+    Plain ``FOR UPDATE`` also hands out disjoint sets — it gets there by making the second
+    worker wait for the first. Skipping rather than waiting is the property SKIP LOCKED
+    actually buys, and only this test fails when it is lost.
+
+    ``lock_timeout`` is what turns "blocked" into a failure instead of a hung suite. It is
+    set ``LOCAL``, so the commit inside ``claim()`` reverts it and the pooled connection
+    does not carry it into the next test.
+    """
+    source = make_source(session)
+    now = dt.datetime.now(dt.UTC)
+    held = make_work(
+        session,
+        stage=Stage.CLASSIFY,
+        article=make_article(session, source, guid="a"),
+        next_attempt_at=now - dt.timedelta(minutes=2),
+    )
+    free = make_work(
+        session,
+        stage=Stage.CLASSIFY,
+        article=make_article(session, source, guid="b"),
+        next_attempt_at=now - dt.timedelta(minutes=1),
+    )
+    session.commit()
+
+    holder = migrated.connect()
+    try:
+        # Ordered oldest-first, so this is the row a claimer reaches before any other.
+        holder.execute(
+            sa.text("SELECT work_id FROM pipeline_work WHERE work_id = :id FOR UPDATE"),
+            {"id": held.work_id},
+        )
+        with Session(migrated, expire_on_commit=False) as db:
+            db.execute(sa.text("SET LOCAL lock_timeout = '1s'"))
+            claimed = claim(db, stage=Stage.CLASSIFY, worker="w1", lease=LEASE, limit=2)
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert [row.work_id for row in claimed] == [free.work_id]
+
+
 def test_claim_refuses_a_session_that_expires_on_commit(migrated: sa.Engine) -> None:
     """claim() commits, so such a session would hand back rows that are already expired."""
     with Session(migrated) as db, pytest.raises(ValueError, match="expire_on_commit"):
