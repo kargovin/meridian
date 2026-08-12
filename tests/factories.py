@@ -1,0 +1,112 @@
+"""Minimal builders for the schema tests. Only the columns a test needs to vary are arguments."""
+
+import datetime as dt
+import hashlib
+from typing import Any
+
+from meridian_contract import (
+    AcquisitionTier,
+    DiscoveryMethod,
+    PipelineState,
+    RightsLevel,
+    Stage,
+)
+from sqlalchemy.orm import Session
+
+from meridian.db.models import (
+    AlternateCopy,
+    CanonicalRecord,
+    Cluster,
+    PipelineWork,
+    Source,
+)
+
+
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def make_source(session: Session, name: str = "Example News", **kw: Any) -> Source:
+    source = Source(
+        name=name,
+        home_url=f"https://{name.lower().replace(' ', '')}.example",
+        discovery_method=DiscoveryMethod.RSS,
+        acquisition_tier=AcquisitionTier.FULL_FEED,
+        rights_level=RightsLevel.BODY_TEXT,
+        jurisdiction="GB",
+        rate_limit_per_min=30,
+        **kw,
+    )
+    session.add(source)
+    session.flush()
+    return source
+
+
+def make_article(
+    session: Session,
+    source: Source,
+    *,
+    guid: str = "guid-1",
+    url: str | None = None,
+    state: PipelineState = PipelineState.DISCOVERED,
+    **kw: Any,
+) -> CanonicalRecord:
+    article = CanonicalRecord(
+        source_id=source.source_id,
+        guid=guid,
+        url_canonical=url or f"https://example.test/{guid}",
+        title=f"Headline {guid}",
+        first_seen_at=dt.datetime.now(dt.UTC),
+        pipeline_state=state,
+        **kw,
+    )
+    session.add(article)
+    session.flush()
+    return article
+
+
+def make_alternate_copy(
+    session: Session,
+    article: CanonicalRecord,
+    source: Source,
+    *,
+    guid: str | None = "alt-1",
+    url: str = "https://other.test/alt-1",
+) -> AlternateCopy:
+    copy = AlternateCopy(
+        article_id=article.article_id,
+        source_id=source.source_id,
+        guid=guid,
+        url=url,
+        seen_at=dt.datetime.now(dt.UTC),
+    )
+    session.add(copy)
+    session.flush()
+    return copy
+
+
+def make_cluster(session: Session, **kw: Any) -> Cluster:
+    cluster = Cluster(**kw)
+    session.add(cluster)
+    session.flush()
+    return cluster
+
+
+def make_work(
+    session: Session,
+    *,
+    stage: Stage,
+    article: CanonicalRecord | None = None,
+    cluster: Cluster | None = None,
+    **kw: Any,
+) -> PipelineWork:
+    work = PipelineWork(
+        stage=stage,
+        article_id=article.article_id if article else None,
+        cluster_id=cluster.cluster_id if cluster else None,
+        next_attempt_at=kw.pop("next_attempt_at", dt.datetime.now(dt.UTC)),
+        **kw,
+    )
+    session.add(work)
+    session.flush()
+    return work

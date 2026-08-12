@@ -1,0 +1,77 @@
+"""Test fixtures.
+
+Everything here runs against a real PostgreSQL in a database of its own (``<db>_test``),
+created on demand and migrated with Alembic rather than ``metadata.create_all`` — the
+migration is part of what is under test.
+"""
+
+import os
+from collections.abc import Iterator
+
+import pytest
+import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
+from meridian_config import load as load_settings
+from sqlalchemy.orm import Session
+
+from meridian.db.models import Base
+
+
+@pytest.fixture(scope="session")
+def alembic_config() -> Config:
+    return Config("alembic.ini")
+
+
+@pytest.fixture(scope="session")
+def engine() -> Iterator[sa.Engine]:
+    """An engine on a dedicated test database, created if it does not exist."""
+    url = sa.engine.make_url(str(load_settings().database_url))
+    test_url = url.set(database=f"{url.database}_test")
+
+    admin = sa.create_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            exists = conn.execute(
+                sa.text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": test_url.database},
+            ).scalar()
+            if not exists:
+                conn.execute(sa.text(f'CREATE DATABASE "{test_url.database}"'))
+    except sa.exc.OperationalError as exc:
+        target = url.render_as_string(hide_password=True)
+        # Skipping is a convenience for a laptop with no database running. In CI it would
+        # turn every acceptance criterion into a silent no-op and still exit 0.
+        if os.environ.get("CI"):
+            pytest.fail(f"no PostgreSQL at {target}: {exc}", pytrace=False)
+        pytest.skip(f"no PostgreSQL at {target}: {exc}")
+    finally:
+        admin.dispose()
+
+    eng = sa.create_engine(test_url)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def migrated(engine: sa.Engine, alembic_config: Config) -> Iterator[sa.Engine]:
+    """The test database at head, rebuilt from scratch once per session."""
+    with engine.begin() as conn:
+        alembic_config.attributes["connection"] = conn
+        command.downgrade(alembic_config, "base")
+        command.upgrade(alembic_config, "head")
+    yield engine
+
+
+@pytest.fixture
+def session(migrated: sa.Engine) -> Iterator[Session]:
+    """A session over empty tables.
+
+    Truncates rather than rolling back: the claim path commits, so a wrapping transaction
+    would not survive the code under test.
+    """
+    tables = ", ".join(f'"{name}"' for name in Base.metadata.tables)
+    with Session(migrated, expire_on_commit=False) as db:
+        db.execute(sa.text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+        db.commit()
+        yield db
