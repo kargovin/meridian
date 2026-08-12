@@ -1,8 +1,8 @@
 """canonical data model
 
-Revision ID: 4d871da93cd1
+Revision ID: 1451971dd5f4
 Revises:
-Create Date: 2026-08-12 08:17:18.000678
+Create Date: 2026-08-12 15:02:35.047454
 
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "4d871da93cd1"
+revision: str = "1451971dd5f4"
 down_revision: str | Sequence[str] | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -128,12 +128,12 @@ def upgrade() -> None:
         sa.Column("generated_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("input_fingerprint", sa.String(length=64), nullable=True),
         sa.CheckConstraint(
-            "(withheld IS FALSE AND withhold_reason = 'none') OR (withheld IS TRUE AND withhold_reason <> 'none')",
-            name=op.f("ck_summary_withheld_matches_reason"),
-        ),
-        sa.CheckConstraint(
             "withhold_reason IN ('none', 'below_faithfulness_bar', 'rights_excluded', 'insufficient_sources')",
             name=op.f("ck_summary_withhold_reason"),
+        ),
+        sa.CheckConstraint(
+            "(withheld IS FALSE AND withhold_reason = 'none') OR (withheld IS TRUE AND withhold_reason <> 'none' AND \"text\" IS NULL)",
+            name=op.f("ck_summary_withheld_matches_reason"),
         ),
         sa.ForeignKeyConstraint(
             ["cluster_id"],

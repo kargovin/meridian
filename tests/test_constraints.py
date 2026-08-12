@@ -102,6 +102,21 @@ def test_withheld_summary_must_carry_a_reason(session: Session) -> None:
         session.commit()
 
 
+def test_a_withheld_summary_cannot_keep_its_text(session: Session) -> None:
+    """Otherwise a rights-excluded summary still carries the body it was excluded for."""
+    cluster = make_cluster(session)
+    with pytest.raises(sa.exc.IntegrityError):
+        session.add(
+            Summary(
+                cluster_id=cluster.cluster_id,
+                withheld=True,
+                withhold_reason=WithholdReason.RIGHTS_EXCLUDED,
+                text="the full article body",
+            )
+        )
+        session.commit()
+
+
 def test_work_has_exactly_one_subject(session: Session) -> None:
     source = make_source(session)
     article = make_article(session, source, guid="a")

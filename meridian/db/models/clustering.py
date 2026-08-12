@@ -71,11 +71,12 @@ class Summary(Base):
 
     __tablename__ = "summary"
     __table_args__ = (
-        # The flag and the reason must agree, or the read model renders "no summary" with
-        # nothing to say about why.
+        # The flag, the reason and the text must agree. Without the reason the read model
+        # renders "no summary" with nothing to say about why; without the NULL text a
+        # rights-excluded summary still carries the body it was excluded for.
         sa.CheckConstraint(
             "(withheld IS FALSE AND withhold_reason = 'none')"
-            " OR (withheld IS TRUE AND withhold_reason <> 'none')",
+            " OR (withheld IS TRUE AND withhold_reason <> 'none' AND \"text\" IS NULL)",
             name="withheld_matches_reason",
         ),
         enum_check("withhold_reason", WithholdReason),
@@ -85,7 +86,7 @@ class Summary(Base):
         sa.ForeignKey("cluster.cluster_id", ondelete="CASCADE"), primary_key=True
     )
 
-    #: NULL whenever withheld.
+    #: NULL whenever withheld — enforced by the CHECK above.
     text: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     faithfulness_score: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
 
