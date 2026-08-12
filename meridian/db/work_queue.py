@@ -33,7 +33,15 @@ def claim(
 
     A row whose claim is older than ``lease`` is treated as unclaimed and taken again, so a
     worker that dies mid-stage does not strand its row.
+
+    The session must not expire on commit — see ``session_factory``.
     """
+    if session.expire_on_commit:
+        raise ValueError(
+            "claim() commits, so a session with expire_on_commit=True hands back rows that "
+            "are already expired; the first attribute access re-queries and raises once the "
+            "row is deleted. Build sessions with meridian.db.session.session_factory()."
+        )
     now = now or dt.datetime.now(dt.UTC)
     due = (
         sa.select(PipelineWork.work_id)

@@ -62,6 +62,12 @@ def test_concurrent_claims_are_disjoint(session: Session, migrated: sa.Engine) -
     assert len(results[0]) + len(results[1]) == 10
 
 
+def test_claim_refuses_a_session_that_expires_on_commit(migrated: sa.Engine) -> None:
+    """claim() commits, so such a session would hand back rows that are already expired."""
+    with Session(migrated) as db, pytest.raises(ValueError, match="expire_on_commit"):
+        claim(db, stage=Stage.CLASSIFY, worker="w1", lease=LEASE)
+
+
 def test_other_stages_are_left_alone(session: Session) -> None:
     source = make_source(session)
     article = make_article(session, source, guid="a")

@@ -29,14 +29,18 @@ class StrEnumType(sa.types.TypeDecorator[E]):
     cache_ok = True
 
     def __init__(self, enum_cls: type[E]) -> None:
-        self._enum_cls = enum_cls
+        # The attribute must be named for the constructor parameter and must not start with
+        # an underscore: SQLAlchemy builds the statement-cache key from __init__'s parameter
+        # names looked up in __dict__, skipping private ones. Rename it and every
+        # StrEnumType shares one cache entry, so a cached statement binds the wrong enum.
+        self.enum_cls = enum_cls
         super().__init__(length=max(len(member.value) for member in enum_cls))
 
     def process_bind_param(self, value: E | str | None, dialect: Any) -> str | None:
-        return None if value is None else self._enum_cls(value).value
+        return None if value is None else self.enum_cls(value).value
 
     def process_result_value(self, value: str | None, dialect: Any) -> E | None:
-        return None if value is None else self._enum_cls(value)
+        return None if value is None else self.enum_cls(value)
 
 
 def enum_check(column: str, enum_cls: type[StrEnum], name: str | None = None) -> sa.CheckConstraint:
