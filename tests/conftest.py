@@ -5,6 +5,7 @@ created on demand and migrated with Alembic rather than ``metadata.create_all`` 
 migration is part of what is under test.
 """
 
+import os
 from collections.abc import Iterator
 
 import pytest
@@ -38,7 +39,12 @@ def engine() -> Iterator[sa.Engine]:
             if not exists:
                 conn.execute(sa.text(f'CREATE DATABASE "{test_url.database}"'))
     except sa.exc.OperationalError as exc:
-        pytest.skip(f"no PostgreSQL at {url.render_as_string(hide_password=True)}: {exc}")
+        target = url.render_as_string(hide_password=True)
+        # Skipping is a convenience for a laptop with no database running. In CI it would
+        # turn every acceptance criterion into a silent no-op and still exit 0.
+        if os.environ.get("CI"):
+            pytest.fail(f"no PostgreSQL at {target}: {exc}", pytrace=False)
+        pytest.skip(f"no PostgreSQL at {target}: {exc}")
     finally:
         admin.dispose()
 
