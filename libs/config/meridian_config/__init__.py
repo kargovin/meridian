@@ -28,4 +28,13 @@ class Settings(BaseSettings):
     work_lease_seconds: int = Field(default=300, gt=0)
 
 
-__all__ = ["Settings"]
+def load() -> Settings:
+    """Read settings from the environment.
+
+    Use this rather than ``Settings()``: type checkers see the required fields and not the
+    environment that supplies them.
+    """
+    return Settings()  # type: ignore[call-arg]
+
+
+__all__ = ["Settings", "load"]

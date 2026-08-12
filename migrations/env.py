@@ -8,7 +8,7 @@ from logging.config import fileConfig
 
 import sqlalchemy as sa
 from alembic import context
-from meridian_config import Settings
+from meridian_config import load as load_settings
 from sqlalchemy import pool
 
 from meridian.db.models import Base
@@ -19,7 +19,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-settings = Settings()
+settings = load_settings()
 
 target_metadata = Base.metadata
 
@@ -58,6 +58,15 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    # A caller (the test suite) may supply its own connection so migrations run against a
+    # database of its choosing rather than MERIDIAN_DATABASE_URL.
+    supplied = config.attributes.get("connection")
+    if supplied is not None:
+        context.configure(connection=supplied, target_metadata=target_metadata, **COMPARE_OPTS)
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     engine = sa.create_engine(str(settings.database_url), poolclass=pool.NullPool)
     with engine.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata, **COMPARE_OPTS)
