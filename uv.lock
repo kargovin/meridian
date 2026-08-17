@@ -371,17 +371,25 @@ name = "meridian-platform"
 version = "0.1.0"
 source = { editable = "platform" }
 dependencies = [
+    { name = "alembic" },
     { name = "fastapi" },
     { name = "meridian-config" },
     { name = "meridian-contract" },
+    { name = "meridian-dbkit" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.13" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "meridian-config", editable = "libs/config" },
     { name = "meridian-contract", editable = "libs/contract" },
+    { name = "meridian-dbkit", editable = "libs/dbkit" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "sqlalchemy", specifier = ">=2.0.30" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 

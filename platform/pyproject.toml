@@ -9,6 +9,10 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "meridian-config",
     "meridian-contract",
+    "meridian-dbkit",
+    "sqlalchemy>=2.0.30",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
 ]
@@ -16,6 +20,7 @@ dependencies = [
 [tool.uv.sources]
 meridian-config = { workspace = true }
 meridian-contract = { workspace = true }
+meridian-dbkit = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

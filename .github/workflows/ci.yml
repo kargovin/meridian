@@ -28,6 +28,7 @@ jobs:
 
     env:
       MERIDIAN_DATABASE_URL: postgresql+psycopg://meridian:meridian@localhost:5432/meridian
+      MERIDIAN_PLATFORM_DATABASE_URL: postgresql+psycopg://platform:platform@localhost:5432/platform
 
     steps:
       - uses: actions/checkout@v4

@@ -12,7 +12,9 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
-from meridian_config import load_app
+from meridian_config import load_app, load_platform
+from meridian_platform.bootstrap import ensure_platform_database
+from meridian_platform.db import Base as PlatformBase
 from sqlalchemy.orm import Session
 
 from meridian.db.models import Base
@@ -72,6 +74,56 @@ def session(migrated: sa.Engine) -> Iterator[Session]:
     """
     tables = ", ".join(f'"{name}"' for name in Base.metadata.tables)
     with Session(migrated, expire_on_commit=False) as db:
+        db.execute(sa.text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+        db.commit()
+        yield db
+
+
+@pytest.fixture(scope="session")
+def platform_alembic_config() -> Config:
+    return Config("platform/alembic.ini")
+
+
+@pytest.fixture(scope="session")
+def platform_engine(engine: sa.Engine) -> Iterator[sa.Engine]:
+    """An engine on the Platform's test database, reached with the Platform's own role.
+
+    Depends on ``engine`` so the application's test database exists before this provisioning
+    revokes the default PUBLIC CONNECT grant on it.
+    """
+    app_url = sa.engine.make_url(str(load_app().database_url))
+    platform_url = sa.engine.make_url(str(load_platform().database_url))
+    test_url = platform_url.set(database=f"{platform_url.database}_test")
+
+    ensure_platform_database(
+        admin_url=app_url,
+        database=str(test_url.database),
+        role=str(test_url.username),
+        password=str(test_url.password),
+        protect_database=f"{app_url.database}_test",
+    )
+
+    eng = sa.create_engine(test_url)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def platform_migrated(
+    platform_engine: sa.Engine, platform_alembic_config: Config
+) -> Iterator[sa.Engine]:
+    """The Platform's test database at head, migrated by the Platform's own tree."""
+    with platform_engine.begin() as conn:
+        platform_alembic_config.attributes["connection"] = conn
+        command.downgrade(platform_alembic_config, "base")
+        command.upgrade(platform_alembic_config, "head")
+    yield platform_engine
+
+
+@pytest.fixture
+def platform_session(platform_migrated: sa.Engine) -> Iterator[Session]:
+    tables = ", ".join(f'"{name}"' for name in PlatformBase.metadata.tables)
+    with Session(platform_migrated, expire_on_commit=False) as db:
         db.execute(sa.text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
         db.commit()
         yield db
