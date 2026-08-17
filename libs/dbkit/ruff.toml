@@ -1,0 +1,18 @@
+# Applies to this package only, on top of the root configuration.
+#
+# `extend` is not optional: a nested config file REPLACES the root one for the files beneath
+# it, so without this line every rule the repository runs is silently switched off here.
+extend = "../../pyproject.toml"
+
+[lint]
+# banned-api below is inert unless TID is selected — present, plausible, and reporting
+# nothing.
+extend-select = ["TID"]
+
+[lint.flake8-tidy-imports.banned-api]
+# Both deployables import this package, so anything declarative here would put their tables
+# in one MetaData; each Alembic tree's autogenerate would then see the other's tables as
+# missing from its database and propose creating them. TypeDecorator and CheckConstraint are
+# in sqlalchemy core, DeclarativeBase is not, so banning the orm import makes that
+# unwritable rather than merely discouraged.
+"sqlalchemy.orm".msg = "meridian_dbkit must not import the ORM: a shared Base merges both deployables' metadata. Declare a Base in the deployable instead."

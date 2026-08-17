@@ -2,10 +2,10 @@
 
 import sqlalchemy as sa
 from meridian_contract import FallbackReason
+from meridian_dbkit import StrEnumType, enum_check
 from sqlalchemy.orm import Mapped, mapped_column
 
 from meridian.db.base import Base
-from meridian.db.types import StrEnumType, enum_check
 
 
 class Classification(Base):

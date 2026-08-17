@@ -4,10 +4,10 @@ import datetime as dt
 
 import sqlalchemy as sa
 from meridian_contract import TakedownScope
+from meridian_dbkit import Sha256, StrEnumType, TZDateTime, enum_check
 from sqlalchemy.orm import Mapped, mapped_column
 
 from meridian.db.base import Base
-from meridian.db.types import Sha256, StrEnumType, TZDateTime, enum_check
 
 
 class Takedown(Base):
