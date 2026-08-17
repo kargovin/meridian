@@ -9,10 +9,10 @@ from logging.config import fileConfig
 import sqlalchemy as sa
 from alembic import context
 from meridian_config import load as load_settings
+from meridian_dbkit import StrEnumType
 from sqlalchemy import pool
 
 from meridian.db.models import Base
-from meridian.db.types import StrEnumType
 
 config = context.config
 

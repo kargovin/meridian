@@ -4,10 +4,10 @@ import datetime as dt
 
 import sqlalchemy as sa
 from meridian_contract import Stage
+from meridian_dbkit import StrEnumType, TZDateTime, enum_check
 from sqlalchemy.orm import Mapped, mapped_column
 
 from meridian.db.base import Base
-from meridian.db.types import StrEnumType, TZDateTime, enum_check
 
 
 class PipelineWork(Base):

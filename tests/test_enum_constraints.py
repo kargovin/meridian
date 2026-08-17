@@ -11,10 +11,10 @@ from enum import StrEnum
 
 import pytest
 import sqlalchemy as sa
+from meridian_dbkit import StrEnumType
 from sqlalchemy.orm import Session
 
 from meridian.db.models import Base
-from meridian.db.types import StrEnumType
 
 pytestmark = pytest.mark.postgres
 

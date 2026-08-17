@@ -1,18 +1,32 @@
-"""Column helpers shared across the models."""
+"""Column types and constraint conventions shared by both deployables' schemas.
+
+There is deliberately no declarative base here. Each deployable declares its own, so that
+its Alembic tree sees only its own tables; a shared MetaData would collect both deployables'
+tables into one object and each tree would propose creating the other's. The banned-import
+rule in this package's ruff.toml is what keeps that unwritable.
+"""
 
 from enum import StrEnum
 from typing import Any, TypeVar
 
 import sqlalchemy as sa
 
+#: Applied to a deployable's MetaData. Without it Alembic autogenerates server-assigned
+#: names for CHECK and UNIQUE constraints, and a later migration cannot drop by name what it
+#: did not name.
+NAMING_CONVENTION = {
+    "ix": "ix_%(table_name)s_%(column_0_N_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
 #: sha256 hex digest.
 Sha256 = sa.String(64)
 
 #: Timestamps are always timezone-aware.
 TZDateTime = sa.DateTime(timezone=True)
-
-_UINT64_SIGN_BIT = 1 << 63
-_UINT64_RANGE = 1 << 64
 
 E = TypeVar("E", bound=StrEnum)
 
@@ -52,18 +66,10 @@ def enum_check(column: str, enum_cls: type[StrEnum], name: str | None = None) ->
     return sa.CheckConstraint(f"{column} IN ({values})", name=name or column)
 
 
-def simhash_to_db(value: int) -> int:
-    """Map an unsigned 64-bit SimHash onto the signed ``bigint`` the column stores.
-
-    Values above 2^63 do not fit a signed column; the bit pattern is preserved, so equality
-    and popcount are unaffected. Numeric ordering of stored values is meaningless — never
-    sort or range-query on this column.
-    """
-    if not 0 <= value < _UINT64_RANGE:
-        raise ValueError(f"simhash out of uint64 range: {value}")
-    return value - _UINT64_RANGE if value >= _UINT64_SIGN_BIT else value
-
-
-def simhash_from_db(value: int) -> int:
-    """Inverse of :func:`simhash_to_db`."""
-    return value + _UINT64_RANGE if value < 0 else value
+__all__ = [
+    "NAMING_CONVENTION",
+    "Sha256",
+    "StrEnumType",
+    "TZDateTime",
+    "enum_check",
+]

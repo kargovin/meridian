@@ -7,6 +7,7 @@ members = [
     "meridian",
     "meridian-config",
     "meridian-contract",
+    "meridian-dbkit",
 ]
 
 [[package]]
@@ -174,6 +175,7 @@ dependencies = [
     { name = "alembic" },
     { name = "meridian-config" },
     { name = "meridian-contract" },
+    { name = "meridian-dbkit" },
     { name = "psycopg", extra = ["binary"] },
     { name = "sqlalchemy" },
 ]
@@ -190,6 +192,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "meridian-config", editable = "libs/config" },
     { name = "meridian-contract", editable = "libs/contract" },
+    { name = "meridian-dbkit", editable = "libs/dbkit" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "sqlalchemy", specifier = ">=2.0.30" },
 ]
@@ -220,6 +223,17 @@ requires-dist = [
 name = "meridian-contract"
 version = "0.1.0"
 source = { editable = "libs/contract" }
+
+[[package]]
+name = "meridian-dbkit"
+version = "0.1.0"
+source = { editable = "libs/dbkit" }
+dependencies = [
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "sqlalchemy", specifier = ">=2.0.30" }]
 
 [[package]]
 name = "mypy"
