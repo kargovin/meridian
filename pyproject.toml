@@ -17,10 +17,13 @@ dev = [
     "pytest>=8.2",
     "ruff>=0.6",
     "mypy>=1.11",
+    "httpx2>=2.10",
 ]
 
 [tool.uv.workspace]
-members = ["libs/contract", "libs/config", "libs/dbkit"]
+# `platform` is a member but deliberately NOT a dependency: the application must not depend
+# on the Platform. Install everything with `uv sync --all-packages`.
+members = ["libs/contract", "libs/config", "libs/dbkit", "platform"]
 
 [tool.uv.sources]
 meridian-contract = { workspace = true }
@@ -59,7 +62,13 @@ no_implicit_optional = true
 
 # A2's seams are "typed interfaces, no shared mutable state" — strict where that claim lives.
 [[tool.mypy.overrides]]
-module = ["meridian.db.*", "meridian_contract.*", "meridian_config.*", "meridian_dbkit.*"]
+module = [
+    "meridian.db.*",
+    "meridian_contract.*",
+    "meridian_config.*",
+    "meridian_dbkit.*",
+    "meridian_platform.*",
+]
 strict = true
 
 [tool.pytest.ini_options]

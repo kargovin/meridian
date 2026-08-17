@@ -1,0 +1,19 @@
+# Applies to this package only, on top of the root configuration.
+#
+# `extend` is not optional: a nested config file REPLACES the root one for the files beneath
+# it, so without this line every rule the repository runs is silently switched off here.
+extend = "../pyproject.toml"
+
+[lint]
+# banned-api below is inert unless TID is selected — present, plausible, and reporting
+# nothing.
+extend-select = ["TID"]
+
+[lint.flake8-tidy-imports.banned-api]
+# This service holds no domain data and must not reach the application's (RFC A1). Matching
+# is on dotted path components, so `meridian_config`, `meridian_contract` and
+# `meridian_dbkit` are unaffected.
+#
+# This catches static imports only. A dynamic importlib call is invisible to it, which is
+# why tests/test_platform_boundary.py exists as well.
+"meridian".msg = "the Platform must not import the application. Shared code belongs in libs/."
