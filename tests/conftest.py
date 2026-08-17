@@ -12,7 +12,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
-from meridian_config import load as load_settings
+from meridian_config import load_app
 from sqlalchemy.orm import Session
 
 from meridian.db.models import Base
@@ -26,7 +26,7 @@ def alembic_config() -> Config:
 @pytest.fixture(scope="session")
 def engine() -> Iterator[sa.Engine]:
     """An engine on a dedicated test database, created if it does not exist."""
-    url = sa.engine.make_url(str(load_settings().database_url))
+    url = sa.engine.make_url(str(load_app().database_url))
     test_url = url.set(database=f"{url.database}_test")
 
     admin = sa.create_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")

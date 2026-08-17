@@ -8,7 +8,7 @@ from logging.config import fileConfig
 
 import sqlalchemy as sa
 from alembic import context
-from meridian_config import load as load_settings
+from meridian_config import load_app
 from meridian_dbkit import StrEnumType
 from sqlalchemy import pool
 
@@ -19,7 +19,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-settings = load_settings()
+settings = load_app()
 
 target_metadata = Base.metadata
 
