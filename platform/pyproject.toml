@@ -8,12 +8,14 @@ description = "The Summarization & Classification Platform — a stateless class
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "meridian-config",
+    "meridian-contract",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
 ]
 
 [tool.uv.sources]
 meridian-config = { workspace = true }
+meridian-contract = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

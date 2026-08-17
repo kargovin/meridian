@@ -6,6 +6,9 @@ Run with ``uvicorn meridian_platform.main:create_app --factory``.
 from fastapi import FastAPI
 from meridian_config import PlatformSettings, load_platform
 
+from meridian_platform.errors import register_error_handlers
+from meridian_platform.routes import router
+
 
 def create_app(settings: PlatformSettings | None = None) -> FastAPI:
     """Build the service.
@@ -18,8 +21,10 @@ def create_app(settings: PlatformSettings | None = None) -> FastAPI:
     """
     settings = settings or load_platform()
 
-    app = FastAPI(title="Summarization & Classification Platform")
+    app = FastAPI(title="Summarization & Classification Platform", version="1")
     app.state.settings = settings
+    register_error_handlers(app)
+    app.include_router(router)
 
     @app.get("/health", include_in_schema=False)
     def health() -> dict[str, str]:

@@ -348,6 +348,12 @@ requires-dist = [
 name = "meridian-contract"
 version = "0.1.0"
 source = { editable = "libs/contract" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.8" }]
 
 [[package]]
 name = "meridian-dbkit"
@@ -367,6 +373,7 @@ source = { editable = "platform" }
 dependencies = [
     { name = "fastapi" },
     { name = "meridian-config" },
+    { name = "meridian-contract" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -374,6 +381,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "meridian-config", editable = "libs/config" },
+    { name = "meridian-contract", editable = "libs/contract" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 
