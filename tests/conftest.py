@@ -21,12 +21,12 @@ from meridian.db.models import Base
 
 
 @pytest.fixture(scope="session")
-def alembic_config() -> Config:
+def app_alembic_config() -> Config:
     return Config("alembic.ini")
 
 
 @pytest.fixture(scope="session")
-def engine() -> Iterator[sa.Engine]:
+def app_engine() -> Iterator[sa.Engine]:
     """An engine on a dedicated test database, created if it does not exist."""
     url = sa.engine.make_url(str(load_app().database_url))
     test_url = url.set(database=f"{url.database}_test")
@@ -56,24 +56,24 @@ def engine() -> Iterator[sa.Engine]:
 
 
 @pytest.fixture(scope="session")
-def migrated(engine: sa.Engine, alembic_config: Config) -> Iterator[sa.Engine]:
+def app_migrated(app_engine: sa.Engine, app_alembic_config: Config) -> Iterator[sa.Engine]:
     """The test database at head, rebuilt from scratch once per session."""
-    with engine.begin() as conn:
-        alembic_config.attributes["connection"] = conn
-        command.downgrade(alembic_config, "base")
-        command.upgrade(alembic_config, "head")
-    yield engine
+    with app_engine.begin() as conn:
+        app_alembic_config.attributes["connection"] = conn
+        command.downgrade(app_alembic_config, "base")
+        command.upgrade(app_alembic_config, "head")
+    yield app_engine
 
 
 @pytest.fixture
-def session(migrated: sa.Engine) -> Iterator[Session]:
+def app_session(app_migrated: sa.Engine) -> Iterator[Session]:
     """A session over empty tables.
 
     Truncates rather than rolling back: the claim path commits, so a wrapping transaction
     would not survive the code under test.
     """
     tables = ", ".join(f'"{name}"' for name in Base.metadata.tables)
-    with Session(migrated, expire_on_commit=False) as db:
+    with Session(app_migrated, expire_on_commit=False) as db:
         db.execute(sa.text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
         db.commit()
         yield db
@@ -85,10 +85,10 @@ def platform_alembic_config() -> Config:
 
 
 @pytest.fixture(scope="session")
-def platform_engine(engine: sa.Engine) -> Iterator[sa.Engine]:
+def platform_engine(app_engine: sa.Engine) -> Iterator[sa.Engine]:
     """An engine on the Platform's test database, reached with the Platform's own role.
 
-    Depends on ``engine`` so the application's test database exists before this provisioning
+    Depends on ``app_engine`` so the application's test database exists before this provisioning
     revokes the default PUBLIC CONNECT grant on it.
     """
     app_url = sa.engine.make_url(str(load_app().database_url))

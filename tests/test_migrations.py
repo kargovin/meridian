@@ -10,23 +10,23 @@ from meridian.db.models import Base
 pytestmark = pytest.mark.postgres
 
 
-def test_models_and_migration_agree(migrated: sa.Engine, alembic_config: Config) -> None:
+def test_models_and_migration_agree(app_migrated: sa.Engine, app_alembic_config: Config) -> None:
     """AC1. Autogenerate against a migrated database must find nothing to do.
 
     Without this a hand-edited migration drifts from the models and the next autogenerate
     silently emits someone else's half-finished change.
     """
-    with migrated.begin() as conn:
-        alembic_config.attributes["connection"] = conn
-        command.check(alembic_config)
+    with app_migrated.begin() as conn:
+        app_alembic_config.attributes["connection"] = conn
+        command.check(app_alembic_config)
 
 
-def test_downgrade_leaves_no_residue(migrated: sa.Engine, alembic_config: Config) -> None:
+def test_downgrade_leaves_no_residue(app_migrated: sa.Engine, app_alembic_config: Config) -> None:
     """AC5. up -> down -> up, with nothing of ours left behind in between."""
-    with migrated.begin() as conn:
-        alembic_config.attributes["connection"] = conn
+    with app_migrated.begin() as conn:
+        app_alembic_config.attributes["connection"] = conn
         try:
-            command.downgrade(alembic_config, "base")
+            command.downgrade(app_alembic_config, "base")
             remaining = set(
                 conn.execute(
                     sa.text(
@@ -37,17 +37,17 @@ def test_downgrade_leaves_no_residue(migrated: sa.Engine, alembic_config: Config
             )
             assert remaining <= {"alembic_version"}
         finally:
-            command.upgrade(alembic_config, "head")
+            command.upgrade(app_alembic_config, "head")
 
 
-def test_every_entity_has_a_table(migrated: sa.Engine) -> None:
-    inspector = sa.inspect(migrated)
+def test_every_entity_has_a_table(app_migrated: sa.Engine) -> None:
+    inspector = sa.inspect(app_migrated)
     assert set(Base.metadata.tables) <= set(inspector.get_table_names())
 
 
-def test_constraints_follow_the_naming_convention(migrated: sa.Engine) -> None:
+def test_constraints_follow_the_naming_convention(app_migrated: sa.Engine) -> None:
     """A server-assigned name cannot be dropped by name in a later migration."""
-    with migrated.connect() as conn:
+    with app_migrated.connect() as conn:
         names = set(
             conn.execute(
                 sa.text(

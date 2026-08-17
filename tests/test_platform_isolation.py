@@ -21,17 +21,17 @@ def test_the_platform_role_reaches_its_own_database(platform_migrated: sa.Engine
 
 
 def test_the_platform_role_cannot_reach_the_application_database(
-    platform_migrated: sa.Engine, migrated: sa.Engine
+    platform_migrated: sa.Engine, app_migrated: sa.Engine
 ) -> None:
     app_database = sa.engine.make_url(str(load_app().database_url)).database
     trespass = platform_migrated.url.set(database=f"{app_database}_test")
 
-    engine = sa.create_engine(trespass)
+    trespasser = sa.create_engine(trespass)
     try:
         with pytest.raises(sa.exc.OperationalError) as caught:
-            engine.connect()
+            trespasser.connect()
     finally:
-        engine.dispose()
+        trespasser.dispose()
 
     assert "permission denied for database" in str(caught.value)
 

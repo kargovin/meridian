@@ -26,7 +26,7 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def make_source(session: Session, name: str = "Example News", **kw: Any) -> Source:
+def make_source(app_session: Session, name: str = "Example News", **kw: Any) -> Source:
     source = Source(
         name=name,
         home_url=f"https://{name.lower().replace(' ', '')}.example",
@@ -37,13 +37,13 @@ def make_source(session: Session, name: str = "Example News", **kw: Any) -> Sour
         rate_limit_per_min=30,
         **kw,
     )
-    session.add(source)
-    session.flush()
+    app_session.add(source)
+    app_session.flush()
     return source
 
 
 def make_article(
-    session: Session,
+    app_session: Session,
     source: Source,
     *,
     guid: str = "guid-1",
@@ -60,13 +60,13 @@ def make_article(
         pipeline_state=state,
         **kw,
     )
-    session.add(article)
-    session.flush()
+    app_session.add(article)
+    app_session.flush()
     return article
 
 
 def make_alternate_copy(
-    session: Session,
+    app_session: Session,
     article: CanonicalRecord,
     source: Source,
     *,
@@ -80,20 +80,20 @@ def make_alternate_copy(
         url=url,
         seen_at=dt.datetime.now(dt.UTC),
     )
-    session.add(copy)
-    session.flush()
+    app_session.add(copy)
+    app_session.flush()
     return copy
 
 
-def make_cluster(session: Session, **kw: Any) -> Cluster:
+def make_cluster(app_session: Session, **kw: Any) -> Cluster:
     cluster = Cluster(**kw)
-    session.add(cluster)
-    session.flush()
+    app_session.add(cluster)
+    app_session.flush()
     return cluster
 
 
 def make_work(
-    session: Session,
+    app_session: Session,
     *,
     stage: Stage,
     article: CanonicalRecord | None = None,
@@ -107,6 +107,6 @@ def make_work(
         next_attempt_at=kw.pop("next_attempt_at", dt.datetime.now(dt.UTC)),
         **kw,
     )
-    session.add(work)
-    session.flush()
+    app_session.add(work)
+    app_session.flush()
     return work

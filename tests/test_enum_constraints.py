@@ -39,10 +39,10 @@ def test_there_are_enum_columns_to_check() -> None:
     ids=[f"{table}.{column}" for table, column, _ in ENUM_COLUMNS],
 )
 def test_check_holds_exactly_the_enum_values(
-    migrated: sa.Engine, table: str, column: str, enum_cls: type[StrEnum]
+    app_migrated: sa.Engine, table: str, column: str, enum_cls: type[StrEnum]
 ) -> None:
     name = f"ck_{table}_{column}"
-    with migrated.connect() as conn:
+    with app_migrated.connect() as conn:
         definition = conn.execute(
             sa.text(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
@@ -55,8 +55,8 @@ def test_check_holds_exactly_the_enum_values(
     assert set(_LITERAL.findall(definition)) == {member.value for member in enum_cls}
 
 
-def test_the_database_rejects_an_unknown_value(session: Session) -> None:
+def test_the_database_rejects_an_unknown_value(app_session: Session) -> None:
     """The last line of defence, and the only one that survives raw SQL."""
     with pytest.raises(sa.exc.IntegrityError):
-        session.execute(sa.text("INSERT INTO cluster (window_status) VALUES ('bogus')"))
-        session.commit()
+        app_session.execute(sa.text("INSERT INTO cluster (window_status) VALUES ('bogus')"))
+        app_session.commit()

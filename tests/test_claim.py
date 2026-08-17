@@ -20,32 +20,32 @@ pytestmark = pytest.mark.postgres
 LEASE = dt.timedelta(minutes=5)
 
 
-def test_claim_marks_the_row(session: Session) -> None:
-    source = make_source(session)
-    article = make_article(session, source, guid="a")
-    make_work(session, stage=Stage.CLASSIFY, article=article)
-    session.commit()
+def test_claim_marks_the_row(app_session: Session) -> None:
+    source = make_source(app_session)
+    article = make_article(app_session, source, guid="a")
+    make_work(app_session, stage=Stage.CLASSIFY, article=article)
+    app_session.commit()
 
-    (claimed,) = claim(session, stage=Stage.CLASSIFY, worker="w1", lease=LEASE)
+    (claimed,) = claim(app_session, stage=Stage.CLASSIFY, worker="w1", lease=LEASE)
     assert claimed.claimed_by == "w1"
     assert claimed.claimed_at is not None
     assert claimed.attempts == 1
 
 
-def test_concurrent_claims_are_disjoint(session: Session, migrated: sa.Engine) -> None:
+def test_concurrent_claims_are_disjoint(app_session: Session, app_migrated: sa.Engine) -> None:
     """AC2. Two workers starting together must never receive the same row."""
-    source = make_source(session)
+    source = make_source(app_session)
     for i in range(10):
-        article = make_article(session, source, guid=f"a{i}")
-        make_work(session, stage=Stage.CLASSIFY, article=article)
-    session.commit()
+        article = make_article(app_session, source, guid=f"a{i}")
+        make_work(app_session, stage=Stage.CLASSIFY, article=article)
+    app_session.commit()
 
     start = threading.Barrier(2)
     results: list[set[int]] = []
     guard = threading.Lock()
 
     def worker(name: str) -> None:
-        with Session(migrated, expire_on_commit=False) as db:
+        with Session(app_migrated, expire_on_commit=False) as db:
             start.wait(timeout=5)
             rows = claim(db, stage=Stage.CLASSIFY, worker=name, lease=LEASE, limit=5)
             with guard:
@@ -62,7 +62,9 @@ def test_concurrent_claims_are_disjoint(session: Session, migrated: sa.Engine) -
     assert len(results[0]) + len(results[1]) == 10
 
 
-def test_a_locked_row_does_not_block_another_worker(session: Session, migrated: sa.Engine) -> None:
+def test_a_locked_row_does_not_block_another_worker(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
     """AC2, the half disjointness does not cover.
 
     Plain ``FOR UPDATE`` also hands out disjoint sets — it gets there by making the second
@@ -73,30 +75,30 @@ def test_a_locked_row_does_not_block_another_worker(session: Session, migrated: 
     set ``LOCAL``, so the commit inside ``claim()`` reverts it and the pooled connection
     does not carry it into the next test.
     """
-    source = make_source(session)
+    source = make_source(app_session)
     now = dt.datetime.now(dt.UTC)
     held = make_work(
-        session,
+        app_session,
         stage=Stage.CLASSIFY,
-        article=make_article(session, source, guid="a"),
+        article=make_article(app_session, source, guid="a"),
         next_attempt_at=now - dt.timedelta(minutes=2),
     )
     free = make_work(
-        session,
+        app_session,
         stage=Stage.CLASSIFY,
-        article=make_article(session, source, guid="b"),
+        article=make_article(app_session, source, guid="b"),
         next_attempt_at=now - dt.timedelta(minutes=1),
     )
-    session.commit()
+    app_session.commit()
 
-    holder = migrated.connect()
+    holder = app_migrated.connect()
     try:
         # Ordered oldest-first, so this is the row a claimer reaches before any other.
         holder.execute(
             sa.text("SELECT work_id FROM pipeline_work WHERE work_id = :id FOR UPDATE"),
             {"id": held.work_id},
         )
-        with Session(migrated, expire_on_commit=False) as db:
+        with Session(app_migrated, expire_on_commit=False) as db:
             db.execute(sa.text("SET LOCAL lock_timeout = '1s'"))
             claimed = claim(db, stage=Stage.CLASSIFY, worker="w1", lease=LEASE, limit=2)
     finally:
@@ -106,79 +108,79 @@ def test_a_locked_row_does_not_block_another_worker(session: Session, migrated: 
     assert [row.work_id for row in claimed] == [free.work_id]
 
 
-def test_claim_refuses_a_session_that_expires_on_commit(migrated: sa.Engine) -> None:
+def test_claim_refuses_a_session_that_expires_on_commit(app_migrated: sa.Engine) -> None:
     """claim() commits, so such a session would hand back rows that are already expired."""
-    with Session(migrated) as db, pytest.raises(ValueError, match="expire_on_commit"):
+    with Session(app_migrated) as db, pytest.raises(ValueError, match="expire_on_commit"):
         claim(db, stage=Stage.CLASSIFY, worker="w1", lease=LEASE)
 
 
-def test_other_stages_are_left_alone(session: Session) -> None:
-    source = make_source(session)
-    article = make_article(session, source, guid="a")
-    make_work(session, stage=Stage.ACQUIRE, article=article)
-    session.commit()
+def test_other_stages_are_left_alone(app_session: Session) -> None:
+    source = make_source(app_session)
+    article = make_article(app_session, source, guid="a")
+    make_work(app_session, stage=Stage.ACQUIRE, article=article)
+    app_session.commit()
 
-    assert claim(session, stage=Stage.CLASSIFY, worker="w1", lease=LEASE) == []
+    assert claim(app_session, stage=Stage.CLASSIFY, worker="w1", lease=LEASE) == []
 
 
-def test_rows_due_later_are_not_claimed(session: Session) -> None:
+def test_rows_due_later_are_not_claimed(app_session: Session) -> None:
     """Backoff and the debounce window both work by pushing next_attempt_at forward."""
-    source = make_source(session)
-    article = make_article(session, source, guid="a")
+    source = make_source(app_session)
+    article = make_article(app_session, source, guid="a")
     make_work(
-        session,
+        app_session,
         stage=Stage.CLASSIFY,
         article=article,
         next_attempt_at=dt.datetime.now(dt.UTC) + dt.timedelta(minutes=10),
     )
-    session.commit()
+    app_session.commit()
 
-    assert claim(session, stage=Stage.CLASSIFY, worker="w1", lease=LEASE) == []
+    assert claim(app_session, stage=Stage.CLASSIFY, worker="w1", lease=LEASE) == []
 
 
-def test_dead_lettered_rows_are_not_claimed(session: Session) -> None:
-    source = make_source(session)
-    article = make_article(session, source, guid="a")
+def test_dead_lettered_rows_are_not_claimed(app_session: Session) -> None:
+    source = make_source(app_session)
+    article = make_article(app_session, source, guid="a")
     make_work(
-        session,
+        app_session,
         stage=Stage.CLASSIFY,
         article=article,
         dead_lettered_at=dt.datetime.now(dt.UTC),
     )
-    session.commit()
+    app_session.commit()
 
-    assert claim(session, stage=Stage.CLASSIFY, worker="w1", lease=LEASE) == []
+    assert claim(app_session, stage=Stage.CLASSIFY, worker="w1", lease=LEASE) == []
 
 
-def test_a_stale_claim_is_reclaimable(session: Session) -> None:
+def test_a_stale_claim_is_reclaimable(app_session: Session) -> None:
     """A worker that dies mid-stage must not strand its row."""
-    source = make_source(session)
-    article = make_article(session, source, guid="a")
+    source = make_source(app_session)
+    article = make_article(app_session, source, guid="a")
     make_work(
-        session,
+        app_session,
         stage=Stage.CLASSIFY,
         article=article,
         claimed_at=dt.datetime.now(dt.UTC) - dt.timedelta(minutes=30),
         claimed_by="dead-worker",
         attempts=1,
     )
-    session.commit()
+    app_session.commit()
 
-    (reclaimed,) = claim(session, stage=Stage.CLASSIFY, worker="w2", lease=LEASE)
+    (reclaimed,) = claim(app_session, stage=Stage.CLASSIFY, worker="w2", lease=LEASE)
     assert reclaimed.claimed_by == "w2"
     assert reclaimed.attempts == 2
 
 
-def test_a_live_claim_is_not_stolen(session: Session) -> None:
-    source = make_source(session)
-    article = make_article(session, source, guid="a")
+def test_a_live_claim_is_not_stolen(app_session: Session) -> None:
+    source = make_source(app_session)
+    article = make_article(app_session, source, guid="a")
     make_work(
-        session,
+        app_session,
         stage=Stage.CLASSIFY,
         article=article,
         claimed_at=dt.datetime.now(dt.UTC),
         claimed_by="w1",
     )
-    session.commit()
+    app_session.commit()
 
-    assert claim(session, stage=Stage.CLASSIFY, worker="w2", lease=LEASE) == []
+    assert claim(app_session, stage=Stage.CLASSIFY, worker="w2", lease=LEASE) == []
