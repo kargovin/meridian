@@ -100,7 +100,9 @@ class SummarizeJobItem(Base):
     #: The caller's opaque correlation handle, echoed back unchanged.
     item_id: Mapped[str] = mapped_column(sa.String(255))
 
-    documents: Mapped[list[dict[str, str]] | None] = mapped_column(JSONB)
+    # none_as_null: assigning None to a JSON column otherwise stores the JSON value
+    # `null`, which is not SQL NULL, and every IS NULL check on it reads false.
+    documents: Mapped[list[dict[str, str]] | None] = mapped_column(JSONB(none_as_null=True))
 
     summary: Mapped[str | None] = mapped_column(sa.Text)
     faithfulness_score: Mapped[float | None] = mapped_column(sa.Float)

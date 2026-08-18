@@ -457,6 +457,7 @@
   "paths": {
     "/v1/classify": {
       "post": {
+        "description": "``Idempotency-Key`` is accepted and ignored: at a pinned model version a replay\nrecomputes the same answer, so there is nothing to deduplicate.",
         "operationId": "classify_v1_classify_post",
         "requestBody": {
           "content": {
@@ -488,6 +489,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or unusable bearer token."
           },
           "422": {
             "content": {
@@ -548,6 +559,16 @@
             },
             "description": "Bad Request"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or unusable bearer token."
+          },
           "404": {
             "content": {
               "application/json": {
@@ -584,7 +605,26 @@
     },
     "/v1/summarize": {
       "post": {
+        "description": "Both paths write a job row; they differ in whether the answer is inline.",
         "operationId": "summarize_v1_summarize_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -625,6 +665,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or unusable bearer token."
           },
           "422": {
             "content": {
