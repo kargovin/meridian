@@ -35,8 +35,10 @@ class JobAccepted(BaseModel):
 class JobState(BaseModel):
     """``results`` and ``errors`` are empty until the job reaches a terminal state.
 
-    Inputs are discarded at terminal state and the job itself 24 hours later; a poll after
-    that answers ``expired``, and later still ``404 not_found``.
+    The documents you sent are discarded when the job reaches a terminal state; each
+    result's ``provenance`` is kept, so the sources a summary drew from remain readable
+    after the sources themselves are gone. The job is deleted 24 hours after it finishes; a
+    poll in between answers ``expired``, and later still ``404 not_found``.
     """
 
     job_id: str

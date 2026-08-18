@@ -85,7 +85,16 @@ def poll_limit(request: Request, consumer: Consumer) -> None:
 @router.post(
     "/classify",
     response_model=ClassifyResponse,
-    responses=_ERRORS,
+    responses=_ERRORS
+    | {
+        400: {
+            "model": ErrorResponse,
+            "description": (
+                "invalid_request: batch over max_batch, or a repeated items[].id. "
+                "unsupported_taxonomy_version: a taxonomy_version this service does not serve."
+            ),
+        }
+    },
     dependencies=[Depends(inference_limit)],
 )
 def classify(request: ClassifyRequest, consumer: Consumer) -> ClassifyResponse:
@@ -125,8 +134,19 @@ def classify(request: ClassifyRequest, consumer: Consumer) -> ClassifyResponse:
     "/summarize",
     response_model=SummarizeResponse,
     responses={
-        202: {"model": JobAccepted, "description": "Batch above the sync ceiling."},
+        202: {
+            "model": JobAccepted,
+            "description": (
+                "Batch above the sync ceiling, or a replay naming a job that has not finished."
+            ),
+        },
         **_ERRORS,
+        400: {
+            "model": ErrorResponse,
+            "description": (
+                "invalid_request: a repeated items[].id, or a style this service does not serve."
+            ),
+        },
     },
     dependencies=[Depends(inference_limit)],
 )

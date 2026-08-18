@@ -186,7 +186,7 @@
         "type": "object"
       },
       "JobState": {
-        "description": "``results`` and ``errors`` are empty until the job reaches a terminal state.\n\nInputs are discarded at terminal state and the job itself 24 hours later; a poll after\nthat answers ``expired``, and later still ``404 not_found``.",
+        "description": "``results`` and ``errors`` are empty until the job reaches a terminal state.\n\nThe documents you sent are discarded when the job reaches a terminal state; each\nresult's ``provenance`` is kept, so the sources a summary drew from remain readable\nafter the sources themselves are gone. The job is deleted 24 hours after it finishes; a\npoll in between answers ``expired``, and later still ``404 not_found``.",
         "properties": {
           "errors": {
             "items": {
@@ -442,7 +442,7 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "invalid_request: batch over max_batch, or a repeated items[].id. unsupported_taxonomy_version: a taxonomy_version this service does not serve."
           },
           "401": {
             "content": {
@@ -614,7 +614,7 @@
                 }
               }
             },
-            "description": "Batch above the sync ceiling."
+            "description": "Batch above the sync ceiling, or a replay naming a job that has not finished."
           },
           "400": {
             "content": {
@@ -624,7 +624,7 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "invalid_request: a repeated items[].id, or a style this service does not serve."
           },
           "401": {
             "content": {

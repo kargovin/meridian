@@ -103,3 +103,23 @@ def test_a_second_consumer_is_unaffected(strict_client: TestClient) -> None:
     strict_client.post("/v1/classify", json=ITEM, headers=DIGEST)
 
     assert strict_client.post("/v1/classify", json=ITEM, headers=MERIDIAN).status_code == 200
+
+
+def test_the_tracked_map_is_bounded_under_key_rotation() -> None:
+    """The key is an unverified token, so a caller can mint an unbounded number of them."""
+    limiter = RateLimiter(limit=100, window=60.0, max_tracked=50)
+
+    for n in range(500):
+        limiter.check(f"token-{n}", now=0.0)
+
+    assert len(limiter._windows) == 50
+
+
+def test_expired_windows_are_swept_once_per_window_not_once_per_call() -> None:
+    """A sweep on every call is O(n) under the lock — a memory problem made a latency one."""
+    limiter = RateLimiter(limit=100, window=60.0)
+    limiter.check("a", now=0.0)
+
+    limiter.check("b", now=120.0)
+
+    assert "a" not in limiter._windows

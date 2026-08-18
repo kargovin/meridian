@@ -7,6 +7,7 @@ import sqlalchemy as sa
 from fastapi.testclient import TestClient
 from meridian_config import PlatformSettings
 from meridian_contract.api import CLASSIFY_MAX_BATCH, SUMMARIZE_SYNC_MAX_BATCH, ErrorCode
+from meridian_platform.db import SummarizeJob
 from meridian_platform.jobs import process_next
 from meridian_platform.main import create_app
 from meridian_platform.stub import OVERSIZED, THIN_INPUT
@@ -136,7 +137,8 @@ def test_an_unknown_job_is_not_found(client: TestClient) -> None:
     assert response.json()["error"]["code"] == ErrorCode.NOT_FOUND
 
 
-def test_a_retried_batch_is_not_run_twice(client: TestClient) -> None:
+def test_a_retried_batch_is_not_run_twice(client: TestClient, platform_session: Session) -> None:
+    """Matching job ids is not the property: nothing may be inferred a second time."""
     headers = DIGEST | {"Idempotency-Key": "batch-42"}
     body = summarize_body(SUMMARIZE_SYNC_MAX_BATCH + 1)
 
@@ -144,6 +146,28 @@ def test_a_retried_batch_is_not_run_twice(client: TestClient) -> None:
     second = client.post("/v1/summarize", json=body, headers=headers).json()
 
     assert first["job_id"] == second["job_id"]
+    jobs = platform_session.scalars(sa.select(SummarizeJob)).all()
+    assert len(jobs) == 1
+    assert jobs[0].attempts == 0, "a replay must not queue a second run"
+
+    assert process_next(platform_session) is True
+    assert process_next(platform_session) is False, "the batch was runnable twice"
+
+
+def test_an_unknown_path_uses_the_locked_envelope(client: TestClient) -> None:
+    """Starlette's router answers before any of our handlers unless one catches it."""
+    response = client.get("/v1/nothing-here", headers=DIGEST)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == ErrorCode.NOT_FOUND
+    assert "detail" not in response.json()
+
+
+def test_an_unsupported_method_uses_the_locked_envelope(client: TestClient) -> None:
+    response = client.delete("/v1/classify", headers=DIGEST)
+
+    assert response.status_code == 405
+    assert response.json()["error"]["code"] == ErrorCode.INVALID_REQUEST
 
 
 def test_a_malformed_request_uses_the_locked_envelope(client: TestClient) -> None:

@@ -1,8 +1,9 @@
 """Rendering failures into the locked envelope.
 
-Every response this service can produce uses ``{"error": {...}}``. Three handlers are
+Every response this service can produce uses ``{"error": {...}}``. Four handlers are
 needed for that to be true rather than aspirational: the deliberate failures, the request
-validation FastAPI performs before a route is entered, and anything unhandled.
+validation FastAPI performs before a route is entered, the routing failures Starlette
+raises before any of ours is reached, and anything unhandled.
 """
 
 import logging
@@ -11,6 +12,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from meridian_contract.api import ErrorCode, ErrorDetail, ErrorResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +62,18 @@ def register_error_handlers(app: FastAPI) -> None:
                 message=f"{location}: {first.get('msg', 'invalid request')}".strip(": "),
             ),
         )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _routing(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # An unknown path or method is raised by the router before any handler above sees
+        # it, and answers {"detail": ...} unless it is caught here.
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            code = ErrorCode.NOT_FOUND
+        elif exc.status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
+            code = ErrorCode.INTERNAL
+        else:
+            code = ErrorCode.INVALID_REQUEST
+        return _envelope(exc.status_code, ErrorDetail(code=code, message=str(exc.detail)))
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
