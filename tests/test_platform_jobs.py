@@ -169,3 +169,25 @@ def test_a_claimed_job_reads_as_running(platform_session: Session) -> None:
     assert state is not None
     assert state.status == JobStatus.RUNNING
     assert state.results == []
+
+
+def test_the_retention_window_starts_when_the_job_finishes(platform_session: Session) -> None:
+    """The published guarantee is 24h after terminal state, so a queued job cannot burn it."""
+    created = dt.datetime.now(dt.UTC)
+    job = enqueue(platform_session, "digest", [item("c1")], now=created)
+    finished = created + dt.timedelta(hours=20)
+
+    process_next(platform_session, now=finished)
+
+    assert job.expires_at >= finished + RETENTION - dt.timedelta(seconds=1)
+
+
+def test_an_expired_job_is_not_a_replay_target(platform_session: Session) -> None:
+    """Returning it hands the caller a handle that reads expired and never carries results."""
+    created = dt.datetime.now(dt.UTC)
+    first = enqueue(platform_session, "digest", [item("c1")], idempotency_key="k", now=created)
+    later = created + RETENTION + dt.timedelta(minutes=1)
+
+    second = enqueue(platform_session, "digest", [item("c1")], idempotency_key="k", now=later)
+
+    assert second.id != first.id

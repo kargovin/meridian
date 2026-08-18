@@ -1,6 +1,7 @@
 """The published document is generated from the models, never hand-written."""
 
-from typing import get_args
+import json
+from typing import Any, get_args
 
 from meridian_contract import WithholdReason
 from meridian_contract.api import WireWithholdReason
@@ -37,3 +38,40 @@ def test_the_storage_sentinel_never_reaches_the_wire() -> None:
 def test_the_document_publishes_exactly_the_wire_reasons() -> None:
     """Typing the field with the shared enum publishes every member instead."""
     assert _published_withhold_reasons() == set(get_args(WireWithholdReason))
+
+
+def _document() -> dict[str, Any]:
+    document: dict[str, Any] = json.loads(DOCUMENT.read_text())
+    return document
+
+
+def _v1_operations() -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (f"{method.upper()} {path}", operation)
+        for path, methods in _document()["paths"].items()
+        for method, operation in methods.items()
+    ]
+
+
+def test_the_document_declares_one_error_shape() -> None:
+    """Regenerating after a change keeps the freeze test green, so it cannot see this.
+
+    FastAPI documents a 422 with its own ``{"detail": [...]}`` body on any route that
+    validates input. The locked model is ``{"error": {...}}``; publishing both puts a second
+    error shape in a contract that says there is one.
+    """
+    offenders = [name for name, op in _v1_operations() if "422" in op.get("responses", {})]
+
+    assert offenders == []
+    assert "HTTPValidationError" not in json.dumps(_document())
+
+
+def test_every_operation_requires_a_credential() -> None:
+    """A client generated from a contract with no security scheme sends none."""
+    document = _document()
+    schemes = document.get("components", {}).get("securitySchemes", {})
+
+    assert schemes, "no securityScheme: the contract does not say callers must authenticate"
+
+    unguarded = [name for name, op in _v1_operations() if not op.get("security")]
+    assert unguarded == []

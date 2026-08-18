@@ -22,8 +22,10 @@ from sqlalchemy.orm import Session
 from meridian_platform.db import SummarizeJob, SummarizeJobItem
 from meridian_platform.stub import summarize_documents
 
-#: How long a job and its idempotency key survive. One clock for both, so a replayed key
-#: can never outlive the job it names.
+#: How long a job and its idempotency key survive after it finishes. One clock for both,
+#: so a replayed key can never outlive the job it names. Set at creation as a floor, then
+#: re-anchored to the terminal state, so a caller always has the full window to read a
+#: result however long the job waited in the queue.
 RETENTION = dt.timedelta(hours=24)
 
 #: A claim older than this is treated as abandoned — a pod died mid-job.
@@ -57,13 +59,31 @@ def _build(
     )
 
 
-def _by_key(session: Session, consumer: str, idempotency_key: str) -> SummarizeJob | None:
-    return session.scalars(
+def _by_key(
+    session: Session, consumer: str, idempotency_key: str, now: dt.datetime
+) -> SummarizeJob | None:
+    """The live job for this key, releasing a dead one that still holds it.
+
+    A job past its window is not a replay target: returning it hands the caller a handle
+    that reads ``expired`` and never carries their results. Deleting it here rather than
+    waiting for the sweeper matters because the key is unique — left in place it makes the
+    insert collide, and the caller receives the dead job anyway.
+    """
+    job = session.scalars(
         sa.select(SummarizeJob).where(
             SummarizeJob.consumer == consumer,
             SummarizeJob.idempotency_key == idempotency_key,
         )
     ).one_or_none()
+
+    if job is None:
+        return None
+    if job.expires_at > now:
+        return job
+
+    session.delete(job)
+    session.flush()
+    return None
 
 
 def _commit_or_recover(
@@ -80,15 +100,16 @@ def _commit_or_recover(
         session.rollback()
         if idempotency_key is None:
             raise
-        winner = _by_key(session, consumer, idempotency_key)
+        winner = _by_key(session, consumer, idempotency_key, now_utc())
         if winner is None:
             raise
         return winner
     return job
 
 
-def _run(job: SummarizeJob) -> None:
+def _run(job: SummarizeJob, now: dt.datetime | None = None) -> None:
     """Fill in every item and set the job's terminal status. Does not commit."""
+    now = now or now_utc()
     failures = 0
     for item in job.items:
         result = summarize_documents(item.documents or [])
@@ -105,6 +126,7 @@ def _run(job: SummarizeJob) -> None:
         item.documents = None
 
     job.status = _outcome(failures, len(job.items))
+    job.expires_at = now + RETENTION
     job.claimed_at = None
     job.claimed_by = None
 
@@ -129,7 +151,7 @@ def enqueue(
     now = now or now_utc()
 
     if idempotency_key is not None:
-        existing = _by_key(session, consumer, idempotency_key)
+        existing = _by_key(session, consumer, idempotency_key, now)
         if existing is not None:
             return existing
 
@@ -153,13 +175,13 @@ def run_sync(
     now = now or now_utc()
 
     if idempotency_key is not None:
-        existing = _by_key(session, consumer, idempotency_key)
+        existing = _by_key(session, consumer, idempotency_key, now)
         if existing is not None:
             return existing
 
     job = _build(consumer, items, idempotency_key, now, JobStatus.RUNNING)
     session.add(job)
-    _run(job)
+    _run(job, now)
     return _commit_or_recover(session, job, consumer, idempotency_key)
 
 
@@ -204,11 +226,12 @@ def process_next(
     session: Session, worker: str = "in-process", now: dt.datetime | None = None
 ) -> bool:
     """Do one job. Returns False when there was nothing to do."""
+    now = now or now_utc()
     job = claim(session, worker, now=now)
     if job is None:
         return False
 
-    _run(job)
+    _run(job, now)
     session.commit()
     return True
 

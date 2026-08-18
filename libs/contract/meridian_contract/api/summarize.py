@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from meridian_contract.api.errors import ErrorDetail
 
@@ -33,6 +33,15 @@ class SummarizeRequest(BaseModel):
     items: list[SummarizeItem] = Field(min_length=1)
     max_sentences: int | None = Field(default=None, gt=0)
     style: str | None = None
+
+    @field_validator("items")
+    @classmethod
+    def _ids_are_unique(cls, items: list[SummarizeItem]) -> list[SummarizeItem]:
+        """Also a storage constraint: a job's items are unique on (job_id, item_id)."""
+        seen = {item.id for item in items}
+        if len(seen) != len(items):
+            raise ValueError("items[].id must be unique within a batch")
+        return items
 
 
 class Summary(BaseModel):

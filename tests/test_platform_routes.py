@@ -144,3 +144,49 @@ def test_a_retried_batch_is_not_run_twice(client: TestClient) -> None:
     second = client.post("/v1/summarize", json=body, headers=headers).json()
 
     assert first["job_id"] == second["job_id"]
+
+
+def test_a_malformed_request_uses_the_locked_envelope(client: TestClient) -> None:
+    """FastAPI's default answers 422 with {"detail": [...]}, a second error shape."""
+    response = client.post("/v1/classify", json={"items": []}, headers=DIGEST)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == ErrorCode.INVALID_REQUEST
+    assert "detail" not in response.json()
+
+
+def test_duplicate_item_ids_are_a_caller_error(client: TestClient) -> None:
+    """They also violate UNIQUE(job_id, item_id), which would surface as an unhandled 500."""
+    body = {"items": [{"id": "same", "title": "t", "text": LONG} for _ in range(2)]}
+
+    response = client.post("/v1/classify", json=body, headers=DIGEST)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == ErrorCode.INVALID_REQUEST
+
+
+def test_duplicate_summarize_item_ids_are_a_caller_error(client: TestClient) -> None:
+    body = summarize_body(2)
+    body["items"][1]["id"] = body["items"][0]["id"]  # type: ignore[index]
+
+    response = client.post("/v1/summarize", json=body, headers=DIGEST)
+
+    assert response.status_code == 400
+
+
+def test_an_unexpected_failure_still_uses_the_envelope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`internal` must have a producer, and a plain-text 500 is outside the contract."""
+    import meridian_platform.routes as routes
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated")
+
+    monkeypatch.setattr(routes, "classify_text", boom)
+    lenient = TestClient(client.app, raise_server_exceptions=False)
+
+    response = lenient.post("/v1/classify", json=classify_body(1), headers=DIGEST)
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == ErrorCode.INTERNAL

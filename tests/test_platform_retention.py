@@ -9,12 +9,14 @@ import datetime as dt
 import pytest
 import sqlalchemy as sa
 from meridian_contract.api import SourceDocument, SummarizeItem
+from meridian_platform.db import Base as PlatformBase
 from meridian_platform.db import SummarizeJob, SummarizeJobItem
 from meridian_platform.jobs import RETENTION, enqueue, process_next
 from meridian_platform.retention import sweep
 from meridian_platform.stub import THIN_INPUT
 from sqlalchemy.orm import Session
 
+from meridian.db.models import Base as AppBase
 from meridian.db.models import Source
 
 pytestmark = pytest.mark.postgres
@@ -81,10 +83,19 @@ def test_deleting_a_job_takes_its_items_with_it(platform_session: Session) -> No
     assert platform_session.scalars(sa.select(SummarizeJobItem)).all() == []
 
 
-def test_truncating_the_platform_loses_nothing_of_the_application(
+def test_truncating_the_platform_leaves_the_application_intact(
     platform_session: Session, app_session: Session
 ) -> None:
-    """A1: the Platform holds no domain data, stated as something that can fail."""
+    """A1, as far as a test can carry it.
+
+    The cross-database half is structural — the two live in different databases, so a
+    TRUNCATE here could not reach the application's tables however this were written; that
+    separation is what ``test_platform_isolation`` covers. What this does check is that the
+    truncate list is derived from the Platform's own metadata rather than hand-maintained,
+    so a Platform table added later is emptied by it and noticed here rather than quietly
+    surviving, and that the application's row counts are unchanged across every one of its
+    tables rather than a chosen few.
+    """
     app_session.add(
         Source(
             name="Outlet A",
@@ -100,9 +111,32 @@ def test_truncating_the_platform_loses_nothing_of_the_application(
     app_session.commit()
     enqueue(platform_session, "digest", [item("c1")])
 
-    platform_session.execute(
-        sa.text("TRUNCATE summarize_job, summarize_job_item RESTART IDENTITY CASCADE")
-    )
+    def app_counts() -> dict[str, int]:
+        return {
+            name: app_session.scalar(sa.select(sa.func.count()).select_from(table)) or 0
+            for name, table in AppBase.metadata.tables.items()
+        }
+
+    before = app_counts()
+    assert before["source"] == 1, "the fixture wrote nothing, so nothing could be lost"
+
+    platform_tables = ", ".join(f'"{name}"' for name in PlatformBase.metadata.tables)
+    platform_session.execute(sa.text(f"TRUNCATE {platform_tables} RESTART IDENTITY CASCADE"))
     platform_session.commit()
 
-    assert app_session.scalars(sa.select(Source)).all() != []
+    assert app_counts() == before
+    for table in PlatformBase.metadata.tables.values():
+        assert platform_session.scalar(sa.select(sa.func.count()).select_from(table)) == 0
+
+
+def test_overdue_counts_what_the_sweep_could_not_reach(platform_session: Session) -> None:
+    """The signal must be able to be non-zero, or it reports success by construction."""
+    for n in range(3):
+        enqueue(platform_session, "digest", [item(f"c{n}")])
+        process_next(platform_session)
+    past = dt.datetime.now(dt.UTC) + RETENTION + dt.timedelta(minutes=1)
+
+    result = sweep(platform_session, past, batch=1)
+
+    assert result.jobs_deleted == 1
+    assert result.overdue == 2

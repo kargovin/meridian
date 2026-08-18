@@ -167,19 +167,6 @@
         "title": "ErrorResponse",
         "type": "object"
       },
-      "HTTPValidationError": {
-        "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
-          }
-        },
-        "title": "HTTPValidationError",
-        "type": "object"
-      },
       "JobAccepted": {
         "description": "The 202 body. ``job_id`` is a random public handle, not a storage key.",
         "properties": {
@@ -406,46 +393,13 @@
         ],
         "title": "Summary",
         "type": "object"
-      },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
-        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "ServiceToken": {
+        "description": "Internal service-to-service token naming the calling consumer.",
+        "scheme": "bearer",
+        "type": "http"
       }
     }
   },
@@ -500,16 +454,6 @@
             },
             "description": "Missing or unusable bearer token."
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "429": {
             "content": {
               "application/json": {
@@ -521,6 +465,11 @@
             "description": "Rate limited; honour Retry-After."
           }
         },
+        "security": [
+          {
+            "ServiceToken": []
+          }
+        ],
         "summary": "Classify"
       }
     },
@@ -579,16 +528,6 @@
             },
             "description": "Not Found"
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "429": {
             "content": {
               "application/json": {
@@ -600,6 +539,11 @@
             "description": "Rate limited; honour Retry-After."
           }
         },
+        "security": [
+          {
+            "ServiceToken": []
+          }
+        ],
         "summary": "Job"
       }
     },
@@ -676,16 +620,6 @@
             },
             "description": "Missing or unusable bearer token."
           },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
           "429": {
             "content": {
               "application/json": {
@@ -697,6 +631,11 @@
             "description": "Rate limited; honour Retry-After."
           }
         },
+        "security": [
+          {
+            "ServiceToken": []
+          }
+        ],
         "summary": "Summarize"
       }
     }

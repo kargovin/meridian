@@ -1,6 +1,6 @@
 """``POST /v1/classify`` (RFC §8.1, PRD §8.1)."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from meridian_contract.api.errors import ErrorDetail
 
@@ -19,6 +19,15 @@ class ClassifyItem(BaseModel):
 class ClassifyRequest(BaseModel):
     items: list[ClassifyItem] = Field(min_length=1)
     taxonomy_version: str | None = None
+
+    @field_validator("items")
+    @classmethod
+    def _ids_are_unique(cls, items: list[ClassifyItem]) -> list[ClassifyItem]:
+        """Results are matched back by ``id``, so a repeat makes the response ambiguous."""
+        seen = {item.id for item in items}
+        if len(seen) != len(items):
+            raise ValueError("items[].id must be unique within a batch")
+        return items
 
 
 class Classification(BaseModel):

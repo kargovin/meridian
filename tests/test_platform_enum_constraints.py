@@ -6,9 +6,11 @@ all that adding an enum member is — produces no diff and no error.
 
 import re
 from enum import StrEnum
+from typing import get_args
 
 import pytest
 import sqlalchemy as sa
+from meridian_contract.api import WireWithholdReason
 from meridian_dbkit import StrEnumType
 from meridian_platform.db import Base
 from sqlalchemy.orm import Session
@@ -50,6 +52,29 @@ def test_check_holds_exactly_the_enum_values(
 
     assert definition is not None, f"{table}.{column} is a StrEnumType with no CHECK {name}"
     assert set(_LITERAL.findall(definition)) == {member.value for member in enum_cls}
+
+
+def test_the_withhold_reason_check_matches_the_wire_vocabulary(
+    platform_migrated: sa.Engine,
+) -> None:
+    """The constraint is built from the wire Literal, so nothing may drift between them.
+
+    Not covered by the parametrized test above: this column is a plain String with a
+    hand-built CHECK rather than a StrEnumType. And not covered by ``alembic check``, which
+    compares CHECK constraints by name only — adding a wire reason changes the expression
+    and nothing else, so without this the column would reject a value the contract permits.
+    """
+    with platform_migrated.connect() as conn:
+        definition = conn.execute(
+            sa.text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+                " WHERE conname = 'ck_summarize_job_item_withhold_reason'"
+                " AND connamespace = 'public'::regnamespace"
+            )
+        ).scalar()
+
+    assert definition is not None, "the withhold_reason CHECK is missing"
+    assert set(_LITERAL.findall(definition)) == set(get_args(WireWithholdReason))
 
 
 def test_the_withhold_reason_check_admits_only_wire_values(platform_session: Session) -> None:

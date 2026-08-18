@@ -19,16 +19,22 @@ from sqlalchemy.orm import Session
 
 from meridian_platform.db import SummarizeJob, SummarizeJobItem
 
+#: Most rows one pass will delete. The bound is what makes ``overdue`` an instrument: an
+#: unbounded delete removes every matching row, so counting the same predicate afterwards
+#: reports zero by construction whether or not the sweeper is keeping up.
+SWEEP_BATCH = 1000
+
 
 @dataclass(frozen=True)
 class SweepResult:
     inputs_discarded: int
     jobs_deleted: int
-    #: Rows still past their window after the sweep. Should be zero.
+    #: Rows still past their window after the sweep. Non-zero means arrivals are outrunning
+    #: this sweeper, which on a shared volume that cannot be grown is a capacity signal.
     overdue: int
 
 
-def sweep(session: Session, now: dt.datetime) -> SweepResult:
+def sweep(session: Session, now: dt.datetime, batch: int = SWEEP_BATCH) -> SweepResult:
     terminal = [status.value for status in TERMINAL_JOB_STATUSES]
 
     discarded = cast(
@@ -45,9 +51,12 @@ def sweep(session: Session, now: dt.datetime) -> SweepResult:
         ),
     ).rowcount
 
+    doomed = sa.select(SummarizeJob.id).where(SummarizeJob.expires_at <= now).limit(batch)
     deleted = cast(
         CursorResult[Any],
-        session.execute(sa.delete(SummarizeJob).where(SummarizeJob.expires_at <= now)),
+        session.execute(
+            sa.delete(SummarizeJob).where(SummarizeJob.id.in_(doomed.scalar_subquery()))
+        ),
     ).rowcount
 
     session.commit()

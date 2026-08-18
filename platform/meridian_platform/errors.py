@@ -1,8 +1,18 @@
-"""Rendering failures into the locked envelope."""
+"""Rendering failures into the locked envelope.
 
-from fastapi import FastAPI, Request
+Every response this service can produce uses ``{"error": {...}}``. Three handlers are
+needed for that to be true rather than aspirational: the deliberate failures, the request
+validation FastAPI performs before a route is entered, and anything unhandled.
+"""
+
+import logging
+
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from meridian_contract.api import ErrorCode, ErrorDetail, ErrorResponse
+
+log = logging.getLogger(__name__)
 
 
 class PlatformError(Exception):
@@ -22,11 +32,41 @@ class PlatformError(Exception):
         self.headers = headers
 
 
+def _envelope(
+    status_code: int, detail: ErrorDetail, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content=ErrorResponse(error=detail).model_dump(),
+        headers=headers,
+    )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(PlatformError)
-    async def _render(request: Request, exc: PlatformError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=ErrorResponse(error=exc.detail).model_dump(),
-            headers=exc.headers,
+    async def _platform(request: Request, exc: PlatformError) -> JSONResponse:
+        return _envelope(exc.status_code, exc.detail, exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI's default answers 422 with {"detail": [...]}, which is a second error
+        # shape the contract does not carry.
+        first = exc.errors()[0] if exc.errors() else {}
+        location = ".".join(str(part) for part in first.get("loc", ()))
+        return _envelope(
+            status.HTTP_400_BAD_REQUEST,
+            ErrorDetail(
+                code=ErrorCode.INVALID_REQUEST,
+                message=f"{location}: {first.get('msg', 'invalid request')}".strip(": "),
+            ),
+        )
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+        # Without this an unexpected failure answers in plain text, outside the envelope.
+        # The message is deliberately fixed: an exception string can carry request content.
+        log.exception("unhandled error serving %s", request.url.path)
+        return _envelope(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ErrorDetail(code=ErrorCode.INTERNAL, message="internal error"),
         )

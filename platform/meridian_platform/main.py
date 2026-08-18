@@ -5,8 +5,10 @@ Run with ``uvicorn meridian_platform.main:create_app --factory``.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
 from meridian_config import PlatformSettings, load_platform
 
 from meridian_platform.db import create_engine, session_factory
@@ -51,6 +53,8 @@ def create_app(settings: PlatformSettings | None = None, background: bool = True
     register_error_handlers(app)
     app.include_router(router)
 
+    _publish_one_error_shape(app)
+
     @app.get("/health", include_in_schema=False)
     def health() -> dict[str, str]:
         """Liveness probe.
@@ -61,3 +65,25 @@ def create_app(settings: PlatformSettings | None = None, background: bool = True
         return {"status": "ok"}
 
     return app
+
+
+def _publish_one_error_shape(app: FastAPI) -> None:
+    """Drop FastAPI's automatic 422 from the document.
+
+    Request validation is answered as 400 with the locked envelope (see ``errors``), so a
+    published 422 with FastAPI's own ``{"detail": [...]}`` body would describe a response
+    this service never sends and put a second error shape in a frozen contract.
+    """
+
+    def openapi() -> dict[str, Any]:
+        if app.openapi_schema is None:
+            schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+            for path in schema.get("paths", {}).values():
+                for operation in path.values():
+                    operation.get("responses", {}).pop("422", None)
+            for name in ("HTTPValidationError", "ValidationError"):
+                schema.get("components", {}).get("schemas", {}).pop(name, None)
+            app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = openapi  # type: ignore[method-assign]
