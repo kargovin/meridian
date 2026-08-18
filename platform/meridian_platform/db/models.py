@@ -63,6 +63,9 @@ class SummarizeJob(Base):
     #: When the row itself may be deleted. Also the idempotency-replay window.
     expires_at: Mapped[dt.datetime] = mapped_column(TZDateTime)
 
+    #: The request's length hint, kept because the work happens after the request returns.
+    max_sentences: Mapped[int | None] = mapped_column(sa.Integer)
+
     items: Mapped[list["SummarizeJobItem"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
@@ -103,6 +106,10 @@ class SummarizeJobItem(Base):
     # none_as_null: assigning None to a JSON column otherwise stores the JSON value
     # `null`, which is not SQL NULL, and every IS NULL check on it reads false.
     documents: Mapped[list[dict[str, str]] | None] = mapped_column(JSONB(none_as_null=True))
+
+    #: Kept separately from `documents`, which is discarded at terminal state: the caller
+    #: is told which sources a summary drew from after the sources themselves are gone.
+    provenance: Mapped[list[str] | None] = mapped_column(JSONB(none_as_null=True))
 
     summary: Mapped[str | None] = mapped_column(sa.Text)
     faithfulness_score: Mapped[float | None] = mapped_column(sa.Float)

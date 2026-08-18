@@ -10,6 +10,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+_MAX_TRACKED = 10_000
+
 
 @dataclass
 class _Window:
@@ -29,6 +31,12 @@ class RateLimiter:
     def check(self, consumer: str, now: float | None = None) -> int | None:
         now = time.monotonic() if now is None else now
         with self._lock:
+            if len(self._windows) > _MAX_TRACKED:
+                # The key is an unverified token, so anyone can mint new ones; without this
+                # the map grows without bound. Expired windows carry no state worth keeping.
+                self._windows = {
+                    name: w for name, w in self._windows.items() if now - w.started < self.window
+                }
             window = self._windows.get(consumer)
             if window is None or now - window.started >= self.window:
                 self._windows[consumer] = _Window(started=now, count=1)

@@ -5,6 +5,7 @@ which take a session and return, so they can be tested directly; what is left he
 sleep and a stop flag.
 """
 
+import datetime as dt
 import logging
 import threading
 from collections.abc import Callable
@@ -26,10 +27,12 @@ class BackgroundLoops:
     def __init__(
         self,
         session_factory: sessionmaker[Session],
+        retention: dt.timedelta | None = None,
         work_interval: float = WORK_INTERVAL,
         sweep_interval: float = SWEEP_INTERVAL,
     ) -> None:
         self._session_factory = session_factory
+        self._retention = retention
         self._work_interval = work_interval
         self._sweep_interval = sweep_interval
         self._stopping = threading.Event()
@@ -65,7 +68,7 @@ class BackgroundLoops:
                 self._stopping.wait(interval)
 
     def _work(self, session: Session) -> bool:
-        return process_next(session)
+        return process_next(session, retention=self._retention)
 
     def _sweep(self, session: Session) -> bool:
         result = sweep(session, now_utc())

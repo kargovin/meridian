@@ -9,7 +9,7 @@ from meridian_config import PlatformSettings
 from meridian_contract.api import CLASSIFY_MAX_BATCH, SUMMARIZE_SYNC_MAX_BATCH, ErrorCode
 from meridian_platform.jobs import process_next
 from meridian_platform.main import create_app
-from meridian_platform.stub import THIN_INPUT
+from meridian_platform.stub import OVERSIZED, THIN_INPUT
 from sqlalchemy.orm import Session
 
 pytestmark = pytest.mark.postgres
@@ -190,3 +190,74 @@ def test_an_unexpected_failure_still_uses_the_envelope(
 
     assert response.status_code == 500
     assert response.json()["error"]["code"] == ErrorCode.INTERNAL
+
+
+def test_an_unserved_taxonomy_version_is_refused(client: TestClient) -> None:
+    """Echoing it back as honoured reports a version we did not classify against."""
+    body = classify_body(1) | {"taxonomy_version": "v99-does-not-exist"}
+
+    response = client.post("/v1/classify", json=body, headers=DIGEST)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == ErrorCode.UNSUPPORTED_TAXONOMY_VERSION
+
+
+def test_a_served_taxonomy_version_is_accepted(client: TestClient) -> None:
+    body = classify_body(1) | {"taxonomy_version": "v1"}
+
+    assert client.post("/v1/classify", json=body, headers=DIGEST).status_code == 200
+
+
+def test_classify_reports_a_bad_item_without_failing_the_batch(client: TestClient) -> None:
+    body = classify_body(2)
+    body["items"][1]["text"] = "x" * (OVERSIZED + 1)  # type: ignore[index]
+
+    payload = client.post("/v1/classify", json=body, headers=DIGEST).json()
+
+    assert [result["id"] for result in payload["results"]] == ["a0"]
+    assert payload["errors"][0]["code"] == ErrorCode.ITEM_TOO_LARGE
+    assert payload["errors"][0]["item_id"] == "a1"
+
+
+def test_an_unsupported_style_is_refused(client: TestClient) -> None:
+    """Accepted-and-ignored is the failure mode: the caller thinks it took effect."""
+    body = summarize_body(1) | {"style": "breezy"}
+
+    assert client.post("/v1/summarize", json=body, headers=DIGEST).status_code == 400
+
+
+def test_max_sentences_is_honoured(client: TestClient) -> None:
+    one = summarize_body(1) | {"max_sentences": 1}
+    three = summarize_body(1) | {"max_sentences": 3}
+
+    short = client.post("/v1/summarize", json=one, headers=DIGEST).json()
+    long = client.post("/v1/summarize", json=three, headers=DIGEST).json()
+
+    assert len(short["results"][0]["summary"]) < len(long["results"][0]["summary"])
+
+
+def test_a_summary_reports_the_sources_it_drew_from(client: TestClient) -> None:
+    """FR-S3. The documents are discarded, so this cannot be recovered later."""
+    payload = client.post("/v1/summarize", json=summarize_body(1), headers=DIGEST).json()
+
+    assert payload["results"][0]["provenance"] == ["https://e/1"]
+
+
+def test_a_replay_naming_an_unfinished_job_is_not_a_result(
+    client: TestClient, platform_session: Session
+) -> None:
+    """The empty-but-successful answer is the one a caller cannot detect."""
+    headers = DIGEST | {"Idempotency-Key": "shared-key"}
+    client.post("/v1/summarize", json=summarize_body(3), headers=headers)
+
+    replay = client.post("/v1/summarize", json=summarize_body(1), headers=headers)
+
+    assert replay.status_code == 202
+    assert replay.json()["status"] == "queued"
+
+
+def test_the_rate_limit_response_documents_retry_after(client: TestClient) -> None:
+    document = client.get("/openapi.json").json()
+    limited = document["paths"]["/v1/classify"]["post"]["responses"]["429"]
+
+    assert "Retry-After" in limited["headers"]

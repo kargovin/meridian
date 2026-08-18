@@ -9,6 +9,10 @@ from meridian_contract.api.errors import ErrorDetail
 #: Sync batch ceiling (2.3 / J4). Above this the call is answered 202 + job id.
 SUMMARIZE_SYNC_MAX_BATCH = 2
 
+#: Styles this service will answer for (PRD §8.2). An unsupported style is refused, not
+#: quietly replaced with the default.
+SUPPORTED_STYLES = ("neutral",)
+
 #: The only withhold reason this service can produce. NOT ``WithholdReason``: that enum
 #: carries the storage sentinel ``none`` and two app-side reasons, and typing the field with
 #: it publishes all four into the document as legal values.
@@ -42,6 +46,13 @@ class SummarizeRequest(BaseModel):
         if len(seen) != len(items):
             raise ValueError("items[].id must be unique within a batch")
         return items
+
+    @field_validator("style")
+    @classmethod
+    def _style_is_supported(cls, style: str | None) -> str | None:
+        if style is not None and style not in SUPPORTED_STYLES:
+            raise ValueError(f"style must be one of {', '.join(SUPPORTED_STYLES)}")
+        return style
 
 
 class Summary(BaseModel):

@@ -462,7 +462,15 @@
                 }
               }
             },
-            "description": "Rate limited; honour Retry-After."
+            "description": "Rate limited; honour Retry-After.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -536,7 +544,15 @@
                 }
               }
             },
-            "description": "Rate limited; honour Retry-After."
+            "description": "Rate limited; honour Retry-After.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -549,7 +565,7 @@
     },
     "/v1/summarize": {
       "post": {
-        "description": "Both paths write a job row; they differ in whether the answer is inline.",
+        "description": "Both paths write a job row; they differ in whether the answer is inline.\n\nA job that has not finished is answered 202 whichever path created it. An idempotency\nreplay can reach the sync path naming a job that is still queued, and returning an empty\n``results`` array for it would be success-shaped and false.",
         "operationId": "summarize_v1_summarize_post",
         "parameters": [
           {
@@ -628,7 +644,15 @@
                 }
               }
             },
-            "description": "Rate limited; honour Retry-After."
+            "description": "Rate limited; honour Retry-After.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "security": [

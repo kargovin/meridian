@@ -9,6 +9,7 @@ import uuid
 
 import sqlalchemy as sa
 from meridian_contract.api import (
+    TERMINAL_JOB_STATUSES,
     ErrorCode,
     ErrorDetail,
     JobState,
@@ -42,13 +43,16 @@ def _build(
     idempotency_key: str | None,
     now: dt.datetime,
     status: JobStatus,
+    retention: dt.timedelta,
+    max_sentences: int | None,
 ) -> SummarizeJob:
     return SummarizeJob(
         public_id=uuid.uuid4(),
         consumer=consumer,
         idempotency_key=idempotency_key,
         status=status,
-        expires_at=now + RETENTION,
+        max_sentences=max_sentences,
+        expires_at=now + retention,
         items=[
             SummarizeJobItem(
                 item_id=item.id,
@@ -107,12 +111,15 @@ def _commit_or_recover(
     return job
 
 
-def _run(job: SummarizeJob, now: dt.datetime | None = None) -> None:
+def _run(
+    job: SummarizeJob, now: dt.datetime | None = None, retention: dt.timedelta | None = None
+) -> None:
     """Fill in every item and set the job's terminal status. Does not commit."""
     now = now or now_utc()
+    retention = retention or RETENTION
     failures = 0
     for item in job.items:
-        result = summarize_documents(item.documents or [])
+        result = summarize_documents(item.documents or [], job.max_sentences)
         if result.error is not None:
             item.error_code = result.error.code
             item.error_message = result.error.message
@@ -122,11 +129,12 @@ def _run(job: SummarizeJob, now: dt.datetime | None = None) -> None:
             item.faithfulness_score = result.faithfulness_score
             item.withheld = result.withheld
             item.withhold_reason = result.withhold_reason
+            item.provenance = result.provenance
         # Discarded the moment it is no longer needed, rather than left for a later sweep.
         item.documents = None
 
     job.status = _outcome(failures, len(job.items))
-    job.expires_at = now + RETENTION
+    job.expires_at = now + retention
     job.claimed_at = None
     job.claimed_by = None
 
@@ -146,16 +154,19 @@ def enqueue(
     items: list[SummarizeItem],
     idempotency_key: str | None = None,
     now: dt.datetime | None = None,
+    retention: dt.timedelta | None = None,
+    max_sentences: int | None = None,
 ) -> SummarizeJob:
     """Record a batch for a worker to pick up. The 202 path."""
     now = now or now_utc()
+    retention = retention or RETENTION
 
     if idempotency_key is not None:
         existing = _by_key(session, consumer, idempotency_key, now)
         if existing is not None:
             return existing
 
-    job = _build(consumer, items, idempotency_key, now, JobStatus.QUEUED)
+    job = _build(consumer, items, idempotency_key, now, JobStatus.QUEUED, retention, max_sentences)
     session.add(job)
     return _commit_or_recover(session, job, consumer, idempotency_key)
 
@@ -166,6 +177,8 @@ def run_sync(
     items: list[SummarizeItem],
     idempotency_key: str | None = None,
     now: dt.datetime | None = None,
+    retention: dt.timedelta | None = None,
+    max_sentences: int | None = None,
 ) -> SummarizeJob:
     """Record and run a batch in one transaction. The 200 path.
 
@@ -173,15 +186,16 @@ def run_sync(
     and run it a second time. Sync and async differ in response shape, not in storage.
     """
     now = now or now_utc()
+    retention = retention or RETENTION
 
     if idempotency_key is not None:
         existing = _by_key(session, consumer, idempotency_key, now)
         if existing is not None:
             return existing
 
-    job = _build(consumer, items, idempotency_key, now, JobStatus.RUNNING)
+    job = _build(consumer, items, idempotency_key, now, JobStatus.RUNNING, retention, max_sentences)
     session.add(job)
-    _run(job, now)
+    _run(job, now, retention)
     return _commit_or_recover(session, job, consumer, idempotency_key)
 
 
@@ -223,7 +237,10 @@ def claim(session: Session, worker: str, now: dt.datetime | None = None) -> Summ
 
 
 def process_next(
-    session: Session, worker: str = "in-process", now: dt.datetime | None = None
+    session: Session,
+    worker: str = "in-process",
+    now: dt.datetime | None = None,
+    retention: dt.timedelta | None = None,
 ) -> bool:
     """Do one job. Returns False when there was nothing to do."""
     now = now or now_utc()
@@ -231,9 +248,18 @@ def process_next(
     if job is None:
         return False
 
-    _run(job, now)
+    _run(job, now, retention)
     session.commit()
     return True
+
+
+def is_finished(job: SummarizeJob) -> bool:
+    """A job that has not reached a terminal state has no results to return inline.
+
+    An idempotency replay can name one: the first call may still be queued or running, and
+    answering it with an empty ``results`` array is success-shaped and wrong.
+    """
+    return job.status in TERMINAL_JOB_STATUSES
 
 
 def as_response(job: SummarizeJob) -> SummarizeResponse:
@@ -278,6 +304,7 @@ def _results(job: SummarizeJob) -> list[Summary]:
             faithfulness_score=item.faithfulness_score or 0.0,
             withheld=bool(item.withheld),
             withhold_reason=item.withhold_reason,  # type: ignore[arg-type]
+            provenance=item.provenance or [],
         )
         for item in job.items
         if item.error_code is None and item.withheld is not None

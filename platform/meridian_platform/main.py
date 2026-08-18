@@ -3,6 +3,7 @@
 Run with ``uvicorn meridian_platform.main:create_app --factory``.
 """
 
+import datetime as dt
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -36,7 +37,11 @@ def create_app(settings: PlatformSettings | None = None, background: bool = True
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        loops = BackgroundLoops(sessions) if background else None
+        loops = (
+            BackgroundLoops(sessions, dt.timedelta(hours=settings.retention_hours))
+            if background
+            else None
+        )
         if loops is not None:
             loops.start()
         try:

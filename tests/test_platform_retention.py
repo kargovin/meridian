@@ -140,3 +140,13 @@ def test_overdue_counts_what_the_sweep_could_not_reach(platform_session: Session
 
     assert result.jobs_deleted == 1
     assert result.overdue == 2
+
+
+def test_the_retention_window_is_configuration(platform_session: Session) -> None:
+    """A stub deployment can shorten it so a consumer reaches `expired` without a day's wait."""
+    now = dt.datetime.now(dt.UTC)
+    job = enqueue(
+        platform_session, "digest", [item("c1")], now=now, retention=dt.timedelta(minutes=5)
+    )
+
+    assert job.expires_at < now + dt.timedelta(hours=1)

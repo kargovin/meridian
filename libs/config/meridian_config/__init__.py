@@ -54,6 +54,11 @@ class PlatformSettings(_Base):
     inference_rate_limit_per_minute: int = Field(default=600, gt=0)
     poll_rate_limit_per_minute: int = Field(default=1200, gt=0)
 
+    #: How long a finished job and its idempotency key remain readable. The published
+    #: guarantee is 24 hours; a stub deployment may shorten it so a consumer can exercise
+    #: the expired state without waiting a day.
+    retention_hours: int = Field(default=24, gt=0)
+
 
 def load_app() -> AppSettings:
     """Read the application's settings from the environment.

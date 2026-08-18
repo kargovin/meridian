@@ -7,6 +7,12 @@ from meridian_contract.api.errors import ErrorDetail
 #: Sync batch ceiling (2.3 / J4). There is no async path for classify.
 CLASSIFY_MAX_BATCH = 64
 
+#: Taxonomy versions this service will answer for. Decoupled from the wire version so the
+#: label set can change without an API break; a request naming anything else is refused
+#: rather than silently answered against the current one.
+SUPPORTED_TAXONOMY_VERSIONS = ("v1",)
+DEFAULT_TAXONOMY_VERSION = "v1"
+
 
 class ClassifyItem(BaseModel):
     """``id`` is the caller's opaque correlation handle, echoed back unchanged."""
