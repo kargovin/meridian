@@ -11,6 +11,7 @@ from meridian_config import PlatformSettings, load_platform
 
 from meridian_platform.db import create_engine, session_factory
 from meridian_platform.errors import register_error_handlers
+from meridian_platform.limits import RateLimiter
 from meridian_platform.routes import router
 from meridian_platform.worker import BackgroundLoops
 
@@ -45,6 +46,8 @@ def create_app(settings: PlatformSettings | None = None, background: bool = True
     app = FastAPI(title="Summarization & Classification Platform", version="1", lifespan=lifespan)
     app.state.settings = settings
     app.state.session_factory = sessions
+    app.state.inference_limiter = RateLimiter(settings.inference_rate_limit_per_minute)
+    app.state.poll_limiter = RateLimiter(settings.poll_rate_limit_per_minute)
     register_error_handlers(app)
     app.include_router(router)
 

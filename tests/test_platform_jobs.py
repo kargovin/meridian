@@ -157,3 +157,15 @@ def test_a_job_past_its_window_reads_as_expired(platform_session: Session) -> No
     assert state is not None
     assert state.status == JobStatus.EXPIRED
     assert state.results == []
+
+
+def test_a_claimed_job_reads_as_running(platform_session: Session) -> None:
+    """The one status a caller sees while waiting, and the reason polling terminates."""
+    job = enqueue(platform_session, "digest", [item("c1")])
+    claim(platform_session, "worker-a")
+
+    state = read_job(platform_session, str(job.public_id), "digest")
+
+    assert state is not None
+    assert state.status == JobStatus.RUNNING
+    assert state.results == []

@@ -49,7 +49,31 @@ def db(request: Request) -> Iterator[Session]:
 Db = Annotated[Session, Depends(db)]
 
 
-@router.post("/classify", response_model=ClassifyResponse, responses=_ERRORS)
+def _enforce(request: Request, consumer: str, bucket: str) -> None:
+    retry_after = getattr(request.app.state, bucket).check(consumer)
+    if retry_after is not None:
+        raise PlatformError(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            ErrorCode.RATE_LIMITED,
+            "per-consumer rate limit exceeded",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+def inference_limit(request: Request, consumer: Consumer) -> None:
+    _enforce(request, consumer, "inference_limiter")
+
+
+def poll_limit(request: Request, consumer: Consumer) -> None:
+    _enforce(request, consumer, "poll_limiter")
+
+
+@router.post(
+    "/classify",
+    response_model=ClassifyResponse,
+    responses=_ERRORS,
+    dependencies=[Depends(inference_limit)],
+)
 def classify(request: ClassifyRequest, consumer: Consumer) -> ClassifyResponse:
     """``Idempotency-Key`` is accepted and ignored: at a pinned model version a replay
     recomputes the same answer, so there is nothing to deduplicate.
@@ -74,6 +98,7 @@ def classify(request: ClassifyRequest, consumer: Consumer) -> ClassifyResponse:
         202: {"model": JobAccepted, "description": "Batch above the sync ceiling."},
         **_ERRORS,
     },
+    dependencies=[Depends(inference_limit)],
 )
 def summarize(
     request: SummarizeRequest,
@@ -94,6 +119,7 @@ def summarize(
     "/jobs/{job_id}",
     response_model=JobState,
     responses=_ERRORS | {404: {"model": ErrorResponse}},
+    dependencies=[Depends(poll_limit)],
 )
 def job(job_id: str, consumer: Consumer, session: Db) -> JobState:
     state = read_job(session, job_id, consumer)

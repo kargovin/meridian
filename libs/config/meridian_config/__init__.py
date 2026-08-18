@@ -49,6 +49,11 @@ class PlatformSettings(_Base):
     #: Required, no default. Pass ``str(settings.database_url)`` to SQLAlchemy.
     database_url: PostgresDsn
 
+    #: Requests per minute per consumer, counted separately for the two paths so a polling
+    #: loop cannot consume a caller's budget for submitting work.
+    inference_rate_limit_per_minute: int = Field(default=600, gt=0)
+    poll_rate_limit_per_minute: int = Field(default=1200, gt=0)
+
 
 def load_app() -> AppSettings:
     """Read the application's settings from the environment.
