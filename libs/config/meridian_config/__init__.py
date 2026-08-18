@@ -8,7 +8,7 @@ Knobs that must change without a redeploy — poll cadence, FR-C2 threshold, FR-
 source enable/disable — belong in the RFC §9 runtime config plane, not here.
 """
 
-from pydantic import Field, PostgresDsn
+from pydantic import Field, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -60,6 +60,37 @@ class PlatformSettings(_Base):
     retention_hours: int = Field(default=24, gt=0)
 
 
+class AdminSettings(_Base):
+    """The admin surface's credential. Environment prefix ``MERIDIAN_ADMIN_``.
+
+    Its own class rather than a field on ``AppSettings`` because the two are required of
+    different processes. ``AppSettings`` is loaded by anything that reaches the application's
+    database — migrations, the pipeline, tests — and none of those serve the admin surface. A
+    token declared there would have to be supplied to run a migration, which is how a
+    credential ends up in a deploy job that has no use for it.
+
+    Splitting it also makes the scope enforceable rather than promised: a process that never
+    constructs this class never holds the token, which is not something a default on a shared
+    class can offer.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="MERIDIAN_ADMIN_")
+
+    #: Required, no default: a web process without one refuses to boot rather than serving an
+    #: unguarded surface that can change rights_level and enabled.
+    #:
+    #: One shared secret, not a per-person identity. It makes the surface unreachable without
+    #: the credential and does not attribute a change to anyone — the boundary recorded in RFC
+    #: §9 (rev 19), adequate while one operator holds it.
+    #:
+    #: There is deliberately no Platform counterpart: that service is stateless and holds
+    #: nothing to administer.
+    #:
+    #: SecretStr keeps it out of logs and tracebacks via repr. Compare with
+    #: secrets.compare_digest, never ==. Generate with: openssl rand -hex 32
+    token: SecretStr = Field(min_length=32)
+
+
 def load_app() -> AppSettings:
     """Read the application's settings from the environment.
 
@@ -74,4 +105,16 @@ def load_platform() -> PlatformSettings:
     return PlatformSettings()  # type: ignore[call-arg]
 
 
-__all__ = ["AppSettings", "PlatformSettings", "load_app", "load_platform"]
+def load_admin() -> AdminSettings:
+    """Read the admin surface's credential from the environment."""
+    return AdminSettings()  # type: ignore[call-arg]
+
+
+__all__ = [
+    "AdminSettings",
+    "AppSettings",
+    "PlatformSettings",
+    "load_admin",
+    "load_app",
+    "load_platform",
+]
