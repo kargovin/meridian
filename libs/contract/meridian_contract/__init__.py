@@ -1,6 +1,6 @@
-"""Vocabularies and pipeline sequence shared by both deployables.
+"""Vocabularies, pipeline sequence and wire contract shared by both deployables.
 
-Dependency-free by design: the Platform service imports this and must never be able to
+Depends on nothing of the application's: the Platform imports this and must never be able to
 reach ``meridian.db``.
 """
 

@@ -1,0 +1,67 @@
+"""Deleting what we have promised not to keep.
+
+``now`` is an argument rather than something this module reads, so the 24-hour rule can be
+tested in milliseconds.
+
+The two databases share a volume that cannot be grown and PostgreSQL has no per-database
+size limit, so a sweeper that stops running fills the disk and takes the application's
+database down with it. ``overdue`` is the count that says whether that is happening.
+"""
+
+import datetime as dt
+from dataclasses import dataclass
+from typing import Any, cast
+
+import sqlalchemy as sa
+from meridian_contract.api import TERMINAL_JOB_STATUSES
+from sqlalchemy import CursorResult
+from sqlalchemy.orm import Session
+
+from meridian_platform.db import SummarizeJob, SummarizeJobItem
+
+#: Most rows one pass will delete. The bound is what makes ``overdue`` an instrument: an
+#: unbounded delete removes every matching row, so counting the same predicate afterwards
+#: reports zero by construction whether or not the sweeper is keeping up.
+SWEEP_BATCH = 1000
+
+
+@dataclass(frozen=True)
+class SweepResult:
+    inputs_discarded: int
+    jobs_deleted: int
+    #: Rows still past their window after the sweep. Non-zero means arrivals are outrunning
+    #: this sweeper, which on a shared volume that cannot be grown is a capacity signal.
+    overdue: int
+
+
+def sweep(session: Session, now: dt.datetime, batch: int = SWEEP_BATCH) -> SweepResult:
+    terminal = [status.value for status in TERMINAL_JOB_STATUSES]
+
+    discarded = cast(
+        CursorResult[Any],
+        session.execute(
+            sa.update(SummarizeJobItem)
+            .where(
+                SummarizeJobItem.documents.isnot(None),
+                SummarizeJobItem.job_id.in_(
+                    sa.select(SummarizeJob.id).where(SummarizeJob.status.in_(terminal))
+                ),
+            )
+            .values(documents=None)
+        ),
+    ).rowcount
+
+    doomed = sa.select(SummarizeJob.id).where(SummarizeJob.expires_at <= now).limit(batch)
+    deleted = cast(
+        CursorResult[Any],
+        session.execute(
+            sa.delete(SummarizeJob).where(SummarizeJob.id.in_(doomed.scalar_subquery()))
+        ),
+    ).rowcount
+
+    session.commit()
+
+    overdue = session.scalar(
+        sa.select(sa.func.count()).select_from(SummarizeJob).where(SummarizeJob.expires_at <= now)
+    )
+    return SweepResult(inputs_discarded=discarded, jobs_deleted=deleted, overdue=overdue or 0)

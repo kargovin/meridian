@@ -34,6 +34,11 @@ Two deployables:
 
 The only cross-deployable hops are those two calls. The Digest team consumes the same endpoints.
 
+The wire contract is `platform/openapi.json`, generated from the Pydantic models in
+`libs/contract` by `python -m meridian_platform.openapi` and checked by a test, so it cannot
+drift from the service. It is published to consuming teams: a diff to it is a change to an
+interface other teams have built against, and is reviewed as one.
+
 ![Meridian News end-to-end data flow](rfc-2.2-dataflow.svg)
 
 ## Design decisions

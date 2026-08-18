@@ -1,11 +1,11 @@
 """Engine and session factory."""
 
 import sqlalchemy as sa
-from meridian_config import Settings
+from meridian_config import AppSettings
 from sqlalchemy.orm import Session, sessionmaker
 
 
-def create_engine(settings: Settings) -> sa.Engine:
+def create_engine(settings: AppSettings) -> sa.Engine:
     return sa.create_engine(str(settings.database_url), pool_pre_ping=True)
 
 

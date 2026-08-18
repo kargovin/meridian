@@ -3,7 +3,9 @@ name = "meridian-contract"
 version = "0.1.0"
 description = "Shared enums and pipeline declarations — the single source of the published contract"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "pydantic>=2.8",
+]
 
 [build-system]
 requires = ["hatchling"]

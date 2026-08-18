@@ -1,25 +1,30 @@
-"""Alembic environment.
+"""Alembic environment for the Platform's database.
 
-The database URL comes from ``MERIDIAN_DATABASE_URL``, never from ``alembic.ini`` — one
-source of truth for which database a process talks to.
+Wholly separate from the application's tree: its own versions directory, its own
+``alembic_version`` table, its own database, and its own MetaData. Sharing any of the four
+makes one tree's autogenerate propose dropping the other's tables, and ``upgrade head``
+executes what autogenerate proposes.
+
+The URL comes from ``MERIDIAN_PLATFORM_DATABASE_URL``, never from ``alembic.ini``.
 """
 
 from logging.config import fileConfig
+from typing import Any, cast
 
 import sqlalchemy as sa
 from alembic import context
-from meridian_config import load_app
+from meridian_config import load_platform
 from meridian_dbkit import StrEnumType
 from sqlalchemy import pool
 
-from meridian.db.models import Base
+from meridian_platform.db import Base
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-settings = load_app()
+settings = load_platform()
 
 target_metadata = Base.metadata
 
@@ -28,17 +33,14 @@ def render_item(type_: str, obj: object, autogen_context: object) -> str | bool:
     """Render application column types as their plain SQL equivalent.
 
     A migration that imports application code stops working the day that code moves.
-    ``StrEnumType`` is a ``varchar`` on disk; the CHECK that constrains it is a separate
-    constraint the migration already carries.
     """
     if type_ == "type" and isinstance(obj, StrEnumType):
-        return f"sa.String(length={obj.impl_instance.length})"
+        return f"sa.String(length={cast(sa.String, obj.impl_instance).length})"
     return False
 
 
-#: ``compare_server_default`` catches a default drifting between the models and the
-#: database, which a column-type comparison alone misses.
-COMPARE_OPTS = {
+#: Heterogeneous by nature — annotated so ``**COMPARE_OPTS`` type-checks at the call sites.
+COMPARE_OPTS: dict[str, Any] = {
     "compare_type": True,
     "compare_server_default": True,
     "render_item": render_item,
@@ -58,8 +60,6 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    # A caller (the test suite) may supply its own connection so migrations run against a
-    # database of its choosing rather than MERIDIAN_DATABASE_URL.
     supplied = config.attributes.get("connection")
     if supplied is not None:
         context.configure(connection=supplied, target_metadata=target_metadata, **COMPARE_OPTS)
