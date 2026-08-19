@@ -13,10 +13,12 @@ Routes hold no database logic; they parse a request, call ``db.sources`` and ans
 """
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
 from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
 from sqlalchemy.orm import Session
 
@@ -24,6 +26,17 @@ from meridian.db import sources
 from meridian.web.auth import RequireAdmin
 
 router = APIRouter(prefix="/admin", dependencies=[RequireAdmin])
+
+templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+
+#: The vocabularies the form offers. Read from the contract rather than repeated as literals
+#: in the markup, so a member added there appears in the form and cannot fall out of step
+#: with the CHECK constraint built from the same enum.
+_VOCABULARIES: dict[str, object] = {
+    "discovery_methods": list(DiscoveryMethod),
+    "tiers": list(AcquisitionTier),
+    "rights_levels": list(RightsLevel),
+}
 
 
 def db(request: Request) -> Iterator[Session]:
@@ -47,28 +60,36 @@ def _redirect() -> RedirectResponse:
     return RedirectResponse(_LIST, status_code=status.HTTP_303_SEE_OTHER)
 
 
-@router.get("/sources")
-def list_sources(session: Db) -> dict[str, object]:
-    return {"sources": [s.name for s in sources.list_all(session)]}
+@router.get("/sources", response_class=HTMLResponse)
+def list_sources(request: Request, session: Db) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "sources/list.html",
+        {"sources": sources.list_all(session), **_VOCABULARIES},
+    )
 
 
-@router.get("/sources/new")
-def new_source() -> dict[str, object]:
+@router.get("/sources/new", response_class=HTMLResponse)
+def new_source(request: Request) -> HTMLResponse:
     """The empty create form.
 
     Declared before ``/sources/{source_id}``: FastAPI matches in declaration order, and a
     typed path parameter rejects with 422 rather than falling through to a later route, so
     the reverse order makes this URL unreachable.
     """
-    return {"source": None}
+    return templates.TemplateResponse(
+        request, "sources/form.html", {"source": None, **_VOCABULARIES}
+    )
 
 
-@router.get("/sources/{source_id}")
-def edit_source(source_id: int, session: Db) -> dict[str, object]:
+@router.get("/sources/{source_id}", response_class=HTMLResponse)
+def edit_source(source_id: int, request: Request, session: Db) -> HTMLResponse:
     source = sources.get(session, source_id)
     if source is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
-    return {"source": source.name}
+    return templates.TemplateResponse(
+        request, "sources/form.html", {"source": source, **_VOCABULARIES}
+    )
 
 
 @router.post("/sources")

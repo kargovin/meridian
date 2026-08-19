@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit source" if source else "Add a source" }}{% endblock %}
+{% block body %}
+<h1>{{ "Edit " ~ source.name if source else "Add a source" }}</h1>
+
+{# One template for both: the fields are identical, only the action differs. #}
+<form method="post" action="{% if source %}/admin/sources/{{ source.source_id }}{% else %}/admin/sources{% endif %}">
+  <label>
+    <span>Name</span>
+    <input name="name" required value="{{ source.name if source else '' }}">
+  </label>
+  <label>
+    <span>Home URL</span>
+    <input name="home_url" type="url" required value="{{ source.home_url if source else '' }}">
+  </label>
+  <label>
+    <span>Discovery method</span>
+    <select name="discovery_method">
+      {% for method in discovery_methods %}
+      <option value="{{ method.value }}" {% if source and method == source.discovery_method %}selected{% endif %}>{{ method.value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    <span>Acquisition tier</span>
+    <select name="acquisition_tier">
+      {% for tier in tiers %}
+      <option value="{{ tier.value }}" {% if source and tier == source.acquisition_tier %}selected{% endif %}>{{ tier.value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    <span>Rights level</span>
+    <select name="rights_level">
+      {% for level in rights_levels %}
+      <option value="{{ level.value }}" {% if source and level == source.rights_level %}selected{% endif %}>{{ level.value }}</option>
+      {% endfor %}
+    </select>
+    <small>headline_only excludes this source from summarization (FR-S5). Applies to
+    articles already ingested, not only new ones.</small>
+  </label>
+  <label>
+    <span>Jurisdiction</span>
+    <input name="jurisdiction" required value="{{ source.jurisdiction if source else '' }}">
+  </label>
+  <label>
+    <span>Rate limit (requests/min)</span>
+    <input name="rate_limit_per_min" type="number" min="1" required
+           value="{{ source.rate_limit_per_min if source else 30 }}">
+  </label>
+  <label>
+    {# Absent when unchecked, which is why the route defaults it to False. #}
+    <input type="checkbox" name="enabled" value="true"
+           {% if source is none or source.enabled %}checked{% endif %}>
+    <span style="display:inline">Ingesting</span>
+  </label>
+  <button type="submit">Save</button>
+</form>
+{% endblock %}

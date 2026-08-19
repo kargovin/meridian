@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Meridian admin{% endblock %}</title>
+<style>
+  :root { color-scheme: light dark; --line: #8884; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 70rem; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; }
+  td form { display: inline; }
+  .off td:not(:last-child) { opacity: .5; }
+  label { display: block; margin: .8rem 0; }
+  label span { display: block; font-weight: 600; }
+  input, select { font: inherit; padding: .3rem; min-width: 22rem; max-width: 100%; }
+  input[type=checkbox] { min-width: 0; }
+  button { font: inherit; padding: .3rem .7rem; }
+  .warn { color: #b00; font-weight: 600; }
+  nav { margin-bottom: 1rem; }
+</style>
+<nav><a href="/admin/sources">Sources</a></nav>
+{% block body %}{% endblock %}

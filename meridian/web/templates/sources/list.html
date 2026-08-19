@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Sources{% endblock %}
+{% block body %}
+<h1>Source registry</h1>
+<p><a href="/admin/sources/new">Add a source</a></p>
+{% if not sources %}
+  <p>No sources yet.</p>
+{% else %}
+<table>
+  <tr>
+    <th>Name</th><th>Discovery</th><th>Tier</th><th>Rights</th>
+    <th>Juris.</th><th>Rate</th><th>Ingesting</th>
+  </tr>
+  {% for source in sources %}
+  <tr {% if not source.enabled %}class="off"{% endif %}>
+    <td><a href="/admin/sources/{{ source.source_id }}">{{ source.name }}</a></td>
+    <td>{{ source.discovery_method.value }}</td>
+    <td>
+      {# Its own form: a tier change must not depend on the rest of the row being valid. #}
+      <form method="post" action="/admin/sources/{{ source.source_id }}/tier">
+        <select name="acquisition_tier" onchange="this.form.submit()">
+          {% for tier in tiers %}
+          <option value="{{ tier.value }}" {% if tier == source.acquisition_tier %}selected{% endif %}>
+            {{ tier.value }}
+          </option>
+          {% endfor %}
+        </select>
+        <noscript><button type="submit">set</button></noscript>
+      </form>
+    </td>
+    <td>
+      {% if source.rights_level.value == "headline_only" %}
+        <span class="warn">headline only</span>
+      {% else %}
+        {{ source.rights_level.value }}
+      {% endif %}
+    </td>
+    <td>{{ source.jurisdiction }}</td>
+    <td>{{ source.rate_limit_per_min }}/min</td>
+    <td>
+      <form method="post" action="/admin/sources/{{ source.source_id }}/enable">
+        <input type="hidden" name="enabled" value="{{ 'false' if source.enabled else 'true' }}">
+        <button type="submit">{{ "Stop" if source.enabled else "Resume" }}</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}
