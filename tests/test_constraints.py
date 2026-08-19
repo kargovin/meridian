@@ -5,6 +5,7 @@ import datetime as dt
 import pytest
 import sqlalchemy as sa
 from meridian_contract import Stage, WithholdReason
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from meridian.db.models import ClusterMember, PipelineWork, Summary
@@ -171,3 +172,14 @@ def test_a_dead_lettered_subject_can_be_re_enqueued(app_session: Session) -> Non
         .where(PipelineWork.dead_lettered_at.is_(None))
     ).scalar()
     assert open_rows == 1
+
+
+def test_the_rate_limit_must_be_positive(app_session: Session) -> None:
+    """Pins the CHECK's expression, which no schema tool can see.
+
+    ``alembic check`` compares check constraints by name only — altering this one to ``>= 0``
+    in the database leaves ``compare_metadata`` returning no diff at all. FR-I3 politeness has
+    no meaning at zero, and the pipeline's obvious use of it has no defined behaviour there.
+    """
+    with pytest.raises(IntegrityError):
+        make_source(app_session, name="Impolite", rate_limit_per_min=0)

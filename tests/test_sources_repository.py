@@ -1,5 +1,6 @@
 """The source registry's read and write paths (FR-I2, FR-I6, FR-S5)."""
 
+import datetime as dt
 from typing import Any
 
 import pytest
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session, aliased
 from meridian.db import sources
 from meridian.db.models import CanonicalRecord
 from tests.factories import make_article, make_source
+
+NOW = dt.datetime.now(dt.UTC)
 
 
 def test_create_then_read_back(app_session: Session) -> None:
@@ -92,7 +95,9 @@ def test_disabling_removes_a_source_from_what_discovery_polls(app_session: Sessi
     stop = make_source(app_session, name="Stop")
     assert {s.source_id for s in sources.enabled(app_session)} == {keep.source_id, stop.source_id}
 
-    sources.set_enabled(app_session, stop.source_id, value=False)
+    sources.set_enabled(
+        app_session, stop.source_id, value=False, expected_updated_at=stop.updated_at
+    )
 
     assert {s.source_id for s in sources.enabled(app_session)} == {keep.source_id}
 
@@ -102,7 +107,12 @@ def test_a_disabled_source_is_still_administrable(app_session: Session) -> None:
     source = make_source(app_session, name="Stopped", enabled=False)
 
     assert source.source_id in {s.source_id for s in sources.list_all(app_session)}
-    assert sources.set_enabled(app_session, source.source_id, value=True) is not None
+    assert (
+        sources.set_enabled(
+            app_session, source.source_id, value=True, expected_updated_at=source.updated_at
+        )
+        is not None
+    )
     assert {s.source_id for s in sources.enabled(app_session)} == {source.source_id}
 
 
@@ -111,13 +121,18 @@ def test_the_emergency_stop_does_not_revalidate_the_rest_of_the_row(
 ) -> None:
     """AC1's falsifier in miniature.
 
-    ``set_enabled`` exists apart from ``replace`` so that stopping ingestion cannot fail on a
+    ``set_enabled`` exists apart from ``describe`` so that stopping ingestion cannot fail on a
     field nobody is trying to change. Routed through the full-row write, an emergency stop
     would depend on every other value being submitted and valid.
     """
     source = make_source(app_session, name="Awkward")
 
-    assert sources.set_enabled(app_session, source.source_id, value=False) is not None
+    assert (
+        sources.set_enabled(
+            app_session, source.source_id, value=False, expected_updated_at=source.updated_at
+        )
+        is not None
+    )
 
     fetched = sources.get(app_session, source.source_id)
     assert fetched is not None
@@ -129,7 +144,12 @@ def test_tier_downgrade_takes_effect_on_the_next_read(app_session: Session) -> N
     """AC3, by the same path as AC1."""
     source = make_source(app_session, acquisition_tier=AcquisitionTier.FULL_FEED)
 
-    sources.set_acquisition_tier(app_session, source.source_id, tier=AcquisitionTier.EXTRACTION)
+    sources.set_acquisition_tier(
+        app_session,
+        source.source_id,
+        tier=AcquisitionTier.EXTRACTION,
+        expected_updated_at=source.updated_at,
+    )
 
     fetched = sources.get(app_session, source.source_id)
     assert fetched is not None
@@ -137,10 +157,68 @@ def test_tier_downgrade_takes_effect_on_the_next_read(app_session: Session) -> N
 
 
 def test_the_targeted_setters_report_an_unknown_id(app_session: Session) -> None:
-    assert sources.set_enabled(app_session, 999_999, value=False) is None
+    assert sources.set_enabled(app_session, 999_999, value=False, expected_updated_at=NOW) is None
     assert (
-        sources.set_acquisition_tier(app_session, 999_999, tier=AcquisitionTier.EXTRACTION) is None
+        sources.set_acquisition_tier(
+            app_session, 999_999, tier=AcquisitionTier.EXTRACTION, expected_updated_at=NOW
+        )
+        is None
     )
+
+
+def test_a_governing_write_from_a_stale_page_is_refused(app_session: Session) -> None:
+    """Compare-and-set, and the reason it covers all three fields rather than only rights.
+
+    Each control renders the row's current value, so a page drawn before an out-of-band change
+    and submitted after it would write the stale value back — reverting a rights revocation or
+    a stop-ingestion instruction with no error at all.
+    """
+    source = make_source(app_session, rights_level=RightsLevel.BODY_TEXT)
+    app_session.commit()
+    as_rendered = source.updated_at
+
+    sources.set_rights_level(
+        app_session,
+        source.source_id,
+        level=RightsLevel.HEADLINE_ONLY,
+        expected_updated_at=as_rendered,
+    )
+    app_session.commit()
+
+    with pytest.raises(sources.StaleWrite):
+        sources.set_rights_level(
+            app_session,
+            source.source_id,
+            level=RightsLevel.BODY_TEXT,
+            expected_updated_at=as_rendered,
+        )
+
+    app_session.rollback()
+    after = sources.get(app_session, source.source_id)
+    assert after is not None
+    assert after.rights_level is RightsLevel.HEADLINE_ONLY
+
+
+def test_the_version_token_moves_on_a_write_that_bypasses_the_orm(app_session: Session) -> None:
+    """The token is only as good as the trigger behind it.
+
+    The emergency path is as likely to be psql as a form, and an ORM-maintained token would not
+    move for it — leaving a stale page able to revert a change made that way.
+    """
+    source = make_source(app_session)
+    app_session.commit()
+    as_rendered = source.updated_at
+
+    app_session.execute(
+        sa.text("UPDATE source SET enabled = false WHERE source_id = :i"),
+        {"i": source.source_id},
+    )
+    app_session.commit()
+
+    with pytest.raises(sources.StaleWrite):
+        sources.set_enabled(
+            app_session, source.source_id, value=True, expected_updated_at=as_rendered
+        )
 
 
 # ------------------------------------------------------------------ AC2
@@ -182,7 +260,12 @@ def test_a_downgrade_applies_to_articles_already_ingested(app_session: Session) 
     article = make_article(app_session, source, guid="acquired-before-the-downgrade")
     assert article.article_id in _with_body_rights(app_session)
 
-    sources.set_rights_level(app_session, source.source_id, level=RightsLevel.HEADLINE_ONLY)
+    sources.set_rights_level(
+        app_session,
+        source.source_id,
+        level=RightsLevel.HEADLINE_ONLY,
+        expected_updated_at=source.updated_at,
+    )
 
     assert article.article_id not in _with_body_rights(app_session)
 
@@ -200,7 +283,12 @@ def test_the_downgrade_writes_nothing_to_the_article(app_session: Session) -> No
         {"i": article.article_id},
     ).scalar_one()
 
-    sources.set_acquisition_tier(app_session, source.source_id, tier=AcquisitionTier.EXTRACTION)
+    sources.set_acquisition_tier(
+        app_session,
+        source.source_id,
+        tier=AcquisitionTier.EXTRACTION,
+        expected_updated_at=source.updated_at,
+    )
     app_session.flush()
 
     after = app_session.execute(

@@ -18,8 +18,12 @@
     <td>
       {# Its own form: a tier change must not depend on the rest of the row being valid.
          An explicit button, never onchange — a scroll over a focused select would otherwise
-         change a source's acquisition tier with no confirmation and no record. #}
+         change a source's acquisition tier with no confirmation and no record.
+         Every governing control carries the row's updated_at: the option rendered as selected
+         is the value as of page load, so without it a page submitted after an out-of-band
+         change would write the stale value back. #}
       <form method="post" action="/admin/sources/{{ source.source_id }}/tier">
+        <input type="hidden" name="expected_updated_at" value="{{ source.updated_at.isoformat() }}">
         <select name="acquisition_tier">
           {% for tier in tiers %}
           <option value="{{ tier.value }}" {% if tier == source.acquisition_tier %}selected{% endif %}>
@@ -33,6 +37,7 @@
     <td>
       {# Governing field, so it is set here and not on the descriptive form. #}
       <form method="post" action="/admin/sources/{{ source.source_id }}/rights">
+        <input type="hidden" name="expected_updated_at" value="{{ source.updated_at.isoformat() }}">
         <select name="rights_level" class="{% if source.rights_level.value == 'headline_only' %}warn{% endif %}">
           {% for level in rights_levels %}
           <option value="{{ level.value }}" {% if level == source.rights_level %}selected{% endif %}>
@@ -50,6 +55,7 @@
     <td>{{ source.rate_limit_per_min }}/min</td>
     <td>
       <form method="post" action="/admin/sources/{{ source.source_id }}/enable">
+        <input type="hidden" name="expected_updated_at" value="{{ source.updated_at.isoformat() }}">
         <input type="hidden" name="enabled" value="{{ 'false' if source.enabled else 'true' }}">
         <button type="submit">{{ "Stop" if source.enabled else "Resume" }}</button>
       </form>

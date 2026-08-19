@@ -12,6 +12,7 @@ source means (FR-I6).
 Routes hold no database logic; they parse a request, call ``db.sources`` and answer.
 """
 
+import datetime as dt
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
@@ -49,6 +50,16 @@ Db = Annotated[Session, Depends(db)]
 
 #: Where every write lands. One place, so a new write route cannot invent its own.
 _LIST = "/admin/sources"
+
+
+def _stale(exc: sources.StaleWrite) -> HTTPException:
+    """A write offered by a page that no longer reflects the row.
+
+    409 rather than a silent overwrite: the value this control carries was rendered before the
+    row changed, so applying it would revert whatever changed it — which on this surface means
+    reverting a rights revocation or a stop-ingestion instruction.
+    """
+    return HTTPException(status.HTTP_409_CONFLICT, f"{exc} — reload and try again")
 
 
 def _redirect() -> RedirectResponse:
@@ -157,14 +168,23 @@ def set_enabled(
     source_id: int,
     session: Db,
     enabled: Annotated[bool, Form()],
+    expected_updated_at: Annotated[dt.datetime, Form()],
 ) -> RedirectResponse:
     """Stop or resume one source (FR-I6).
 
     Its own route, not a variant of the full-row write, so that stopping ingestion cannot be
     rejected because an unrelated field on the row is incomplete.
     """
-    if sources.set_enabled(session, source_id, value=enabled) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
+    try:
+        if (
+            sources.set_enabled(
+                session, source_id, value=enabled, expected_updated_at=expected_updated_at
+            )
+            is None
+        ):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
+    except sources.StaleWrite as stale:
+        raise _stale(stale) from stale
     return _redirect()
 
 
@@ -173,10 +193,19 @@ def set_rights(
     source_id: int,
     session: Db,
     rights_level: Annotated[RightsLevel, Form()],
+    expected_updated_at: Annotated[dt.datetime, Form()],
 ) -> RedirectResponse:
     """Grant or revoke body-text rights (FR-S5). Applies to articles already ingested."""
-    if sources.set_rights_level(session, source_id, level=rights_level) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
+    try:
+        if (
+            sources.set_rights_level(
+                session, source_id, level=rights_level, expected_updated_at=expected_updated_at
+            )
+            is None
+        ):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
+    except sources.StaleWrite as stale:
+        raise _stale(stale) from stale
     return _redirect()
 
 
@@ -185,7 +214,16 @@ def set_tier(
     source_id: int,
     session: Db,
     acquisition_tier: Annotated[AcquisitionTier, Form()],
+    expected_updated_at: Annotated[dt.datetime, Form()],
 ) -> RedirectResponse:
-    if sources.set_acquisition_tier(session, source_id, tier=acquisition_tier) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
+    try:
+        if (
+            sources.set_acquisition_tier(
+                session, source_id, tier=acquisition_tier, expected_updated_at=expected_updated_at
+            )
+            is None
+        ):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
+    except sources.StaleWrite as stale:
+        raise _stale(stale) from stale
     return _redirect()

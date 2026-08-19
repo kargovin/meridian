@@ -119,8 +119,23 @@ def test_the_toggle_posts_the_opposite_of_the_current_state(
 
     body = client.get("/admin/sources", auth=AUTH).text
 
-    assert _form(body, f"/admin/sources/{on.source_id}/enable") == {"enabled": "false"}
-    assert _form(body, f"/admin/sources/{off.source_id}/enable") == {"enabled": "true"}
+    assert _form(body, f"/admin/sources/{on.source_id}/enable")["enabled"] == "false"
+    assert _form(body, f"/admin/sources/{off.source_id}/enable")["enabled"] == "true"
+
+
+def test_every_governing_control_carries_the_version_token(
+    client: TestClient, app_session: Session
+) -> None:
+    """Without it the control writes the value it rendered, whatever happened since."""
+    source = make_source(app_session, name="Example")
+    app_session.commit()
+
+    body = client.get("/admin/sources", auth=AUTH).text
+
+    for action in ("enable", "rights", "tier"):
+        fields = _form(body, f"/admin/sources/{source.source_id}/{action}")
+        assert "expected_updated_at" in fields, action
+        assert fields["expected_updated_at"] == source.updated_at.isoformat()
 
 
 def test_headline_only_is_called_out_in_the_list(client: TestClient, app_session: Session) -> None:

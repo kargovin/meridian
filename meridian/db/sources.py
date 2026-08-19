@@ -9,6 +9,7 @@ None of these commit. The caller owns the transaction — unlike ``work_queue.cl
 commits by design because its lock must not outlive the claim.
 """
 
+import datetime as dt
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -16,6 +17,17 @@ from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
 from sqlalchemy.orm import Session
 
 from meridian.db.models import CanonicalRecord, Source
+
+
+class StaleWrite(Exception):
+    """The row changed after the page that submitted this write was rendered.
+
+    Every governing-field write is compare-and-set. Each control on the admin surface renders
+    the row's current value, so submitting one written before an out-of-band change would write
+    that stale value back — reverting a rights revocation or a stop-ingestion instruction with
+    no error, from one operator with two tabs open. ``updated_at`` is the version token: it is
+    trigger-maintained, so a change made through psql moves it too.
+    """
 
 
 def list_all(session: Session) -> Sequence[Source]:
@@ -95,15 +107,29 @@ def describe(
     return source
 
 
-def set_enabled(session: Session, source_id: int, *, value: bool) -> Source | None:
-    """Stop or resume ingestion from one source.
-
-    Separate from ``replace`` on purpose. This is the path a takedown or a ToS complaint
-    takes, and it must not be able to fail because some unrelated field on the row is
-    incomplete — an emergency stop that rejects the form is an emergency stop that did not
-    happen.
-    """
+def _claim(session: Session, source_id: int, expected_updated_at: dt.datetime) -> Source | None:
     source = session.get(Source, source_id)
+    if source is None:
+        return None
+    session.refresh(source)
+    if source.updated_at != expected_updated_at:
+        raise StaleWrite(
+            f"source {source_id} changed at {source.updated_at.isoformat()}, "
+            f"after the page offering this write was rendered"
+        )
+    return source
+
+
+def set_enabled(
+    session: Session, source_id: int, *, value: bool, expected_updated_at: dt.datetime
+) -> Source | None:
+    """Stop or resume ingestion from one source (FR-I6).
+
+    Separate from ``describe`` on purpose. This is the path a takedown or a ToS complaint takes,
+    and it must not be able to fail because some unrelated field on the row is incomplete — an
+    emergency stop that rejects the form is an emergency stop that did not happen.
+    """
+    source = _claim(session, source_id, expected_updated_at)
     if source is None:
         return None
     source.enabled = value
@@ -111,13 +137,15 @@ def set_enabled(session: Session, source_id: int, *, value: bool) -> Source | No
     return source
 
 
-def set_rights_level(session: Session, source_id: int, *, level: RightsLevel) -> Source | None:
+def set_rights_level(
+    session: Session, source_id: int, *, level: RightsLevel, expected_updated_at: dt.datetime
+) -> Source | None:
     """Grant or revoke body-text rights (FR-S5), for the same reason as ``set_enabled``.
 
     Read at the point of use rather than copied onto articles, so this applies to records
     already ingested with nothing to cascade (RFC §5.2, rev 20).
     """
-    source = session.get(Source, source_id)
+    source = _claim(session, source_id, expected_updated_at)
     if source is None:
         return None
     source.rights_level = level
@@ -126,15 +154,27 @@ def set_rights_level(session: Session, source_id: int, *, level: RightsLevel) ->
 
 
 def set_acquisition_tier(
-    session: Session, source_id: int, *, tier: AcquisitionTier
+    session: Session,
+    source_id: int,
+    *,
+    tier: AcquisitionTier,
+    expected_updated_at: dt.datetime,
 ) -> Source | None:
     """Change how a source's bodies are obtained, for the same reason as ``set_enabled``."""
-    source = session.get(Source, source_id)
+    source = _claim(session, source_id, expected_updated_at)
     if source is None:
         return None
     source.acquisition_tier = tier
     session.flush()
     return source
+
+
+def _article_ids_by_rights(level: RightsLevel) -> sa.Select[tuple[int]]:
+    return (
+        sa.select(CanonicalRecord.article_id)
+        .join(Source, Source.source_id == CanonicalRecord.source_id)
+        .where(Source.rights_level == level)
+    )
 
 
 def article_ids_with_body_rights() -> sa.Select[tuple[int]]:
@@ -147,25 +187,42 @@ def article_ids_with_body_rights() -> sa.Select[tuple[int]]:
         )
 
     Rights live in one place — the registry — and are read here at the point of use. There is
-    deliberately no copy on the article: rights are a relationship and relationships change,
-    so a stored answer would report what was true at acquisition and keep reporting it after a
+    deliberately no copy on the article: rights are a relationship and relationships change, so
+    a stored answer would report what was true at acquisition and keep reporting it after a
     downgrade (RFC §5.2, rev 20). Reading through the source means a downgrade takes effect for
     records already ingested, with nothing to cascade.
 
     Returning a self-contained ``Select`` rather than a bare predicate is the load-bearing
-    part, and it is what mypy pins. A predicate that references the outer row must be
-    correlated to it, and SQLAlchemy infers that correlation from the enclosing statement: when
-    the caller selects from an alias, a subquery or a CTE instead of the bare table, the
-    correlation is silently dropped and the predicate reads true for every row. Negated it then
-    excludes nothing — the direction that matters, because a caller asking this is asking what
-    it may not summarize. Resolving the question inside a subquery of our own puts it out of
-    the caller's reach; how that subquery is written is not what makes it safe.
+    part. A predicate that references the outer row must be correlated to it, and SQLAlchemy
+    infers that correlation from the enclosing statement: when the caller selects from an
+    alias, a subquery or a CTE instead of the bare table, the correlation is silently dropped
+    and the predicate reads true for every row. Resolving the question inside a subquery of our
+    own puts it out of the caller's reach.
 
-    ``NOT IN`` is safe against this because ``article_id`` is a primary key: a single NULL in
-    the subquery would make ``NOT IN`` return nothing at all.
+    For the excluded set use ``article_ids_without_body_rights()``, never ``~...in_()`` — see
+    there.
     """
-    return (
-        sa.select(CanonicalRecord.article_id)
-        .join(Source, Source.source_id == CanonicalRecord.source_id)
-        .where(Source.rights_level == RightsLevel.BODY_TEXT)
-    )
+    return _article_ids_by_rights(RightsLevel.BODY_TEXT)
+
+
+def article_ids_without_body_rights() -> sa.Select[tuple[int]]:
+    """The complement: articles their source does not grant body-text rights for.
+
+    Published positively rather than left to ``NOT IN`` on the set above, for two reasons.
+
+    ``NOT IN (subquery)`` is the one form PostgreSQL cannot pull up into an anti-join. It
+    becomes a ``SubPlan``, hashed only while the id set fits ``work_mem`` and rescanned per row
+    once it does not — a step, not a gradient. Measured on this schema at the default 4 MB:
+    0.2 s at 300k articles, over ten seconds at 500k. ``IN`` over this complement returns the
+    same rows in well under a second at 500k, because it is a hash semi-join.
+
+    And the exclusion is the direction that matters, because a caller asking is asking what it
+    may **not** summarize. ``NOT IN`` also returns nothing at all if the subquery yields a
+    single NULL — which cannot happen while these joins are inner, but would the moment one
+    became an outer join, and the rights filter would then fail open rather than closed.
+
+    Exact rather than merely complementary: ``canonical_record.source_id`` is NOT NULL, the
+    join is inner, and ``rights_level`` is two-valued under a CHECK, so every article falls in
+    exactly one of the two sets.
+    """
+    return _article_ids_by_rights(RightsLevel.HEADLINE_ONLY)

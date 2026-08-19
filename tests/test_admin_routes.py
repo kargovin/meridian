@@ -11,6 +11,15 @@ from sqlalchemy.orm import Session
 from meridian.db import sources
 from meridian.web.app import create_app
 
+
+def _token(session: Session, source_id: int) -> str:
+    """The version token a freshly rendered page would carry."""
+    session.expire_all()
+    source = sources.get(session, source_id)
+    assert source is not None
+    return source.updated_at.isoformat()
+
+
 TOKEN = "t" * 32
 AUTH = ("anything", TOKEN)
 
@@ -102,7 +111,11 @@ def test_the_create_form_is_reachable(client: TestClient) -> None:
 def test_an_unknown_source_is_a_404(client: TestClient) -> None:
     assert client.get("/admin/sources/999999", auth=AUTH).status_code == 404
     assert (
-        client.post("/admin/sources/999999/enable", auth=AUTH, data={"enabled": "true"}).status_code
+        client.post(
+            "/admin/sources/999999/enable",
+            auth=AUTH,
+            data={"enabled": "true", "expected_updated_at": "2026-01-01T00:00:00+00:00"},
+        ).status_code
         == 404
     )
 
@@ -137,8 +150,13 @@ def test_disabling_a_source_takes_effect_immediately(
     source = sources.list_all(app_session)[0]
     assert [s.source_id for s in sources.enabled(app_session)] == [source.source_id]
 
-    client.post(f"/admin/sources/{source.source_id}/enable", auth=AUTH, data={"enabled": "false"})
+    response = client.post(
+        f"/admin/sources/{source.source_id}/enable",
+        auth=AUTH,
+        data={"enabled": "false", "expected_updated_at": _token(app_session, source.source_id)},
+    )
 
+    assert response.status_code == 200, response.text
     app_session.expire_all()
     assert sources.enabled(app_session) == []
 
@@ -153,7 +171,10 @@ def test_a_rights_revocation_takes_effect_immediately(
     client.post(
         f"/admin/sources/{source.source_id}/rights",
         auth=AUTH,
-        data={"rights_level": "headline_only"},
+        data={
+            "rights_level": "headline_only",
+            "expected_updated_at": _token(app_session, source.source_id),
+        },
     )
 
     app_session.expire_all()
@@ -183,11 +204,18 @@ def test_the_edit_form_cannot_revert_an_emergency_change(
         "rights_level": "body_text",
         "acquisition_tier": "1_full_feed",
     }
-    client.post(f"/admin/sources/{source.source_id}/enable", auth=AUTH, data={"enabled": "false"})
+    client.post(
+        f"/admin/sources/{source.source_id}/enable",
+        auth=AUTH,
+        data={"enabled": "false", "expected_updated_at": _token(app_session, source.source_id)},
+    )
     client.post(
         f"/admin/sources/{source.source_id}/rights",
         auth=AUTH,
-        data={"rights_level": "headline_only"},
+        data={
+            "rights_level": "headline_only",
+            "expected_updated_at": _token(app_session, source.source_id),
+        },
     )
 
     assert (
@@ -229,7 +257,10 @@ def test_a_tier_downgrade_takes_effect_immediately(
     client.post(
         f"/admin/sources/{source.source_id}/tier",
         auth=AUTH,
-        data={"acquisition_tier": "3_extraction"},
+        data={
+            "acquisition_tier": "3_extraction",
+            "expected_updated_at": _token(app_session, source.source_id),
+        },
     )
 
     app_session.expire_all()

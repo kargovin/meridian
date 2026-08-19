@@ -61,7 +61,9 @@ def test_seeding_never_re_enables_a_stopped_source(app_session: Session) -> None
     next deploy, silently and with no failing test anywhere.
     """
     existing = make_source(app_session, name="Example Times", home_url="https://times.example")
-    sources.set_enabled(app_session, existing.source_id, value=False)
+    sources.set_enabled(
+        app_session, existing.source_id, value=False, expected_updated_at=existing.updated_at
+    )
     app_session.flush()
 
     seeder.seed(app_session, [_entry(enabled=True)])

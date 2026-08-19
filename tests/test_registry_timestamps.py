@@ -42,7 +42,9 @@ def test_an_update_moves_updated_at_and_leaves_created_at(app_session: Session) 
     app_session.commit()
     created_before, updated_before = _timestamps(app_session, source.source_id)
 
-    sources.set_enabled(app_session, source.source_id, value=False)
+    sources.set_enabled(
+        app_session, source.source_id, value=False, expected_updated_at=updated_before
+    )
     app_session.commit()
 
     created_after, updated_after = _timestamps(app_session, source.source_id)
