@@ -27,16 +27,16 @@ def sha256(text: str) -> str:
 
 
 def make_source(app_session: Session, name: str = "Example News", **kw: Any) -> Source:
-    source = Source(
-        name=name,
-        home_url=f"https://{name.lower().replace(' ', '')}.example",
-        discovery_method=DiscoveryMethod.RSS,
-        acquisition_tier=AcquisitionTier.FULL_FEED,
-        rights_level=RightsLevel.BODY_TEXT,
-        jurisdiction="GB",
-        rate_limit_per_min=30,
-        **kw,
-    )
+    defaults: dict[str, Any] = {
+        "name": name,
+        "home_url": f"https://{name.lower().replace(' ', '')}.example",
+        "discovery_method": DiscoveryMethod.RSS,
+        "acquisition_tier": AcquisitionTier.FULL_FEED,
+        "rights_level": RightsLevel.BODY_TEXT,
+        "jurisdiction": "GB",
+        "rate_limit_per_min": 30,
+    }
+    source = Source(**{**defaults, **kw})
     app_session.add(source)
     app_session.flush()
     return source
