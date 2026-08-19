@@ -65,31 +65,32 @@ def create(
     return source
 
 
-def replace(
+def describe(
     session: Session,
     source_id: int,
     *,
     name: str,
     home_url: str,
     discovery_method: DiscoveryMethod,
-    acquisition_tier: AcquisitionTier,
-    rights_level: RightsLevel,
     jurisdiction: str,
     rate_limit_per_min: int,
-    enabled: bool,
 ) -> Source | None:
-    """Write every field, as the edit form submits them."""
+    """Write the descriptive fields, as the edit form submits them.
+
+    ``enabled``, ``acquisition_tier`` and ``rights_level`` are deliberately absent. They are
+    what an operator changes under pressure, and each has its own single-field setter. A
+    full-row write that carried them would let a form rendered before an emergency change and
+    submitted after it revert that change — reversing a stop-ingestion instruction with a 303
+    and no error, from one operator with two tabs open.
+    """
     source = session.get(Source, source_id)
     if source is None:
         return None
     source.name = name
     source.home_url = home_url
     source.discovery_method = discovery_method
-    source.acquisition_tier = acquisition_tier
-    source.rights_level = rights_level
     source.jurisdiction = jurisdiction
     source.rate_limit_per_min = rate_limit_per_min
-    source.enabled = enabled
     session.flush()
     return source
 
@@ -110,6 +111,20 @@ def set_enabled(session: Session, source_id: int, *, value: bool) -> Source | No
     return source
 
 
+def set_rights_level(session: Session, source_id: int, *, level: RightsLevel) -> Source | None:
+    """Grant or revoke body-text rights (FR-S5), for the same reason as ``set_enabled``.
+
+    Read at the point of use rather than copied onto articles, so this applies to records
+    already ingested with nothing to cascade (RFC §5.2, rev 20).
+    """
+    source = session.get(Source, source_id)
+    if source is None:
+        return None
+    source.rights_level = level
+    session.flush()
+    return source
+
+
 def set_acquisition_tier(
     session: Session, source_id: int, *, tier: AcquisitionTier
 ) -> Source | None:
@@ -122,23 +137,35 @@ def set_acquisition_tier(
     return source
 
 
-def holds_body_rights() -> sa.ColumnElement[bool]:
-    """The FR-S5 predicate, for a query selecting from ``canonical_record``.
+def article_ids_with_body_rights() -> sa.Select[tuple[int]]:
+    """The FR-S5 set: articles whose source currently grants body-text rights.
+
+    Compose with ``in_``::
+
+        select(CanonicalRecord).where(
+            CanonicalRecord.article_id.in_(article_ids_with_body_rights())
+        )
 
     Rights live in one place — the registry — and are read here at the point of use. There is
     deliberately no copy on the article: rights are a relationship and relationships change,
-    so a stored answer would report what was true at acquisition and keep reporting it after
-    a downgrade (RFC §5.2, rev 20). Reading through the source means a downgrade takes effect
-    for records already ingested, with nothing to cascade.
+    so a stored answer would report what was true at acquisition and keep reporting it after a
+    downgrade (RFC §5.2, rev 20). Reading through the source means a downgrade takes effect for
+    records already ingested, with nothing to cascade.
 
-    A correlated EXISTS rather than a join, so it composes into a caller's own query without
-    changing that query's shape or row count.
+    Returning a self-contained ``Select`` rather than a bare predicate is the load-bearing
+    part, and it is what mypy pins. A predicate that references the outer row must be
+    correlated to it, and SQLAlchemy infers that correlation from the enclosing statement: when
+    the caller selects from an alias, a subquery or a CTE instead of the bare table, the
+    correlation is silently dropped and the predicate reads true for every row. Negated it then
+    excludes nothing — the direction that matters, because a caller asking this is asking what
+    it may not summarize. Resolving the question inside a subquery of our own puts it out of
+    the caller's reach; how that subquery is written is not what makes it safe.
+
+    ``NOT IN`` is safe against this because ``article_id`` is a primary key: a single NULL in
+    the subquery would make ``NOT IN`` return nothing at all.
     """
     return (
-        sa.select(sa.literal(1))
-        .where(
-            Source.source_id == CanonicalRecord.source_id,
-            Source.rights_level == RightsLevel.BODY_TEXT,
-        )
-        .exists()
+        sa.select(CanonicalRecord.article_id)
+        .join(Source, Source.source_id == CanonicalRecord.source_id)
+        .where(Source.rights_level == RightsLevel.BODY_TEXT)
     )

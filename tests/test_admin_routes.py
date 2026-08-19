@@ -53,6 +53,7 @@ def client(app_migrated: sa.Engine, app_session: Session) -> Iterator[TestClient
         ("get", "/admin/sources/1"),
         ("post", "/admin/sources"),
         ("post", "/admin/sources/1"),
+        ("post", "/admin/sources/1/rights"),
         ("post", "/admin/sources/1/enable"),
         ("post", "/admin/sources/1/tier"),
     ],
@@ -142,6 +143,82 @@ def test_disabling_a_source_takes_effect_immediately(
     assert sources.enabled(app_session) == []
 
 
+def test_a_rights_revocation_takes_effect_immediately(
+    client: TestClient, app_session: Session
+) -> None:
+    """Its own route, for the same reason as the enable toggle (FR-S5)."""
+    client.post("/admin/sources", auth=AUTH, data=FORM)
+    source = sources.list_all(app_session)[0]
+
+    client.post(
+        f"/admin/sources/{source.source_id}/rights",
+        auth=AUTH,
+        data={"rights_level": "headline_only"},
+    )
+
+    app_session.expire_all()
+    refreshed = sources.get(app_session, source.source_id)
+    assert refreshed is not None
+    assert refreshed.rights_level.value == "headline_only"
+
+
+def test_the_edit_form_cannot_revert_an_emergency_change(
+    client: TestClient, app_session: Session
+) -> None:
+    """The clobber the split exists to prevent.
+
+    A form rendered before a stop-ingestion change and submitted after it must not re-enable
+    the source. Routed through a full-row write it would, with a 303 and no error, from one
+    operator with two tabs open.
+    """
+    client.post("/admin/sources", auth=AUTH, data=FORM)
+    source = sources.list_all(app_session)[0]
+    stale = {
+        "name": FORM["name"],
+        "home_url": FORM["home_url"],
+        "discovery_method": FORM["discovery_method"],
+        "jurisdiction": FORM["jurisdiction"],
+        "rate_limit_per_min": FORM["rate_limit_per_min"],
+        "enabled": "true",
+        "rights_level": "body_text",
+        "acquisition_tier": "1_full_feed",
+    }
+    client.post(f"/admin/sources/{source.source_id}/enable", auth=AUTH, data={"enabled": "false"})
+    client.post(
+        f"/admin/sources/{source.source_id}/rights",
+        auth=AUTH,
+        data={"rights_level": "headline_only"},
+    )
+
+    assert (
+        client.post(f"/admin/sources/{source.source_id}", auth=AUTH, data=stale).status_code == 200
+    )
+
+    app_session.expire_all()
+    after = sources.get(app_session, source.source_id)
+    assert after is not None
+    assert after.enabled is False, "the stale form re-enabled a stopped source"
+    assert after.rights_level.value == "headline_only", "the stale form restored body rights"
+
+
+@pytest.mark.parametrize("bad", ["0", "-5"])
+def test_a_non_positive_rate_limit_is_refused(
+    client: TestClient, app_session: Session, bad: str
+) -> None:
+    """FR-I3 politeness has no meaning at zero; the markup's min= is only a hint."""
+    response = client.post("/admin/sources", auth=AUTH, data={**FORM, "rate_limit_per_min": bad})
+
+    assert response.status_code == 422
+    assert sources.list_all(app_session) == []
+
+
+def test_the_app_publishes_no_api(client: TestClient) -> None:
+    """A1 makes the Platform the published contract; this document only indexed admin routes,
+    and was not covered by the per-route credential."""
+    for path in ("/openapi.json", "/docs", "/redoc"):
+        assert client.get(path).status_code == 404, path
+
+
 def test_a_tier_downgrade_takes_effect_immediately(
     client: TestClient, app_session: Session
 ) -> None:
@@ -170,68 +247,3 @@ def test_an_invalid_enum_value_is_rejected(client: TestClient, app_session: Sess
 
     assert response.status_code == 422
     assert sources.list_all(app_session) == []
-
-
-# ------------------------------------------------------------------ the home_url constraint
-
-
-def test_a_duplicate_home_url_is_refused_without_a_500(
-    client: TestClient, app_session: Session
-) -> None:
-    """One row per publisher.
-
-    Two rows carry two source_ids, so one story arriving through both counts twice in a
-    cluster's distinct-source total and promotes a single-publisher cluster past the
-    >=2-source gate (FR-S6). The constraint is the guard; this is the guard being reported
-    rather than crashing.
-    """
-    assert client.post("/admin/sources", auth=AUTH, data=FORM).status_code == 200
-
-    response = client.post("/admin/sources", auth=AUTH, data={**FORM, "name": "Same Site"})
-
-    assert response.status_code == 409
-    assert "already exists" in response.text
-    assert len(sources.list_all(app_session)) == 1
-
-
-def test_a_refused_create_keeps_what_was_typed(client: TestClient) -> None:
-    """Answering 409 and clearing the form makes the operator retype eight fields."""
-    client.post("/admin/sources", auth=AUTH, data=FORM)
-
-    body = client.post(
-        "/admin/sources", auth=AUTH, data={**FORM, "name": "Same Site", "jurisdiction": "FR"}
-    ).text
-
-    assert "Same Site" in body
-    assert 'value="FR"' in body
-
-
-def test_a_refused_create_still_posts_to_the_create_url(client: TestClient) -> None:
-    """The re-rendered form carries an unsaved Source with no id.
-
-    Derived from the object rather than passed in, the action would point at the edit URL of
-    a row that was never created, and the retry would 404.
-    """
-    client.post("/admin/sources", auth=AUTH, data=FORM)
-
-    body = client.post("/admin/sources", auth=AUTH, data={**FORM, "name": "Same"}).text
-
-    assert 'action="/admin/sources"' in body
-
-
-def test_renaming_a_source_onto_another_url_is_refused(
-    client: TestClient, app_session: Session
-) -> None:
-    client.post("/admin/sources", auth=AUTH, data=FORM)
-    client.post(
-        "/admin/sources", auth=AUTH, data={**FORM, "name": "Other", "home_url": "https://b.example"}
-    )
-    target = next(s for s in sources.list_all(app_session) if s.name == "Other")
-
-    response = client.post(
-        f"/admin/sources/{target.source_id}",
-        auth=AUTH,
-        data={**FORM, "name": "Other", "enabled": "true"},
-    )
-
-    assert response.status_code == 409

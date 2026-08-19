@@ -16,23 +16,34 @@
     <td><a href="/admin/sources/{{ source.source_id }}">{{ source.name }}</a></td>
     <td>{{ source.discovery_method.value }}</td>
     <td>
-      {# Its own form: a tier change must not depend on the rest of the row being valid. #}
+      {# Its own form: a tier change must not depend on the rest of the row being valid.
+         An explicit button, never onchange — a scroll over a focused select would otherwise
+         change a source's acquisition tier with no confirmation and no record. #}
       <form method="post" action="/admin/sources/{{ source.source_id }}/tier">
-        <select name="acquisition_tier" onchange="this.form.submit()">
+        <select name="acquisition_tier">
           {% for tier in tiers %}
           <option value="{{ tier.value }}" {% if tier == source.acquisition_tier %}selected{% endif %}>
             {{ tier.value }}
           </option>
           {% endfor %}
         </select>
-        <noscript><button type="submit">set</button></noscript>
+        <button type="submit">Set</button>
       </form>
     </td>
     <td>
+      {# Governing field, so it is set here and not on the descriptive form. #}
+      <form method="post" action="/admin/sources/{{ source.source_id }}/rights">
+        <select name="rights_level" class="{% if source.rights_level.value == 'headline_only' %}warn{% endif %}">
+          {% for level in rights_levels %}
+          <option value="{{ level.value }}" {% if level == source.rights_level %}selected{% endif %}>
+            {{ level.value }}
+          </option>
+          {% endfor %}
+        </select>
+        <button type="submit">Set</button>
+      </form>
       {% if source.rights_level.value == "headline_only" %}
-        <span class="warn">headline only</span>
-      {% else %}
-        {{ source.rights_level.value }}
+        <div class="warn">headline only — excluded from summarization</div>
       {% endif %}
     </td>
     <td>{{ source.jurisdiction }}</td>

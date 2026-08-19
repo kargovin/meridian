@@ -28,7 +28,17 @@ def create_app(
     settings = settings or load_app()
     admin = admin or load_admin()
 
-    app = FastAPI(title="Meridian News", version="0.1.0")
+    # No published API: under A1 the Platform is the contract another team builds against,
+    # and this app serves pages to a browser. Leaving the schema on would expose an
+    # unauthenticated index of every admin route — the document is not covered by the
+    # per-route credential.
+    app = FastAPI(
+        title="Meridian News",
+        version="0.1.0",
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
+    )
     app.state.settings = settings
     app.state.session_factory = session_factory(create_engine(settings))
     app.state.admin_token = admin.token.get_secret_value()

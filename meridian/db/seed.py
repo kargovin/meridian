@@ -9,8 +9,10 @@ registry towards a file would silently undo that on the next deploy. The registr
 authoritative once a row exists; the file only ever bootstraps one.
 
 Matching is on ``home_url``, which identifies a publisher more stably than its name. Nothing
-in the schema enforces that uniqueness, so two rows for one publisher remain possible through
-the admin surface; this module will not create the second one.
+in the schema enforces that uniqueness — ``home_url`` is not canonicalised, so a trailing
+slash or a ``www.`` is a different value — and two rows for one publisher remain possible
+through the admin surface. This module will not create the second one; that is the extent of
+the guarantee.
 """
 
 import json

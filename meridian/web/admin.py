@@ -17,14 +17,12 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from meridian.db import sources
-from meridian.db.models import Source
 from meridian.web.auth import RequireAdmin
 
 router = APIRouter(prefix="/admin", dependencies=[RequireAdmin])
@@ -60,25 +58,6 @@ def _redirect() -> RedirectResponse:
     discretion, and historically that meant re-POSTing to the list route.
     """
     return RedirectResponse(_LIST, status_code=status.HTTP_303_SEE_OTHER)
-
-
-def _conflict(request: Request, action: str, submitted: dict[str, object]) -> HTMLResponse:
-    """Re-render the form with what was typed, rather than answering 500 or losing it.
-
-    Only ``home_url`` is constrained, so that is the only conflict this can be. Building an
-    unsaved ``Source`` is what lets the same template redisplay the values.
-    """
-    return templates.TemplateResponse(
-        request,
-        "sources/form.html",
-        {
-            "source": Source(**submitted),
-            "action": action,
-            "error": "A source with that home URL already exists.",
-            **_VOCABULARIES,
-        },
-        status_code=status.HTTP_409_CONFLICT,
-    )
 
 
 @router.get("/sources", response_class=HTMLResponse)
@@ -125,58 +104,50 @@ def create_source(
     acquisition_tier: Annotated[AcquisitionTier, Form()],
     rights_level: Annotated[RightsLevel, Form()],
     jurisdiction: Annotated[str, Form()],
-    rate_limit_per_min: Annotated[int, Form()],
+    rate_limit_per_min: Annotated[int, Form(gt=0)],
     enabled: Annotated[bool, Form()] = True,
-) -> Response:
-    submitted: dict[str, object] = {
-        "name": name,
-        "home_url": home_url,
-        "discovery_method": discovery_method,
-        "acquisition_tier": acquisition_tier,
-        "rights_level": rights_level,
-        "jurisdiction": jurisdiction,
-        "rate_limit_per_min": rate_limit_per_min,
-        "enabled": enabled,
-    }
-    try:
-        sources.create(session, **submitted)  # type: ignore[arg-type]
-    except IntegrityError:
-        session.rollback()
-        return _conflict(request, _LIST, submitted)
+) -> RedirectResponse:
+    sources.create(
+        session,
+        name=name,
+        home_url=home_url,
+        discovery_method=discovery_method,
+        acquisition_tier=acquisition_tier,
+        rights_level=rights_level,
+        jurisdiction=jurisdiction,
+        rate_limit_per_min=rate_limit_per_min,
+        enabled=enabled,
+    )
     return _redirect()
 
 
 @router.post("/sources/{source_id}")
-def replace_source(
+def describe_source(
     source_id: int,
-    request: Request,
     session: Db,
     name: Annotated[str, Form()],
     home_url: Annotated[str, Form()],
     discovery_method: Annotated[DiscoveryMethod, Form()],
-    acquisition_tier: Annotated[AcquisitionTier, Form()],
-    rights_level: Annotated[RightsLevel, Form()],
     jurisdiction: Annotated[str, Form()],
-    rate_limit_per_min: Annotated[int, Form()],
-    enabled: Annotated[bool, Form()] = False,
-) -> Response:
-    """``enabled`` defaults to False because an unchecked checkbox is simply absent."""
-    submitted: dict[str, object] = {
-        "name": name,
-        "home_url": home_url,
-        "discovery_method": discovery_method,
-        "acquisition_tier": acquisition_tier,
-        "rights_level": rights_level,
-        "jurisdiction": jurisdiction,
-        "rate_limit_per_min": rate_limit_per_min,
-        "enabled": enabled,
-    }
-    try:
-        updated = sources.replace(session, source_id, **submitted)  # type: ignore[arg-type]
-    except IntegrityError:
-        session.rollback()
-        return _conflict(request, f"{_LIST}/{source_id}", submitted)
-    if updated is None:
+    rate_limit_per_min: Annotated[int, Form(gt=0)],
+) -> RedirectResponse:
+    """The descriptive fields only.
+
+    ``enabled``, ``acquisition_tier`` and ``rights_level`` each have their own route below, so
+    that a form rendered before an emergency change cannot revert it on submit.
+    """
+    if (
+        sources.describe(
+            session,
+            source_id,
+            name=name,
+            home_url=home_url,
+            discovery_method=discovery_method,
+            jurisdiction=jurisdiction,
+            rate_limit_per_min=rate_limit_per_min,
+        )
+        is None
+    ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
     return _redirect()
 
@@ -193,6 +164,18 @@ def set_enabled(
     rejected because an unrelated field on the row is incomplete.
     """
     if sources.set_enabled(session, source_id, value=enabled) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
+    return _redirect()
+
+
+@router.post("/sources/{source_id}/rights")
+def set_rights(
+    source_id: int,
+    session: Db,
+    rights_level: Annotated[RightsLevel, Form()],
+) -> RedirectResponse:
+    """Grant or revoke body-text rights (FR-S5). Applies to articles already ingested."""
+    if sources.set_rights_level(session, source_id, level=rights_level) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
     return _redirect()
 

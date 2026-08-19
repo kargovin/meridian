@@ -172,11 +172,12 @@ def test_the_edit_form_is_filled_in_with_the_current_values(
 
     assert fields["name"] == "Example Wire"
     assert fields["discovery_method"] == "sitemap"
-    assert fields["acquisition_tier"] == "3_extraction"
-    assert fields["rights_level"] == "headline_only"
     assert fields["jurisdiction"] == "US"
     assert fields["rate_limit_per_min"] == "5"
-    assert fields["enabled"] == "true"
+    # Governing fields are set from the list page, never from this form.
+    assert "acquisition_tier" not in fields
+    assert "rights_level" not in fields
+    assert "enabled" not in fields
 
 
 def test_a_disabled_source_renders_an_unchecked_box(
