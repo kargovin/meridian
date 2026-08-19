@@ -14,7 +14,7 @@ The write path is a pipeline. Each article moves through it one stage at a time,
 |---|---|
 | **Discovery** | Poll each source for new URLs — RSS/Atom first, then sitemaps, then section scraping. A source is polled on a configurable cadence |
 | **Acquisition** | Fetch the article, by whichever tier the source's rights allow: full feed content, publisher API, or extraction |
-| **Normalization** | Reduce the page to a canonical record — title, body, lede, publisher, timestamp, rights level, content hash |
+| **Normalization** | Reduce the page to a canonical record — title, body, lede, publisher, timestamp, content hash. Rights are read from the source registry rather than copied onto the record, so a change applies to articles already ingested |
 | **Deduplication** | Detect syndicated reprints by exact hash, then by SimHash near-match. Duplicates are collapsed into one record that keeps every source as provenance, rather than dropped |
 | **Classification** | Ask the Platform for a topic and a calibrated confidence. Low-confidence articles fall to `Other` instead of being forced into a topic |
 | **Clustering** | Embed title and lede, assign to a cluster of the same event by online leader-follower matching, then reconcile in batch. A cluster's topic is a confidence-weighted vote of its members |
@@ -30,7 +30,7 @@ A summary is withheld for three distinct reasons, and they are stored and render
 Two deployables:
 
 - **Platform** — stateless, holds the models, exposes `POST /v1/classify` and `POST /v1/summarize`.
-- **Meridian app** — a modular monolith that owns the pipeline, the database and the reader surface, and calls the Platform for the two model steps.
+- **Meridian app** — a modular monolith that owns the pipeline, the database and the reader surface, and calls the Platform for the two model steps. It also serves the source registry's admin surface at `/admin/sources`, behind a shared credential.
 
 The only cross-deployable hops are those two calls. The Digest team consumes the same endpoints.
 
