@@ -170,3 +170,68 @@ def test_an_invalid_enum_value_is_rejected(client: TestClient, app_session: Sess
 
     assert response.status_code == 422
     assert sources.list_all(app_session) == []
+
+
+# ------------------------------------------------------------------ the home_url constraint
+
+
+def test_a_duplicate_home_url_is_refused_without_a_500(
+    client: TestClient, app_session: Session
+) -> None:
+    """One row per publisher.
+
+    Two rows carry two source_ids, so one story arriving through both counts twice in a
+    cluster's distinct-source total and promotes a single-publisher cluster past the
+    >=2-source gate (FR-S6). The constraint is the guard; this is the guard being reported
+    rather than crashing.
+    """
+    assert client.post("/admin/sources", auth=AUTH, data=FORM).status_code == 200
+
+    response = client.post("/admin/sources", auth=AUTH, data={**FORM, "name": "Same Site"})
+
+    assert response.status_code == 409
+    assert "already exists" in response.text
+    assert len(sources.list_all(app_session)) == 1
+
+
+def test_a_refused_create_keeps_what_was_typed(client: TestClient) -> None:
+    """Answering 409 and clearing the form makes the operator retype eight fields."""
+    client.post("/admin/sources", auth=AUTH, data=FORM)
+
+    body = client.post(
+        "/admin/sources", auth=AUTH, data={**FORM, "name": "Same Site", "jurisdiction": "FR"}
+    ).text
+
+    assert "Same Site" in body
+    assert 'value="FR"' in body
+
+
+def test_a_refused_create_still_posts_to_the_create_url(client: TestClient) -> None:
+    """The re-rendered form carries an unsaved Source with no id.
+
+    Derived from the object rather than passed in, the action would point at the edit URL of
+    a row that was never created, and the retry would 404.
+    """
+    client.post("/admin/sources", auth=AUTH, data=FORM)
+
+    body = client.post("/admin/sources", auth=AUTH, data={**FORM, "name": "Same"}).text
+
+    assert 'action="/admin/sources"' in body
+
+
+def test_renaming_a_source_onto_another_url_is_refused(
+    client: TestClient, app_session: Session
+) -> None:
+    client.post("/admin/sources", auth=AUTH, data=FORM)
+    client.post(
+        "/admin/sources", auth=AUTH, data={**FORM, "name": "Other", "home_url": "https://b.example"}
+    )
+    target = next(s for s in sources.list_all(app_session) if s.name == "Other")
+
+    response = client.post(
+        f"/admin/sources/{target.source_id}",
+        auth=AUTH,
+        data={**FORM, "name": "Other", "enabled": "true"},
+    )
+
+    assert response.status_code == 409

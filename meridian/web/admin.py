@@ -17,12 +17,14 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from meridian.db import sources
+from meridian.db.models import Source
 from meridian.web.auth import RequireAdmin
 
 router = APIRouter(prefix="/admin", dependencies=[RequireAdmin])
@@ -60,6 +62,25 @@ def _redirect() -> RedirectResponse:
     return RedirectResponse(_LIST, status_code=status.HTTP_303_SEE_OTHER)
 
 
+def _conflict(request: Request, action: str, submitted: dict[str, object]) -> HTMLResponse:
+    """Re-render the form with what was typed, rather than answering 500 or losing it.
+
+    Only ``home_url`` is constrained, so that is the only conflict this can be. Building an
+    unsaved ``Source`` is what lets the same template redisplay the values.
+    """
+    return templates.TemplateResponse(
+        request,
+        "sources/form.html",
+        {
+            "source": Source(**submitted),
+            "action": action,
+            "error": "A source with that home URL already exists.",
+            **_VOCABULARIES,
+        },
+        status_code=status.HTTP_409_CONFLICT,
+    )
+
+
 @router.get("/sources", response_class=HTMLResponse)
 def list_sources(request: Request, session: Db) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -78,7 +99,7 @@ def new_source(request: Request) -> HTMLResponse:
     the reverse order makes this URL unreachable.
     """
     return templates.TemplateResponse(
-        request, "sources/form.html", {"source": None, **_VOCABULARIES}
+        request, "sources/form.html", {"source": None, "action": _LIST, **_VOCABULARIES}
     )
 
 
@@ -88,12 +109,15 @@ def edit_source(source_id: int, request: Request, session: Db) -> HTMLResponse:
     if source is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
     return templates.TemplateResponse(
-        request, "sources/form.html", {"source": source, **_VOCABULARIES}
+        request,
+        "sources/form.html",
+        {"source": source, "action": f"{_LIST}/{source_id}", **_VOCABULARIES},
     )
 
 
 @router.post("/sources")
 def create_source(
+    request: Request,
     session: Db,
     name: Annotated[str, Form()],
     home_url: Annotated[str, Form()],
@@ -103,24 +127,29 @@ def create_source(
     jurisdiction: Annotated[str, Form()],
     rate_limit_per_min: Annotated[int, Form()],
     enabled: Annotated[bool, Form()] = True,
-) -> RedirectResponse:
-    sources.create(
-        session,
-        name=name,
-        home_url=home_url,
-        discovery_method=discovery_method,
-        acquisition_tier=acquisition_tier,
-        rights_level=rights_level,
-        jurisdiction=jurisdiction,
-        rate_limit_per_min=rate_limit_per_min,
-        enabled=enabled,
-    )
+) -> Response:
+    submitted: dict[str, object] = {
+        "name": name,
+        "home_url": home_url,
+        "discovery_method": discovery_method,
+        "acquisition_tier": acquisition_tier,
+        "rights_level": rights_level,
+        "jurisdiction": jurisdiction,
+        "rate_limit_per_min": rate_limit_per_min,
+        "enabled": enabled,
+    }
+    try:
+        sources.create(session, **submitted)  # type: ignore[arg-type]
+    except IntegrityError:
+        session.rollback()
+        return _conflict(request, _LIST, submitted)
     return _redirect()
 
 
 @router.post("/sources/{source_id}")
 def replace_source(
     source_id: int,
+    request: Request,
     session: Db,
     name: Annotated[str, Form()],
     home_url: Annotated[str, Form()],
@@ -130,20 +159,23 @@ def replace_source(
     jurisdiction: Annotated[str, Form()],
     rate_limit_per_min: Annotated[int, Form()],
     enabled: Annotated[bool, Form()] = False,
-) -> RedirectResponse:
+) -> Response:
     """``enabled`` defaults to False because an unchecked checkbox is simply absent."""
-    updated = sources.replace(
-        session,
-        source_id,
-        name=name,
-        home_url=home_url,
-        discovery_method=discovery_method,
-        acquisition_tier=acquisition_tier,
-        rights_level=rights_level,
-        jurisdiction=jurisdiction,
-        rate_limit_per_min=rate_limit_per_min,
-        enabled=enabled,
-    )
+    submitted: dict[str, object] = {
+        "name": name,
+        "home_url": home_url,
+        "discovery_method": discovery_method,
+        "acquisition_tier": acquisition_tier,
+        "rights_level": rights_level,
+        "jurisdiction": jurisdiction,
+        "rate_limit_per_min": rate_limit_per_min,
+        "enabled": enabled,
+    }
+    try:
+        updated = sources.replace(session, source_id, **submitted)  # type: ignore[arg-type]
+    except IntegrityError:
+        session.rollback()
+        return _conflict(request, f"{_LIST}/{source_id}", submitted)
     if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such source")
     return _redirect()

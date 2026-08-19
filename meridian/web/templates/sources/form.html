@@ -1,10 +1,15 @@
 {% extends "base.html" %}
-{% block title %}{{ "Edit source" if source else "Add a source" }}{% endblock %}
+{% block title %}{{ "Edit source" if source and source.source_id else "Add a source" }}{% endblock %}
 {% block body %}
-<h1>{{ "Edit " ~ source.name if source else "Add a source" }}</h1>
+<h1>{{ "Edit " ~ source.name if source and source.source_id else "Add a source" }}</h1>
 
 {# One template for both: the fields are identical, only the action differs. #}
-<form method="post" action="{% if source %}/admin/sources/{{ source.source_id }}{% else %}/admin/sources{% endif %}">
+{% if error %}<p class="warn">{{ error }}</p>{% endif %}
+
+{# The action is passed in rather than derived from `source`: a rejected create re-renders
+   with the submitted values in an unsaved Source, which would otherwise post to the edit
+   URL of a row that does not exist. #}
+<form method="post" action="{{ action }}">
   <label>
     <span>Name</span>
     <input name="name" required value="{{ source.name if source else '' }}">

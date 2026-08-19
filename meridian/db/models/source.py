@@ -13,6 +13,12 @@ from meridian.db.base import Base
 class Source(Base):
     __tablename__ = "source"
     __table_args__ = (
+        # One row per publisher. Two rows would each carry their own source_id, so the same
+        # story arriving through both counts twice in a cluster's
+        # ``1 + count(DISTINCT source_id)`` — promoting a single-publisher cluster past the
+        # >=2-distinct-source gate (FR-S6) with no dedup error involved. Covering one
+        # publisher by two discovery methods needs a different shape, not a second row.
+        sa.UniqueConstraint("home_url"),
         enum_check("discovery_method", DiscoveryMethod),
         enum_check("acquisition_tier", AcquisitionTier),
         enum_check("rights_level", RightsLevel),
