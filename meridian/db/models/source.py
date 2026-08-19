@@ -1,8 +1,10 @@
 """The source registry (RFC §5.1). Governs what the pipeline may do with each publisher."""
 
+import datetime as dt
+
 import sqlalchemy as sa
 from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
-from meridian_dbkit import StrEnumType, enum_check
+from meridian_dbkit import StrEnumType, TZDateTime, enum_check
 from sqlalchemy.orm import Mapped, mapped_column
 
 from meridian.db.base import Base
@@ -14,6 +16,9 @@ class Source(Base):
         enum_check("discovery_method", DiscoveryMethod),
         enum_check("acquisition_tier", AcquisitionTier),
         enum_check("rights_level", RightsLevel),
+        # FR-I3 politeness has no meaning at zero, and the pipeline's obvious use of it
+        # (60 / rate) has no defined behaviour there.
+        sa.CheckConstraint("rate_limit_per_min > 0", name="rate_limit_per_min_positive"),
     )
 
     source_id: Mapped[int] = mapped_column(sa.BigInteger, sa.Identity(), primary_key=True)
@@ -31,3 +36,10 @@ class Source(Base):
 
     #: FR-I3 per-domain politeness.
     rate_limit_per_min: Mapped[int] = mapped_column(sa.Integer)
+
+    created_at: Mapped[dt.datetime] = mapped_column(TZDateTime, server_default=sa.func.now())
+    #: Operational staleness only — has anyone touched this row, and when. NOT a history: the
+    #: next unrelated edit overwrites it, so it cannot say when a particular field changed.
+    #: Maintained by a database trigger rather than the ORM, because the emergency path is a
+    #: psql session and a column that lies on exactly that path is worse than no column.
+    updated_at: Mapped[dt.datetime] = mapped_column(TZDateTime, server_default=sa.func.now())

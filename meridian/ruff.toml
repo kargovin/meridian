@@ -1,0 +1,10 @@
+# Both `extend` and `extend-select` are required: without `extend` this replaces the root
+# config and the subtree loses every repo rule; without `extend-select` the banned-api entry
+# is present, valid and inert.
+extend = "../pyproject.toml"
+
+[lint]
+extend-select = ["TID"]
+
+[lint.flake8-tidy-imports.banned-api]
+"meridian_platform".msg = "A1: the app must not import the Platform. It is a separate deployable reached over HTTP, and the workspace installs it, so nothing else would catch this."

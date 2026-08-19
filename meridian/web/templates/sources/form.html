@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit source" if source else "Add a source" }}{% endblock %}
+{% block body %}
+<h1>{{ "Edit " ~ source.name if source else "Add a source" }}</h1>
+
+{# One template for both: the fields are identical, only the action differs. #}
+{# The action is passed in rather than derived from `source`, so this template does not have
+   to know which of the two routes it is serving. #}
+<form method="post" action="{{ action }}">
+  <label>
+    <span>Name</span>
+    <input name="name" required value="{{ source.name if source else '' }}">
+  </label>
+  <label>
+    <span>Home URL</span>
+    <input name="home_url" type="url" required value="{{ source.home_url if source else '' }}">
+  </label>
+  <label>
+    <span>Discovery method</span>
+    <select name="discovery_method">
+      {% for method in discovery_methods %}
+      <option value="{{ method.value }}" {% if source and method == source.discovery_method %}selected{% endif %}>{{ method.value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    <span>Jurisdiction</span>
+    <input name="jurisdiction" required value="{{ source.jurisdiction if source else '' }}">
+  </label>
+  <label>
+    <span>Rate limit (requests/min)</span>
+    <input name="rate_limit_per_min" type="number" min="1" required
+           value="{{ source.rate_limit_per_min if source else 30 }}">
+  </label>
+  {# The three governing fields appear only when creating. On a new source there is no prior
+     state to overwrite; on an existing one this form could be rendered before an emergency
+     change and submitted after it, reverting it. Each is set from the list page instead. #}
+  {% if source is none %}
+  <label>
+    <span>Acquisition tier</span>
+    <select name="acquisition_tier">
+      {% for tier in tiers %}
+      <option value="{{ tier.value }}">{{ tier.value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    <span>Rights level</span>
+    <select name="rights_level">
+      {% for level in rights_levels %}
+      <option value="{{ level.value }}">{{ level.value }}</option>
+      {% endfor %}
+    </select>
+    <small>headline_only excludes this source from summarization (FR-S5). Applies to
+    articles already ingested, not only new ones.</small>
+  </label>
+  <label>
+    {# Absent when unchecked, which is why the route defaults it to True on create. #}
+    <input type="checkbox" name="enabled" value="true" checked>
+    <span style="display:inline">Ingesting</span>
+  </label>
+  {% endif %}
+  <button type="submit">Save</button>
+</form>
+{% endblock %}

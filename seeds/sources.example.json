@@ -1,0 +1,21 @@
+[
+  {
+    "name": "Example Times",
+    "home_url": "https://times.example",
+    "discovery_method": "rss",
+    "acquisition_tier": "1_full_feed",
+    "rights_level": "body_text",
+    "jurisdiction": "GB",
+    "rate_limit_per_min": 20
+  },
+  {
+    "name": "Example Wire",
+    "home_url": "https://wire.example",
+    "discovery_method": "sitemap",
+    "acquisition_tier": "3_extraction",
+    "rights_level": "headline_only",
+    "jurisdiction": "US",
+    "rate_limit_per_min": 5,
+    "enabled": false
+  }
+]

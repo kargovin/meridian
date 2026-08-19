@@ -51,9 +51,6 @@ class CanonicalRecord(Base):
     body_provenance: Mapped[BodyProvenance | None] = mapped_column(
         StrEnumType(BodyProvenance), nullable=True
     )
-    #: Derived from Source.rights_level at acquisition; FR-S5 reads this, not the source.
-    has_body_rights: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
-
     content_hash: Mapped[str | None] = mapped_column(Sha256, nullable=True)
     #: Unsigned 64-bit stored as signed bigint — see ``types.simhash_to_db``.
     simhash: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True)
