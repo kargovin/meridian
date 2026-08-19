@@ -111,7 +111,15 @@ def _claim(session: Session, source_id: int, expected_updated_at: dt.datetime) -
     source = session.get(Source, source_id)
     if source is None:
         return None
-    session.refresh(source)
+    # SELECT ... FOR UPDATE, so the compare and the write are one step. Without the lock two
+    # requests can both pass the check — the second blocks on the row only at flush time and
+    # then applies on top, which is the lost update this whole mechanism exists to prevent.
+    # The window is milliseconds rather than the minutes a stale page gives you, and two of
+    # the three fields escape it by luck: rights_level is two-valued and the enable toggle
+    # posts the opposite of what it rendered, so the harmful direction means writing back the
+    # value just read, which SQLAlchemy elides. acquisition_tier has three values and does not
+    # escape.
+    session.refresh(source, with_for_update=True)
     if source.updated_at != expected_updated_at:
         raise StaleWrite(
             f"source {source_id} changed at {source.updated_at.isoformat()}, "

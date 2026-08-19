@@ -6,10 +6,12 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, aliased
 
 from meridian.db import sources
 from meridian.db.models import CanonicalRecord
+from meridian.db.session import session_factory
 from tests.factories import make_article, make_source
 
 NOW = dt.datetime.now(dt.UTC)
@@ -331,3 +333,48 @@ def test_the_rights_filter_survives_every_query_shape(app_session: Session, nega
     assert matching(CanonicalRecord.article_id) == expected, "bare table"
     assert matching(alias.article_id) == expected, "aliased"
     assert matching(sub.c.article_id) == expected, "outer FROM is a subquery"
+
+
+def test_the_version_check_holds_the_row_until_the_write_lands(
+    app_migrated: sa.Engine,
+) -> None:
+    """The compare and the write must be one step.
+
+    Without a lock on the read both requests pass the version check, and the second blocks on
+    the row only at flush time — then applies on top, which is the lost update this mechanism
+    exists to prevent. Three-valued ``acquisition_tier`` is where that is constructible; the
+    other two escape by accident, because their harmful direction writes back the value just
+    read and SQLAlchemy elides it.
+
+    Asserted as the property rather than the SQL: once one session has claimed the row, a
+    second cannot reach it. Two sessions in one thread, with ``lock_timeout`` standing in for
+    the second request, so the interleaving is deterministic rather than scheduled.
+    """
+    factory = session_factory(app_migrated)
+    with factory() as setup:
+        setup.execute(sa.text("TRUNCATE canonical_record, source RESTART IDENTITY CASCADE"))
+        source = make_source(setup, acquisition_tier=AcquisitionTier.FULL_FEED)
+        setup.commit()
+        source_id, token = source.source_id, source.updated_at
+
+    with factory() as holder, factory() as other:
+        claimed = sources._claim(holder, source_id, token)
+        assert claimed is not None
+
+        other.execute(sa.text("SET LOCAL lock_timeout = '1s'"))
+        with pytest.raises(OperationalError):
+            sources.set_acquisition_tier(
+                other,
+                source_id,
+                tier=AcquisitionTier.PUBLISHER_API,
+                expected_updated_at=token,
+            )
+        other.rollback()
+
+        claimed.acquisition_tier = AcquisitionTier.EXTRACTION
+        holder.commit()
+
+    with factory() as check:
+        after = sources.get(check, source_id)
+        assert after is not None
+        assert after.acquisition_tier is AcquisitionTier.EXTRACTION
