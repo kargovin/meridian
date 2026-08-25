@@ -7,30 +7,39 @@
 every cycle, so a change applies on the next tick.</p>
 
 <table>
-  <tr><th>Knob</th><th>Value</th><th>Allowed</th><th></th></tr>
-  {% for knob in knobs %}
-  {% set row = rows.get(knob.key) %}
+  <tr><th>Knob</th><th>In force</th><th>Allowed</th><th></th></tr>
+  {% for state in states %}
   <tr>
     <td>
-      <code>{{ knob.key }}</code><br>
-      <small>{{ knob.summary }}</small>
+      <code>{{ state.knob.key }}</code><br>
+      <small>{{ state.knob.summary }}</small>
     </td>
-    {% if row %}
+    {# The value shown is the one actually in force, never the stored text. A stored value that
+       cannot be used is reported as rejected rather than displayed as if it were running. #}
     <td>
-      <form method="post" action="/admin/config/{{ knob.key }}">
-        <input type="hidden" name="expected_updated_at" value="{{ row.updated_at.isoformat() }}">
-        <input type="number" name="value" value="{{ row.value }}"
-               min="{{ knob.minimum }}" max="{{ knob.maximum }}" required style="min-width: 8rem">
+      {% if state.missing %}
+        <span class="warn">{{ state.effective }}</span>
+      {% else %}
+      <form method="post" action="/admin/config/{{ state.knob.key }}">
+        <input type="hidden" name="expected_updated_at" value="{{ state.row.updated_at.isoformat() }}">
+        <input type="number" name="value" value="{{ state.effective }}"
+               min="{{ state.knob.minimum }}" max="{{ state.knob.maximum }}" required
+               style="min-width: 8rem">
         <button type="submit">Save</button>
       </form>
+      {% endif %}
     </td>
-    <td>{{ knob.minimum }}–{{ knob.maximum }}</td>
-    <td><small>changed {{ row.updated_at.strftime('%Y-%m-%d %H:%M') }} UTC</small></td>
-    {% else %}
-    <td class="warn">no row</td>
-    <td>{{ knob.minimum }}–{{ knob.maximum }}</td>
-    <td><small class="warn">using default {{ knob.default }}; seed it to make it editable</small></td>
-    {% endif %}
+    <td>{{ state.knob.minimum }}–{{ state.knob.maximum }}</td>
+    <td>
+      {% if state.missing %}
+        <small class="warn">no row — running on the built-in default; seed it to make it editable</small>
+      {% elif state.rejected %}
+        <small class="warn">stored value <code>{{ state.row.value }}</code> was rejected;
+          running on the built-in default</small>
+      {% else %}
+        <small>changed {{ state.row.updated_at.strftime('%Y-%m-%d %H:%M') }} UTC</small>
+      {% endif %}
+    </td>
   </tr>
   {% endfor %}
 </table>

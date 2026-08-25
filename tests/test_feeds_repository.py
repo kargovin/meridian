@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from meridian.db import feeds, sources
-from meridian.db.models import CanonicalRecord
+from meridian.db.models import CanonicalRecord, Source
 from meridian.db.session import session_factory
 from tests.factories import make_article, make_feed, make_source
 
@@ -78,7 +78,9 @@ def test_a_feed_is_pollable_only_when_all_three_gates_are_open(
     """
     source = make_source(app_session, name="Outlet")
     feed = make_feed(app_session, source)
-    assert [f.feed_id for f in feeds.pollable(app_session)] == [feed.feed_id]
+    assert [(f.feed_id, s.source_id) for f, s in feeds.pollable(app_session)] == [
+        (feed.feed_id, source.source_id)
+    ]
 
     if gate == "feed.enabled":
         feeds.set_enabled(
@@ -322,3 +324,31 @@ def test_the_version_check_holds_the_row_until_the_write_lands(
         after = feeds.get(check, feed_id)
         assert after is not None
         assert after.acquisition_tier is AcquisitionTier.EXTRACTION
+
+
+def test_pollable_returns_each_feeds_publisher_with_it(app_session: Session) -> None:
+    """⚠️ Together, in one statement, deliberately.
+
+    Read separately, the feed list and the publisher list are two statements under READ
+    COMMITTED and can disagree about what exists — a publisher deleted between them is missing
+    from the second, and the caller's lookup raises. In the poller that lookup sat outside the
+    per-feed guard, so one deleted publisher took the rest of the roster's polling with it.
+    """
+    first = make_source(app_session, name="First")
+    second = make_source(app_session, name="Second")
+    a = make_feed(app_session, first)
+    b = make_feed(app_session, second, url="https://feeds.example/second.xml")
+
+    pairs = feeds.pollable(app_session)
+
+    # ⚠️ Assert on what only a publisher carries. Feed has a source_id of its own, so a pair of
+    # (Feed, Feed) satisfies any assertion written in terms of that column — the first version of
+    # this test passed with the join returning the wrong entity.
+    by_feed = {feed.feed_id: publisher for feed, publisher in pairs}
+    assert set(by_feed) == {a.feed_id, b.feed_id}
+    for publisher in by_feed.values():
+        assert isinstance(publisher, Source)
+    assert by_feed[a.feed_id].name == "First"
+    assert by_feed[b.feed_id].name == "Second"
+    # The two fields the poller reads off the publisher: FR-I3 pacing and the user agent.
+    assert by_feed[a.feed_id].rate_limit_per_min == first.rate_limit_per_min

@@ -118,14 +118,51 @@ def test_a_missing_row_reads_the_default_and_cannot_be_written(app_session: Sess
     )
 
 
-def test_the_migrations_seeded_value_matches_the_declared_default() -> None:
-    """⚠️ The migration hard-codes the number because a migration must not import application
-    code, so nothing but this holds the two together. Drift is silent: a fresh database would
-    boot on one cadence and the code would document another.
+def _seeded_by_migrations() -> dict[str, str]:
+    """Every ``runtime_config`` row the migration tree inserts, as key -> value.
+
+    Read out of the migration source rather than out of a database, deliberately. The test
+    fixture re-creates a row for every declared knob after truncating, so a database read would
+    find rows the fixture put there and report the invariant as held whether the migrations
+    provide it or not.
     """
-    migration = next(
-        Path("migrations/versions").glob("*runtime_config_and_feed_poll_state.py")
-    ).read_text()
-    seeded = re.search(r"VALUES \('poll_interval_seconds', '(\d+)'\)", migration)
-    assert seeded is not None, "the seed INSERT is no longer recognisable in the migration"
-    assert int(seeded.group(1)) == POLL_INTERVAL_SECONDS.default
+    seeded: dict[str, str] = {}
+    for migration in Path("migrations/versions").glob("*.py"):
+        text = migration.read_text()
+        if "INSERT INTO runtime_config" not in text:
+            continue
+        for key, value in re.findall(r"VALUES\s*\(\s*'([^']+)'\s*,\s*'([^']*)'\s*\)", text):
+            assert key not in seeded, f"{key} is seeded by more than one migration"
+            seeded[key] = value
+    return seeded
+
+
+@pytest.mark.parametrize("knob", runtime_config.KNOBS, ids=lambda k: k.key)
+def test_every_declared_knob_is_seeded_by_a_migration(knob: runtime_config.IntKnob) -> None:
+    """⚠️ Parametrized over the declared knobs, not written against one by name.
+
+    A knob with no seeded row still reads its default, so nothing breaks loudly — it simply
+    cannot be edited through the admin surface, and the page says "no row" to whoever finds it.
+    The earlier version of this test named ``poll_interval_seconds``, so the second knob added
+    would have been unguarded.
+    """
+    assert knob.key in _seeded_by_migrations(), (
+        f"{knob.key} is declared but no migration inserts its row"
+    )
+
+
+@pytest.mark.parametrize("knob", runtime_config.KNOBS, ids=lambda k: k.key)
+def test_every_seeded_value_matches_its_declared_default(knob: runtime_config.IntKnob) -> None:
+    """⚠️ A migration must not import application code, so the number is written twice and
+    nothing but this holds the two together. Drift is silent: a fresh database would boot on one
+    cadence while the code documents another.
+    """
+    assert int(_seeded_by_migrations()[knob.key]) == knob.default
+
+
+def test_a_seeded_value_is_inside_the_knobs_own_bounds() -> None:
+    """A seeded value outside the bounds would be rejected on read, so a fresh database would
+    silently run on the fallback rather than on what the migration wrote.
+    """
+    for knob in runtime_config.KNOBS:
+        knob.check(int(_seeded_by_migrations()[knob.key]))

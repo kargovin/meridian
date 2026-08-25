@@ -92,6 +92,40 @@ def get_int(session: Session, knob: IntKnob) -> int:
     return value
 
 
+@dataclass(frozen=True)
+class KnobState:
+    """A knob as an operator needs to see it: what is stored, and what is actually in force.
+
+    ⚠️ These differ whenever a stored value is unusable. Reads fall back rather than raising —
+    the caller is the discovery heartbeat and a config plane that can stop ingestion is worse
+    than one that ignores a bad value — but a page that then renders the stored number is
+    showing a value nothing is using. For the one knob whose whole risk is that a regression
+    goes unnoticed because nothing fails, that page is the only place anyone would look.
+    """
+
+    knob: IntKnob
+    row: RuntimeConfig | None
+    effective: int
+
+    @property
+    def rejected(self) -> bool:
+        """The stored value is present and is not the one in force."""
+        return self.row is not None and self.row.value != str(self.effective)
+
+    @property
+    def missing(self) -> bool:
+        return self.row is None
+
+
+def states(session: Session, knobs: Sequence[IntKnob] = KNOBS) -> list[KnobState]:
+    """Every declared knob, with its stored row and the value actually in force."""
+    stored = rows(session, knobs)
+    return [
+        KnobState(knob=knob, row=stored.get(knob.key), effective=get_int(session, knob))
+        for knob in knobs
+    ]
+
+
 def row(session: Session, knob: IntKnob) -> RuntimeConfig | None:
     """The stored row, for an admin surface that needs its version token."""
     return session.get(RuntimeConfig, knob.key)

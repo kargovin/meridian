@@ -115,3 +115,49 @@ def test_an_undeclared_key_is_not_writable(client: TestClient, app_session: Sess
         follow_redirects=False,
     )
     assert response.status_code == 404
+
+
+def test_a_rejected_stored_value_is_reported_not_displayed_as_running(
+    client: TestClient, app_session: Session
+) -> None:
+    """⚠️ Reads fall back rather than raising, which is right — but a page that then renders the
+    stored number shows a value nothing is using. For the one knob whose whole risk is a
+    regression nobody notices, this page is where someone would look to check.
+    """
+    app_session.execute(
+        sa.update(RuntimeConfig)
+        .where(RuntimeConfig.key == POLL_INTERVAL_SECONDS.key)
+        .values(value="7200")
+    )
+    app_session.commit()
+
+    body = client.get("/admin/config", auth=AUTH).text
+
+    assert 'value="300"' in body, "the page must show the value actually in force"
+    assert "rejected" in body
+    assert "<code>7200</code>" in body, "and must still say what was stored"
+
+
+def test_an_unparseable_stored_value_is_reported_the_same_way(
+    client: TestClient, app_session: Session
+) -> None:
+    app_session.execute(
+        sa.update(RuntimeConfig)
+        .where(RuntimeConfig.key == POLL_INTERVAL_SECONDS.key)
+        .values(value="every five minutes")
+    )
+    app_session.commit()
+
+    body = client.get("/admin/config", auth=AUTH).text
+
+    assert 'value="300"' in body
+    assert "rejected" in body
+
+
+def test_a_usable_stored_value_is_shown_without_a_warning(
+    client: TestClient, app_session: Session
+) -> None:
+    body = client.get("/admin/config", auth=AUTH).text
+
+    assert 'value="300"' in body
+    assert "rejected" not in body

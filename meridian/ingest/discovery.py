@@ -173,7 +173,9 @@ def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) ->
     return CycleReport(polled=1, discovered=discovered, skipped_items=parsed.skipped)
 
 
-def _interleave(due: Sequence[Feed]) -> list[Feed]:
+def _interleave(
+    due: Sequence[tuple[Feed, Source]],
+) -> list[tuple[Feed, Source]]:
     """Order feeds so consecutive requests go to different publishers.
 
     Politeness is per publisher, so polling one publisher's feeds back to back means waiting out
@@ -185,11 +187,11 @@ def _interleave(due: Sequence[Feed]) -> list[Feed]:
     Identical politeness — every publisher still sees the same minimum spacing — for a seventh
     of the wall time, which is a seventh of this term of the freshness budget (RFC §7.1).
     """
-    by_source: dict[int, list[Feed]] = defaultdict(list)
-    for feed in due:
-        by_source[feed.source_id].append(feed)
+    by_source: dict[int, list[tuple[Feed, Source]]] = defaultdict(list)
+    for pair in due:
+        by_source[pair[0].source_id].append(pair)
 
-    ordered: list[Feed] = []
+    ordered: list[tuple[Feed, Source]] = []
     queues = list(by_source.values())
     while queues:
         for queue in queues:
@@ -237,7 +239,7 @@ def run_cycle(
     everyone is the failure this shape exists to prevent (§5.6: degrade predictably).
     """
     pollable = feeds_repo.pollable(session)
-    due = [feed for feed in pollable if feed.discovery_method is DiscoveryMethod.RSS]
+    due = [pair for pair in pollable if pair[0].discovery_method is DiscoveryMethod.RSS]
 
     # A feed the registry permits but this cycle cannot read. Counted rather than dropped
     # silently: a sitemap source is registered correctly and is simply not implemented yet, and
@@ -250,12 +252,14 @@ def run_cycle(
     if not due:
         return report
 
-    publishers = _publishers(session, due)
     last_request_at: dict[int, float] = {}
     started = clock()
 
-    for feed in _interleave(due):
-        source = publishers[feed.source_id]
+    # The publisher arrives with its feed. Reading it separately made two statements out of one,
+    # and under READ COMMITTED they can disagree — a publisher deleted between them is missing
+    # from the second, and the lookup raised *outside* the per-feed guard below, taking the whole
+    # remaining roster with it.
+    for feed, source in _interleave(due):
         try:
             _pace(source, last_request_at, sleep, clock)
             report += _poll_one(session, feed, source, fetcher)
@@ -286,12 +290,3 @@ def _record_crash(session: Session, feed: Feed, exc: Exception) -> None:
     except Exception:
         session.rollback()
         log.exception("could not record the failed poll of feed %d", feed.feed_id)
-
-
-def _publishers(session: Session, due: Sequence[Feed]) -> dict[int, Source]:
-    """The publisher of every due feed, read once rather than per feed."""
-    by_source: dict[int, list[Feed]] = defaultdict(list)
-    for feed in due:
-        by_source[feed.source_id].append(feed)
-    found = session.query(Source).filter(Source.source_id.in_(by_source)).all()
-    return {source.source_id: source for source in found}

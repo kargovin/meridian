@@ -49,8 +49,8 @@ def counts_by_source(session: Session) -> dict[int, int]:
     return {source_id: count for source_id, count in rows}
 
 
-def pollable(session: Session) -> Sequence[Feed]:
-    """The feeds discovery may poll — all three gates, never a subset.
+def pollable(session: Session) -> Sequence[tuple[Feed, Source]]:
+    """The feeds discovery may poll, each with its publisher — all three gates, never a subset.
 
     A feed is polled only if the feed itself is enabled *and* its publisher is both
     operationally enabled and permitted to ingest. The three live on two tables and are set by
@@ -58,11 +58,16 @@ def pollable(session: Session) -> Sequence[Feed]:
     checks the nearest one and misses the others: disabling a publisher would otherwise leave
     its feeds polling, because nothing about the feed row changed.
 
+    The publisher comes back with the feed because every caller needs it — for the rate limit
+    and the user agent — and fetching it separately makes two statements out of one. Under READ
+    COMMITTED those two can disagree: a publisher deleted between them is absent from the second
+    result, and a caller that indexes into it raises where it expected a row.
+
     Read per run, never cached — FR-I6 exists so a Legal or ToS problem stops ingestion in
     minutes, and a cache adds its own lifetime to that number.
     """
-    return session.scalars(
-        sa.select(Feed)
+    return session.execute(
+        sa.select(Feed, Source)
         .join(Source, Source.source_id == Feed.source_id)
         .where(
             Feed.enabled.is_(True),
@@ -70,7 +75,7 @@ def pollable(session: Session) -> Sequence[Feed]:
             Source.permitted_to_ingest.is_(True),
         )
         .order_by(Feed.feed_id)
-    ).all()
+    ).all()  # type: ignore[return-value]
 
 
 def create(

@@ -379,7 +379,7 @@ def list_config(request: Request, session: Db) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "config/list.html",
-        {"knobs": runtime_config.KNOBS, "rows": runtime_config.rows(session)},
+        {"states": runtime_config.states(session)},
     )
 
 
