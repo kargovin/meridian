@@ -4,6 +4,7 @@ The scheduler itself is stubbed. What is under test is that the cadence is re-re
 config plane rather than captured once at startup — the failure mode being silent.
 """
 
+import datetime as dt
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -27,9 +28,11 @@ class StubScheduler:
         self.added: list[tuple[str, float]] = []
         self.rescheduled: list[tuple[str, float]] = []
         self.started = False
+        self.first_run_at: dt.datetime | None = None
 
     def add_job(self, func: Any, *, trigger: Any, id: str, **kw: Any) -> None:
         self.added.append((id, trigger.interval.total_seconds()))
+        self.first_run_at = kw.get("next_run_time")
 
     def reschedule_job(self, job_id: str, *, trigger: Any) -> None:
         self.rescheduled.append((job_id, trigger.interval.total_seconds()))
@@ -143,3 +146,61 @@ def test_a_cycle_that_raises_still_leaves_the_heartbeat_scheduled(
         scheduler.tick()
 
     assert stub.rescheduled == [(JOB_ID, 600.0)]
+
+
+def test_the_first_poll_does_not_wait_a_whole_interval(
+    sessions: sessionmaker[Session],
+) -> None:
+    """⚠️ An interval trigger's first fire is one interval from now, not now. Without an explicit
+    first run every deploy costs up to an interval of freshness, and a crash-looping process
+    never polls at all.
+    """
+    stub = StubScheduler()
+
+    _scheduler(sessions, stub).start()
+
+    assert stub.first_run_at is not None
+    assert (dt.datetime.now(dt.UTC) - stub.first_run_at).total_seconds() < 5
+
+
+def test_a_cycle_that_outruns_its_interval_says_so(
+    sessions: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """⚠️ This is the silent one. coalesce/max_instances correctly stop an overrunning cycle
+    doubling requests against publishers — and the cost is that the effective cadence quietly
+    becomes the cycle time. Nothing we own would otherwise say the configured interval has
+    stopped being what happens.
+    """
+    stub = StubScheduler()
+    slow = DiscoveryScheduler(
+        sessions,
+        _fetcher,
+        scheduler=stub,
+        run=lambda session, fetcher: CycleReport(polled=24, duration_seconds=400.0),
+    )
+    slow.start()
+
+    with caplog.at_level("WARNING"):
+        slow.tick()
+
+    assert any("effective cadence" in record.getMessage() for record in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+def test_a_cycle_inside_its_interval_is_not_reported(
+    sessions: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    stub = StubScheduler()
+    fast = DiscoveryScheduler(
+        sessions,
+        _fetcher,
+        scheduler=stub,
+        run=lambda session, fetcher: CycleReport(polled=24, duration_seconds=30.0),
+    )
+    fast.start()
+
+    with caplog.at_level("WARNING"):
+        fast.tick()
+
+    assert not [r for r in caplog.records if "effective cadence" in r.getMessage()]

@@ -10,7 +10,8 @@ exception per dead feed would make the ordinary path the exceptional one.
 
 import datetime as dt
 import logging
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -33,6 +34,12 @@ MAX_BYTES = 5 * 1024 * 1024
 
 DEFAULT_TIMEOUT = dt.timedelta(seconds=15)
 
+#: A ceiling on one whole request, which the client's own timeouts do not provide. Theirs are
+#: per-operation: ``read`` bounds the wait for the *next* chunk, so a publisher dribbling one
+#: byte inside every window holds the connection for as long as it likes without ever tripping
+#: it. That costs a slot in a sequential cycle, and the cycle is the freshness budget.
+DEFAULT_MAX_DURATION = dt.timedelta(seconds=60)
+
 
 @dataclass(frozen=True)
 class FetchResult:
@@ -54,6 +61,15 @@ class FetchResult:
         return self.status == 304
 
 
+class Streamable(Protocol):
+    """What ``_read`` needs from a response: chunks. Narrower than ``httpx2.Response`` on
+    purpose — the read loop's bounds are the interesting part and they are testable without
+    constructing a real response.
+    """
+
+    def iter_bytes(self) -> Iterator[bytes]: ...
+
+
 class Fetcher(Protocol):
     """What discovery needs from the network. Implemented for real by ``HttpFetcher``."""
 
@@ -61,6 +77,10 @@ class Fetcher(Protocol):
 
 
 class TooLarge(Exception):
+    pass
+
+
+class TooSlow(Exception):
     pass
 
 
@@ -76,23 +96,31 @@ class HttpFetcher:
         *,
         timeout: dt.timedelta = DEFAULT_TIMEOUT,
         max_bytes: int = MAX_BYTES,
+        max_duration: dt.timedelta = DEFAULT_MAX_DURATION,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = httpx2.Client(
             timeout=timeout.total_seconds(),
             follow_redirects=True,
         )
         self._max_bytes = max_bytes
+        self._max_duration = max_duration.total_seconds()
+        self._clock = clock
 
     def __call__(self, url: str, *, user_agent: str, headers: Mapping[str, str]) -> FetchResult:
         request_headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip", **headers}
+        deadline = self._clock() + self._max_duration
         try:
             with self._client.stream("GET", url, headers=request_headers) as response:
                 if response.status_code == 304:
                     return FetchResult(status=304)
-                body = self._read(response)
+                body = self._read(response, deadline)
         except TooLarge:
             log.warning("feed at %s exceeded %d bytes; not read", url, self._max_bytes)
             return FetchResult(status=None, error=f"body exceeded {self._max_bytes} bytes")
+        except TooSlow:
+            log.warning("feed at %s exceeded %.0f s; abandoned", url, self._max_duration)
+            return FetchResult(status=None, error=f"exceeded {self._max_duration:.0f}s")
         except httpx2.HTTPError as exc:
             # Includes timeouts, connection failures and protocol errors. The class name is
             # carried because "ReadTimeout" and "ConnectError" call for different responses
@@ -108,15 +136,19 @@ class HttpFetcher:
             last_modified=response.headers.get("Last-Modified"),
         )
 
-    def _read(self, response: httpx2.Response) -> bytes:
-        """Read the body, refusing to grow past the cap.
+    def _read(self, response: Streamable, deadline: float) -> bytes:
+        """Read the body, refusing to grow past the cap or to run past the deadline.
 
         Streamed rather than read whole: ``Content-Length`` is a claim by the same host that is
-        sending the body, so checking it and then reading anyway bounds nothing.
+        sending the body, so checking it and then reading anyway bounds nothing. The deadline is
+        checked per chunk for the same reason — the client's read timeout resets on every chunk,
+        so a steady dribble never trips it.
         """
         chunks: list[bytes] = []
         size = 0
         for chunk in response.iter_bytes():
+            if self._clock() > deadline:
+                raise TooSlow
             size += len(chunk)
             if size > self._max_bytes:
                 raise TooLarge

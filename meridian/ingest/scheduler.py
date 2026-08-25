@@ -11,6 +11,7 @@ unnoticed (§7.1: loosening the cadence is the cheapest way to lose freshness, w
 change and no diff to review), so the read has to happen on the clock, not at import.
 """
 
+import datetime as dt
 import logging
 from collections.abc import Callable
 
@@ -65,6 +66,10 @@ class DiscoveryScheduler:
             id=JOB_ID,
             max_instances=1,
             coalesce=True,
+            # ⚠️ Without this the first poll happens one whole interval after start, so every
+            # deploy costs up to an interval of freshness and a crash-looping process never
+            # polls at all. The trigger's own first fire is interval-from-now, not now.
+            next_run_time=dt.datetime.now(dt.UTC),
         )
         self._scheduler.start()
         log.info("discovery poll started at %d s", interval)
@@ -80,15 +85,41 @@ class DiscoveryScheduler:
             with self._sessions() as session:
                 report = self._run(session, self._fetcher)
                 log.info(
-                    "discovery cycle: polled=%d unchanged=%d failed=%d discovered=%d",
+                    "discovery cycle: polled=%d unchanged=%d failed=%d discovered=%d "
+                    "skipped=%d in %.1fs",
                     report.polled,
                     report.not_modified,
                     report.failed,
                     report.discovered,
+                    report.skipped_feeds,
+                    report.duration_seconds,
                 )
+                self._warn_if_overrunning(report)
         finally:
             self._apply_cadence()
         return report
+
+    def _warn_if_overrunning(self, report: CycleReport) -> None:
+        """Say so when a cycle takes longer than the gap it is supposed to fit inside.
+
+        ⚠️ This degrades silently otherwise. ``coalesce`` and ``max_instances=1`` correctly stop
+        an overrunning cycle from doubling requests against every publisher, but the cost is
+        that the effective cadence quietly *becomes* the cycle time — the configured interval
+        stops being what happens, and nothing we own says so. The cycle also sits inside the
+        freshness budget rather than beside it: an article waits the interval plus its feed's
+        position in the cycle (RFC §7.1).
+
+        An instrument, not a defence — following §6.3's pattern. It reports; it does not throttle.
+        """
+        if self._interval is None or report.duration_seconds <= self._interval:
+            return
+        log.warning(
+            "discovery cycle took %.1fs against a %ds interval: the effective cadence is now "
+            "the cycle time, not the configured one. Freshness is worse than configured. "
+            "Reduce feeds, raise rate_limit_per_min, or widen the interval deliberately.",
+            report.duration_seconds,
+            self._interval,
+        )
 
     def _apply_cadence(self) -> None:
         with self._sessions() as session:

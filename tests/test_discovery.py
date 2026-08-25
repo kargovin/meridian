@@ -4,7 +4,7 @@ No network: ``run_cycle`` takes its fetcher as an argument, so these drive the r
 against feeds we author here.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import pytest
@@ -49,13 +49,17 @@ class FakeFetcher:
         bodies: Mapping[str, bytes | Exception | FetchResult],
         *,
         etag: str | None = None,
+        on_call: Callable[[], None] | None = None,
     ) -> None:
         self._bodies = bodies
         self._etag = etag
+        self._on_call = on_call
         self.calls: list[tuple[str, str, Mapping[str, str]]] = []
 
     def __call__(self, url: str, *, user_agent: str, headers: Mapping[str, str]) -> FetchResult:
         self.calls.append((url, user_agent, dict(headers)))
+        if self._on_call is not None:
+            self._on_call()
         answer = self._bodies.get(url)
         if isinstance(answer, Exception):
             raise answer
@@ -511,3 +515,119 @@ def test_a_not_modified_response_does_not_clear_the_stored_validator(
     assert state is not None
     assert state.etag == 'W/"abc"'
     assert fetcher.calls[-1][2] == {"If-None-Match": 'W/"abc"'}
+
+
+# --------------------------------------------------------------- cycle cost (RFC §7.1)
+
+
+def test_consecutive_requests_go_to_different_publishers(app_session: Session) -> None:
+    """Politeness is per publisher, so polling one publisher's feeds back to back means waiting
+    out the full gap between each — the worst order, and the one feed id order produces.
+    """
+    first = make_source(app_session, "First")
+    second = make_source(app_session, "Second")
+    urls = {}
+    for source, tag in ((first, "a"), (second, "b")):
+        for n in (1, 2):
+            feed = make_feed(app_session, source, url=f"https://feeds.example/{tag}{n}.xml")
+            urls[feed.url] = feed_xml((f"{tag}{n}", "T"))
+    app_session.commit()
+
+    fetcher = FakeFetcher(urls)
+    run_cycle(app_session, fetcher, sleep=lambda _: None)
+
+    order = [url.rsplit("/", 1)[1][0] for url, _, _ in fetcher.calls]
+    assert order in (["a", "b", "a", "b"], ["b", "a", "b", "a"]), order
+
+
+class SimClock:
+    """A clock that moves only when work happens, never merely by being read.
+
+    Reading a clock must be free, or the number of times the code under test happens to call it
+    becomes part of the measurement — which makes the test assert the implementation rather than
+    the behaviour.
+    """
+
+    def __init__(self, fetch_cost: float = 0.5) -> None:
+        self.now = 0.0
+        self.fetch_cost = fetch_cost
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+    def spend_on_fetch(self) -> None:
+        self.now += self.fetch_cost
+
+
+def test_interleaving_spends_less_of_the_freshness_budget_on_waiting(
+    app_session: Session,
+) -> None:
+    """The cycle sits *inside* the freshness budget: an article waits the interval plus its
+    feed's position in the cycle. Same politeness, less waiting.
+
+    Two publishers, two feeds each, at one request per minute — so a publisher may be polled
+    once a minute and there are four feeds to get through.
+
+    Feed id order is ``a1 a2 b1 b2``: two full 60 s waits, ~120 s of wall time. Interleaved it
+    is ``a1 b1 a2 b2``, and the whole cycle waits **once** — by the time the second publisher's
+    turn comes round its gap has already elapsed during the first publisher's wait. ~61 s, for
+    exactly the same politeness: each publisher still sees a minute between its requests.
+    """
+    urls = {}
+    for name, tag in (("First", "a"), ("Second", "b")):
+        source = make_source(app_session, name, rate_limit_per_min=1)
+        for n in (1, 2):
+            feed = make_feed(app_session, source, url=f"https://feeds.example/{tag}{n}.xml")
+            urls[feed.url] = feed_xml((f"{tag}{n}", "T"))
+    app_session.commit()
+
+    clock = SimClock()
+    fetcher = FakeFetcher(urls, on_call=clock.spend_on_fetch)
+
+    run_cycle(app_session, fetcher, sleep=clock.sleep, clock=clock)
+
+    # The property is the wall time, not the number of sleeps: feed id order costs two full
+    # gaps here and interleaving costs one, and it is the total that lands in the budget.
+    assert clock.now < 120, f"cycle took {clock.now}s; feed id order would cost ~120s"
+    assert sum(clock.slept) < 60, clock.slept
+    # Politeness is unchanged — each publisher was still polled at most once per gap.
+    assert len(fetcher.calls) == 4
+
+
+def test_the_cycle_reports_how_long_it_took(app_session: Session) -> None:
+    """Reported because it is a term in the freshness budget and not a constant — it grows with
+    the feed count and with how politely each publisher is polled.
+    """
+    feed = _feed_with_source(app_session)
+    clock = SimClock(fetch_cost=30.0)
+
+    report = run_cycle(
+        app_session,
+        FakeFetcher({feed.url: ONE_ITEM}, on_call=clock.spend_on_fetch),
+        sleep=clock.sleep,
+        clock=clock,
+    )
+
+    assert report.duration_seconds == 30.0
+
+
+def test_no_transaction_is_held_open_across_the_fetch(app_session: Session) -> None:
+    """⚠️ A transaction held open across a network fetch pins the database's oldest xmin, so
+    VACUUM cannot reclaim dead tuples anywhere in the database until the slowest publisher
+    answers — on a volume that cannot be expanded.
+    """
+    _feed_with_source(app_session)
+    open_during_fetch: list[bool] = []
+
+    def watching_fetcher(url: str, *, user_agent: str, headers: Mapping[str, str]) -> FetchResult:
+        open_during_fetch.append(app_session.in_transaction())
+        return FetchResult(status=200, body=ONE_ITEM)
+
+    run_cycle(app_session, watching_fetcher, sleep=lambda _: None)
+
+    assert open_during_fetch == [False]

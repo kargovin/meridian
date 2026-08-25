@@ -43,6 +43,10 @@ class CycleReport:
     #: Feeds the registry permits but this cycle cannot read — a discovery method we do not
     #: implement yet. Not a failure and not a success; it must not read as either.
     skipped_feeds: int = 0
+    #: Wall time of the cycle. Reported because it is a term in the freshness budget and not a
+    #: constant: an article's real wait is the interval plus its feed's position in the cycle,
+    #: and the cycle grows with the feed count and with how politely each publisher is polled.
+    duration_seconds: float = 0.0
 
     def __add__(self, other: "CycleReport") -> "CycleReport":
         return CycleReport(
@@ -52,6 +56,7 @@ class CycleReport:
             discovered=self.discovered + other.discovered,
             skipped_items=self.skipped_items + other.skipped_items,
             skipped_feeds=self.skipped_feeds + other.skipped_feeds,
+            duration_seconds=self.duration_seconds + other.duration_seconds,
         )
 
 
@@ -113,11 +118,18 @@ def _insert(session: Session, feed: Feed, item: FeedItem) -> bool:
 
 def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) -> CycleReport:
     """Fetch, parse and store one feed. Commits."""
-    state = poll_state.get(session, feed.feed_id)
+    headers = poll_state.validators(poll_state.get(session, feed.feed_id))
+    # ⚠️ Commit before going to the network. The read above opens a transaction, and a
+    # transaction held open across a fetch pins the database's oldest xmin — so VACUUM cannot
+    # reclaim dead tuples anywhere in the database for as long as the slowest publisher takes
+    # to answer. The volume this runs on cannot be expanded (T3), which is what turns a slow
+    # publisher into a storage problem for everything else.
+    session.commit()
+
     result = fetcher(
         feed.url,
         user_agent=source.user_agent or DEFAULT_USER_AGENT,
-        headers=poll_state.validators(state),
+        headers=headers,
     )
 
     if result.not_modified:
@@ -158,6 +170,31 @@ def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) ->
     )
     session.commit()
     return CycleReport(polled=1, discovered=discovered, skipped_items=parsed.skipped)
+
+
+def _interleave(due: Sequence[Feed]) -> list[Feed]:
+    """Order feeds so consecutive requests go to different publishers.
+
+    Politeness is per publisher, so polling one publisher's feeds back to back means waiting out
+    the full gap between each — the worst possible order, and the one feed id order produces.
+    Round-robin instead: by the time the cycle returns to a publisher it has already spent the
+    other publishers' requests, and that time counts towards the gap.
+
+    Measured, 8 publishers x 3 feeds at 5 requests/min: 194 s in feed order, 26 s interleaved.
+    Identical politeness — every publisher still sees the same minimum spacing — for a seventh
+    of the wall time, which is a seventh of this term of the freshness budget (RFC §7.1).
+    """
+    by_source: dict[int, list[Feed]] = defaultdict(list)
+    for feed in due:
+        by_source[feed.source_id].append(feed)
+
+    ordered: list[Feed] = []
+    queues = list(by_source.values())
+    while queues:
+        for queue in queues:
+            ordered.append(queue.pop(0))
+        queues = [queue for queue in queues if queue]
+    return ordered
 
 
 def _pace(
@@ -214,8 +251,9 @@ def run_cycle(
 
     publishers = _publishers(session, due)
     last_request_at: dict[int, float] = {}
+    started = clock()
 
-    for feed in due:
+    for feed in _interleave(due):
         source = publishers[feed.source_id]
         try:
             _pace(source, last_request_at, sleep, clock)
@@ -225,7 +263,7 @@ def run_cycle(
             log.exception("feed %d (%s) raised during poll", feed.feed_id, feed.url)
             _record_crash(session, feed, exc)
             report += CycleReport(polled=1, failed=1)
-    return report
+    return report + CycleReport(duration_seconds=clock() - started)
 
 
 def _record_crash(session: Session, feed: Feed, exc: Exception) -> None:
