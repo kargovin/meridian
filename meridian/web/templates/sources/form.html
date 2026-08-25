@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}{{ "Edit source" if source else "Add a source" }}{% endblock %}
+{% block title %}{{ "Edit publisher" if source else "Add a publisher" }}{% endblock %}
 {% block body %}
-<h1>{{ "Edit " ~ source.name if source else "Add a source" }}</h1>
+<h1>{{ "Edit " ~ source.name if source else "Add a publisher" }}</h1>
 
-{# One template for both: the fields are identical, only the action differs. #}
-{# The action is passed in rather than derived from `source`, so this template does not have
-   to know which of the two routes it is serving. #}
-<form method="post" action="{{ action }}">
+{# One template for both. The action differs, so it is derived from `source` here rather than
+   passed in: there are now feed forms on this page that need the publisher's id anyway, so a
+   template that did not know which row it was serving could not render them. #}
+<form method="post" action="{{ '/admin/sources/' ~ source.source_id if source else '/admin/sources' }}">
   <label>
     <span>Name</span>
     <input name="name" required value="{{ source.name if source else '' }}">
@@ -14,14 +14,7 @@
   <label>
     <span>Home URL</span>
     <input name="home_url" type="url" required value="{{ source.home_url if source else '' }}">
-  </label>
-  <label>
-    <span>Discovery method</span>
-    <select name="discovery_method">
-      {% for method in discovery_methods %}
-      <option value="{{ method.value }}" {% if source and method == source.discovery_method %}selected{% endif %}>{{ method.value }}</option>
-      {% endfor %}
-    </select>
+    <small>Descriptive, not an identity — nothing canonicalises it.</small>
   </label>
   <label>
     <span>Jurisdiction</span>
@@ -31,11 +24,129 @@
     <span>Rate limit (requests/min)</span>
     <input name="rate_limit_per_min" type="number" min="1" required
            value="{{ source.rate_limit_per_min if source else 30 }}">
+    <small>Per publisher, shared across all its feeds — the limit is a promise about one host.</small>
   </label>
-  {# The three governing fields appear only when creating. On a new source there is no prior
-     state to overwrite; on an existing one this form could be rendered before an emergency
-     change and submitted after it, reverting it. Each is set from the list page instead. #}
+  <label>
+    <span>User-Agent override</span>
+    <input name="user_agent" value="{{ source.user_agent or '' if source else '' }}">
+    <small>Blank uses the default. Some edges black-hole a User-Agent carrying a contact URL,
+    and the request hangs to the timeout rather than being refused — so it reads as an outage.
+    Set a plain <code>Name/version</code> here if a publisher stops responding.</small>
+  </label>
+  {# The governing fields appear only when creating. On a new publisher there is no prior state
+     to overwrite; on an existing one this form could be rendered before an emergency change and
+     submitted after it, reverting it. Each is set from the list page instead. #}
   {% if source is none %}
+  <label>
+    <span>Rights level</span>
+    <select name="rights_level">
+      {% for level in rights_levels %}
+      <option value="{{ level.value }}">{{ level.value }}</option>
+      {% endfor %}
+    </select>
+    <small>headline_only excludes this publisher from summarization (FR-S5). Applies to
+    articles already ingested, not only new ones.</small>
+  </label>
+  <label>
+    {# Absent when unchecked, which is why the route defaults it to True on create. #}
+    <input type="checkbox" name="permitted_to_ingest" value="true" checked>
+    <span style="display:inline">Permitted to ingest</span>
+    <small>Uncheck if the publisher's terms forbid ingestion. Not the same as a rights level —
+    a terms exclusion is not a lower rung on the rights ladder — and not the same as stopping,
+    which is operational.</small>
+  </label>
+  <label>
+    <input type="checkbox" name="enabled" value="true" checked>
+    <span style="display:inline">Ingesting</span>
+  </label>
+  {% endif %}
+  <button type="submit">Save</button>
+</form>
+
+{% if source %}
+<h2>Feeds</h2>
+{# A publisher is not polled; its feeds are. One with no feeds is inert, whatever its other
+   settings say. #}
+{% if not feeds %}
+  <p class="warn">No feeds — nothing is polled for this publisher.</p>
+{% else %}
+<table>
+  <tr><th>Feed</th><th>Tier</th><th>Polling</th><th></th></tr>
+  {% for feed in feeds %}
+  <tr {% if not feed.enabled %}class="off"{% endif %}>
+    <td>
+      {# The three descriptive fields in ONE form and ONE cell. A form cannot span table cells:
+         the HTML parser closes it at the cell boundary, so the inputs left outside it are
+         simply not submitted, silently. None of these three is governing — a stale value here
+         costs a failed poll, not a permission. #}
+      <form method="post" action="/admin/feeds/{{ feed.feed_id }}">
+        <input name="name" required value="{{ feed.name }}" size="14">
+        <input name="url" type="url" required value="{{ feed.url }}" size="38">
+        <select name="discovery_method">
+          {% for method in discovery_methods %}
+          <option value="{{ method.value }}" {% if method == feed.discovery_method %}selected{% endif %}>
+            {{ method.value }}
+          </option>
+          {% endfor %}
+        </select>
+        <button type="submit">Save</button>
+      </form>
+    </td>
+    <td>
+      {# Governing: three values, so unlike the two-valued fields a lost update here is not
+         saved by the harmful write happening to be a no-op. Carries updated_at for that. #}
+      <form method="post" action="/admin/feeds/{{ feed.feed_id }}/tier">
+        <input type="hidden" name="expected_updated_at" value="{{ feed.updated_at.isoformat() }}">
+        <select name="acquisition_tier">
+          {% for tier in tiers %}
+          <option value="{{ tier.value }}" {% if tier == feed.acquisition_tier %}selected{% endif %}>
+            {{ tier.value }}
+          </option>
+          {% endfor %}
+        </select>
+        <button type="submit">Set</button>
+      </form>
+    </td>
+    <td>
+      <form method="post" action="/admin/feeds/{{ feed.feed_id }}/enable">
+        <input type="hidden" name="expected_updated_at" value="{{ feed.updated_at.isoformat() }}">
+        <input type="hidden" name="enabled" value="{{ 'false' if feed.enabled else 'true' }}">
+        <button type="submit">{{ "Stop" if feed.enabled else "Resume" }}</button>
+      </form>
+    </td>
+    <td>
+      {# Stopping is the softer option and is deliberately the leftmost control; deleting is
+         here because a retired feed URL is not history worth keeping. Records it discovered
+         survive with their feed_id set to NULL. #}
+      <form method="post" action="/admin/feeds/{{ feed.feed_id }}/delete">
+        <button type="submit">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h3>Add a feed</h3>
+<form method="post" action="/admin/sources/{{ source.source_id }}/feeds">
+  <label>
+    <span>Name</span>
+    <input name="name" required placeholder="World news">
+  </label>
+  <label>
+    <span>URL</span>
+    <input name="url" type="url" required placeholder="https://example.com/rss">
+    <small>The URL discovery polls. It is not derivable from the home URL — one roster
+    publisher serves its feed from a different host, and another has no usable feed at all.</small>
+  </label>
+  <label>
+    <span>Discovery method</span>
+    <select name="discovery_method">
+      {% for method in discovery_methods %}
+      <option value="{{ method.value }}">{{ method.value }}</option>
+      {% endfor %}
+    </select>
+  </label>
   <label>
     <span>Acquisition tier</span>
     <select name="acquisition_tier">
@@ -45,21 +156,10 @@
     </select>
   </label>
   <label>
-    <span>Rights level</span>
-    <select name="rights_level">
-      {% for level in rights_levels %}
-      <option value="{{ level.value }}">{{ level.value }}</option>
-      {% endfor %}
-    </select>
-    <small>headline_only excludes this source from summarization (FR-S5). Applies to
-    articles already ingested, not only new ones.</small>
-  </label>
-  <label>
-    {# Absent when unchecked, which is why the route defaults it to True on create. #}
     <input type="checkbox" name="enabled" value="true" checked>
-    <span style="display:inline">Ingesting</span>
+    <span style="display:inline">Polling</span>
   </label>
-  {% endif %}
-  <button type="submit">Save</button>
+  <button type="submit">Add feed</button>
 </form>
+{% endif %}
 {% endblock %}

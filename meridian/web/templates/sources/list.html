@@ -2,40 +2,36 @@
 {% block title %}Sources{% endblock %}
 {% block body %}
 <h1>Source registry</h1>
-<p><a href="/admin/sources/new">Add a source</a></p>
+<p><a href="/admin/sources/new">Add a publisher</a></p>
 {% if not sources %}
-  <p>No sources yet.</p>
+  <p>No publishers yet.</p>
 {% else %}
+{# One row per PUBLISHER. Discovery method and acquisition tier are per-feed and live on the
+   publisher's own page — a publisher can have several feeds and they need not agree. #}
 <table>
   <tr>
-    <th>Name</th><th>Discovery</th><th>Tier</th><th>Rights</th>
+    <th>Name</th><th>Feeds</th><th>Rights</th><th>Permitted</th>
     <th>Juris.</th><th>Rate</th><th>Ingesting</th>
   </tr>
   {% for source in sources %}
-  <tr {% if not source.enabled %}class="off"{% endif %}>
+  <tr {% if not source.enabled or not source.permitted_to_ingest %}class="off"{% endif %}>
     <td><a href="/admin/sources/{{ source.source_id }}">{{ source.name }}</a></td>
-    <td>{{ source.discovery_method.value }}</td>
     <td>
-      {# Its own form: a tier change must not depend on the rest of the row being valid.
-         An explicit button, never onchange — a scroll over a focused select would otherwise
-         change a source's acquisition tier with no confirmation and no record.
-         Every governing control carries the row's updated_at: the option rendered as selected
-         is the value as of page load, so without it a page submitted after an out-of-band
-         change would write the stale value back. #}
-      <form method="post" action="/admin/sources/{{ source.source_id }}/tier">
-        <input type="hidden" name="expected_updated_at" value="{{ source.updated_at.isoformat() }}">
-        <select name="acquisition_tier">
-          {% for tier in tiers %}
-          <option value="{{ tier.value }}" {% if tier == source.acquisition_tier %}selected{% endif %}>
-            {{ tier.value }}
-          </option>
-          {% endfor %}
-        </select>
-        <button type="submit">Set</button>
-      </form>
+      {# A publisher with no feeds polls nothing at all, and nothing else on this row says so. #}
+      {% set count = feed_counts.get(source.source_id, 0) %}
+      {% if count %}
+        {{ count }}
+      {% else %}
+        <span class="warn">none</span>
+      {% endif %}
     </td>
     <td>
-      {# Governing field, so it is set here and not on the descriptive form. #}
+      {# Governing field, so it is set here and not on the descriptive form.
+         Every governing control carries the row's updated_at: the option rendered as selected
+         is the value as of page load, so without it a page submitted after an out-of-band
+         change would write the stale value back.
+         An explicit button, never onchange — a scroll over a focused select would otherwise
+         change a publisher's rights level with no confirmation and no record. #}
       <form method="post" action="/admin/sources/{{ source.source_id }}/rights">
         <input type="hidden" name="expected_updated_at" value="{{ source.updated_at.isoformat() }}">
         <select name="rights_level" class="{% if source.rights_level.value == 'headline_only' %}warn{% endif %}">
@@ -51,8 +47,21 @@
         <div class="warn">headline only — excluded from summarization</div>
       {% endif %}
     </td>
+    <td>
+      {# Read before the rights level, not as part of it: a terms exclusion is not a lower rung
+         on the rights ladder, and recording one as headline_only leaves us politely polling a
+         publisher whose terms forbid the activity. #}
+      <form method="post" action="/admin/sources/{{ source.source_id }}/permitted">
+        <input type="hidden" name="expected_updated_at" value="{{ source.updated_at.isoformat() }}">
+        <input type="hidden" name="permitted_to_ingest" value="{{ 'false' if source.permitted_to_ingest else 'true' }}">
+        <button type="submit">{{ "Withdraw" if source.permitted_to_ingest else "Permit" }}</button>
+      </form>
+      {% if not source.permitted_to_ingest %}
+        <div class="warn">not permitted — terms exclusion</div>
+      {% endif %}
+    </td>
     <td>{{ source.jurisdiction }}</td>
-    <td>{{ source.rate_limit_per_min }}/min</td>
+    <td>{{ source.rate_limit_per_min }}/min<br><small>shared by all feeds</small></td>
     <td>
       <form method="post" action="/admin/sources/{{ source.source_id }}/enable">
         <input type="hidden" name="expected_updated_at" value="{{ source.updated_at.isoformat() }}">
