@@ -7,22 +7,31 @@ import pytest
 from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
 from sqlalchemy.orm import Session
 
+from meridian.db import feeds, sources
 from meridian.db import seed as seeder
-from meridian.db import sources
 from tests.factories import make_source
 
 EXAMPLE = Path("seeds/sources.example.json")
+
+
+def _feed(**kw: object) -> seeder.FeedEntry:
+    fields: dict[str, object] = {
+        "name": "World",
+        "url": "https://feeds.times.example/world.xml",
+        "discovery_method": DiscoveryMethod.RSS,
+        "acquisition_tier": AcquisitionTier.FULL_FEED,
+    }
+    return seeder.FeedEntry(**{**fields, **kw})  # type: ignore[arg-type]
 
 
 def _entry(**kw: object) -> seeder.SeedEntry:
     fields: dict[str, object] = {
         "name": "Example Times",
         "home_url": "https://times.example",
-        "discovery_method": DiscoveryMethod.RSS,
-        "acquisition_tier": AcquisitionTier.FULL_FEED,
         "rights_level": RightsLevel.BODY_TEXT,
         "jurisdiction": "GB",
         "rate_limit_per_min": 20,
+        "feeds": (_feed(),),
     }
     return seeder.SeedEntry(**{**fields, **kw})  # type: ignore[arg-type]
 
@@ -31,10 +40,13 @@ def test_the_shipped_example_parses(app_session: Session) -> None:
     """The file is the documentation of the format; a stale one teaches the wrong shape."""
     entries = seeder.parse(json.loads(EXAMPLE.read_text()))
 
-    assert len(entries) == 2
+    assert len(entries) == 3
     inserted, skipped = seeder.seed(app_session, entries)
-    assert len(inserted) == 2
+    assert len(inserted) == 3
     assert skipped == []
+    # The nested feeds are loaded with their publisher, not silently dropped: a roster that
+    # parsed and seeded but created no feeds would leave a registry that polls nothing.
+    assert sum(feeds.counts_by_source(app_session).values()) == 3
 
 
 def test_seeding_twice_inserts_nothing_the_second_time(app_session: Session) -> None:
@@ -51,6 +63,20 @@ def test_a_duplicate_within_one_file_is_inserted_once(app_session: Session) -> N
 
     assert inserted == ["Example Times"]
     assert skipped == ["Same Site Again"]
+
+
+def test_a_skipped_publisher_does_not_gain_the_file_s_feeds(app_session: Session) -> None:
+    """The insert-never-update rule has to hold for the nested half too.
+
+    A publisher already in the registry keeps the feeds it has. Adding the file's feeds to it
+    would be an update wearing an insert's clothes — it re-adds a feed an operator deleted
+    because its URL had rotted, and does it on every deploy.
+    """
+    existing = make_source(app_session, name="Example Times", home_url="https://times.example")
+
+    seeder.seed(app_session, [_entry()])
+
+    assert feeds.for_source(app_session, existing.source_id) == []
 
 
 def test_seeding_never_re_enables_a_stopped_source(app_session: Session) -> None:
@@ -100,9 +126,24 @@ def test_a_bad_enum_value_fails_before_anything_is_written(app_session: Session)
     the operator re-running a command that is no longer idempotent in the way they expect.
     """
     roster = json.loads(EXAMPLE.read_text())
-    roster[1]["discovery_method"] = "carrier_pigeon"
+    roster[1]["rights_level"] = "carrier_pigeon"
 
     with pytest.raises(ValueError, match="entry 1"):
+        seeder.parse(roster)
+
+    assert sources.list_all(app_session) == []
+
+
+def test_a_bad_enum_inside_a_feed_names_the_feed(app_session: Session) -> None:
+    """A nested failure has to say which feed, not only which publisher.
+
+    A roster entry can carry several feeds, so "entry 1" alone leaves the operator diffing
+    them by eye.
+    """
+    roster = json.loads(EXAMPLE.read_text())
+    roster[0]["feeds"][1]["discovery_method"] = "carrier_pigeon"
+
+    with pytest.raises(ValueError, match=r"entry 0 feed 1"):
         seeder.parse(roster)
 
     assert sources.list_all(app_session) == []
