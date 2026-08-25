@@ -22,7 +22,11 @@ from meridian_platform.db import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which switches off every logger that
+    # already exists — including the application's. Tests run migrations in a fixture, so
+    # the default leaves the whole suite unable to capture a log record, silently: caplog
+    # returns nothing rather than failing, so a log assertion passes vacuously.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 settings = load_platform()
 

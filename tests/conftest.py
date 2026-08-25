@@ -17,7 +17,8 @@ from meridian_platform.bootstrap import ensure_platform_database
 from meridian_platform.db import Base as PlatformBase
 from sqlalchemy.orm import Session
 
-from meridian.db.models import Base
+from meridian.db import runtime_config
+from meridian.db.models import Base, RuntimeConfig
 
 
 @pytest.fixture(scope="session")
@@ -67,14 +68,22 @@ def app_migrated(app_engine: sa.Engine, app_alembic_config: Config) -> Iterator[
 
 @pytest.fixture
 def app_session(app_migrated: sa.Engine) -> Iterator[Session]:
-    """A session over empty tables.
+    """A session over empty tables, with the declared config knobs back at their defaults.
 
     Truncates rather than rolling back: the claim path commits, so a wrapping transaction
     would not survive the code under test.
+
+    ``runtime_config`` is seeded by its migration rather than written by a test, so the
+    truncate empties it and every knob would silently read its fallback — including in tests
+    whose subject is what happens when a knob is *set*. Restoring the declared defaults keeps
+    the seeded-row invariant true here as it is in a real database, and keeps a test that
+    writes a knob from leaking that value into the next test.
     """
     tables = ", ".join(f'"{name}"' for name in Base.metadata.tables)
     with Session(app_migrated, expire_on_commit=False) as db:
         db.execute(sa.text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+        for knob in runtime_config.KNOBS:
+            db.add(RuntimeConfig(key=knob.key, value=str(knob.default)))
         db.commit()
         yield db
 

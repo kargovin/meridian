@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Runtime config{% endblock %}
+{% block body %}
+<h1>Runtime config</h1>
+
+<p>Values here take effect without a redeploy. The discovery poll re-reads its cadence after
+every cycle, so a change applies on the next tick.</p>
+
+<table>
+  <tr><th>Knob</th><th>In force</th><th>Allowed</th><th></th></tr>
+  {% for state in states %}
+  <tr>
+    <td>
+      <code>{{ state.knob.key }}</code><br>
+      <small>{{ state.knob.summary }}</small>
+    </td>
+    {# The value shown is the one actually in force, never the stored text. A stored value that
+       cannot be used is reported as rejected rather than displayed as if it were running. #}
+    <td>
+      {% if state.missing %}
+        <span class="warn">{{ state.effective }}</span>
+      {% else %}
+      <form method="post" action="/admin/config/{{ state.knob.key }}">
+        <input type="hidden" name="expected_updated_at" value="{{ state.row.updated_at.isoformat() }}">
+        <input type="number" name="value" value="{{ state.effective }}"
+               min="{{ state.knob.minimum }}" max="{{ state.knob.maximum }}" required
+               style="min-width: 8rem">
+        <button type="submit">Save</button>
+      </form>
+      {% endif %}
+    </td>
+    <td>{{ state.knob.minimum }}–{{ state.knob.maximum }}</td>
+    <td>
+      {% if state.missing %}
+        <small class="warn">no row — running on the built-in default; seed it to make it editable</small>
+      {% elif state.rejected %}
+        <small class="warn">stored value <code>{{ state.row.value }}</code> was rejected;
+          running on the built-in default</small>
+      {% else %}
+        <small>changed {{ state.row.updated_at.strftime('%Y-%m-%d %H:%M') }} UTC</small>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

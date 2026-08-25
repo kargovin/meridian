@@ -12,7 +12,7 @@ The write path is a pipeline. Each article moves through it one stage at a time,
 
 | Stage | What happens |
 |---|---|
-| **Discovery** | Poll each source for new URLs — RSS/Atom first, then sitemaps, then section scraping. A source is polled on a configurable cadence |
+| **Discovery** | Poll each feed for new URLs — RSS/Atom first, then sitemaps, then section scraping. Re-polling is idempotent: a feed shows the same article for hours, and the schema is what stops it being stored twice |
 | **Acquisition** | Fetch the article, by whichever tier the source's rights allow: full feed content, publisher API, or extraction |
 | **Normalization** | Reduce the page to a canonical record — title, body, lede, publisher, timestamp, content hash. Rights are read from the source registry rather than copied onto the record, so a change applies to articles already ingested |
 | **Deduplication** | Detect syndicated reprints by exact hash, then by SimHash near-match. Duplicates are collapsed into one record that keeps every source as provenance, rather than dropped |
@@ -20,6 +20,8 @@ The write path is a pipeline. Each article moves through it one stage at a time,
 | **Clustering** | Embed title and lede, assign to a cluster of the same event by online leader-follower matching, then reconcile in batch. A cluster's topic is a confidence-weighted vote of its members |
 | **Summarization** | Ask the Platform to summarize the cluster from its rights-permitted members. A faithfulness check runs on the result, and a summary that fails it is withheld rather than shown |
 | **Projection** | Write the result into a read model shaped for browsing: topics → clusters → article detail |
+
+Discovery's cadence, and every other value that must change without a redeploy, lives in a runtime config table the pipeline reads each cycle — not in a constant and not in an environment variable. Publishers, their feeds and their rights live in a source registry alongside it, and both are edited through the admin surface.
 
 The read path only reads that projection. **The reader surface calls no model** — every page it serves was computed upstream on the write path.
 
@@ -62,6 +64,8 @@ interface other teams have built against, and is reviewed as one.
 ```text
 meridian/              # the product app
   ingest/              # discovery, acquisition, normalization
+  db/                  # schema, repositories, the work queue
+  web/                 # the admin surface over the registry and runtime config
   dedup/               # SimHash near-duplicate detection and collapsing
   cluster/             # leader-follower matching + reconciliation
   readmodel/           # projection + reader surface
@@ -71,7 +75,7 @@ platform/              # the stateless Platform service
   models/              # classify / summarize / faithfulness
 libs/
   contract/            # shared Pydantic schema — source of the published contract
-  config/              # pinned model versions, poll cadence, API limits
+  config/              # process bootstrap: database URLs, credentials, API limits
 eval/                  # model evaluation harness
 migrations/            # Alembic
 tools/                 # Confluence authoring toolchain

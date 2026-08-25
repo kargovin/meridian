@@ -33,7 +33,16 @@ class CanonicalRecord(Base):
     )
 
     article_id: Mapped[int] = mapped_column(sa.BigInteger, sa.Identity(), primary_key=True)
+    #: The publisher. UNIQUE(source_id, guid) below is therefore one article per *publisher* per
+    #: guid, so a publisher's section feeds carrying the same item collapse at insert rather
+    #: than arriving as two records for dedup to recognise.
     source_id: Mapped[int] = mapped_column(sa.ForeignKey("source.source_id", ondelete="RESTRICT"))
+    #: Which feed discovered this. Provenance and debugging only — rights and the FR-S6 count
+    #: both key on source_id. Nullable because not every discovery path is a feed, and because
+    #: deleting a feed must not delete the articles it found.
+    feed_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("feed.feed_id", ondelete="SET NULL"), nullable=True
+    )
 
     url_canonical: Mapped[str] = mapped_column(sa.Text)
     guid: Mapped[str] = mapped_column(sa.Text)
@@ -92,6 +101,11 @@ class AlternateCopy(Base):
         sa.ForeignKey("canonical_record.article_id", ondelete="CASCADE")
     )
     source_id: Mapped[int] = mapped_column(sa.ForeignKey("source.source_id", ondelete="RESTRICT"))
+    #: Which feed brought the duplicate in. The duplicate is the second arrival, so this is
+    #: where "why did this arrive twice" is answerable.
+    feed_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("feed.feed_id", ondelete="SET NULL"), nullable=True
+    )
     url: Mapped[str] = mapped_column(sa.Text)
     #: Nullable — tier-3 acquisition has no feed-native id. UNIQUE(url) is what covers those.
     guid: Mapped[str | None] = mapped_column(sa.Text, nullable=True)

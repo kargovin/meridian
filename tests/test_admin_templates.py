@@ -15,9 +15,9 @@ from meridian_config import AdminSettings, AppSettings
 from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
 from sqlalchemy.orm import Session
 
-from meridian.db import sources
+from meridian.db import feeds, poll_state, sources
 from meridian.web.app import create_app
-from tests.factories import make_source
+from tests.factories import make_feed, make_source
 
 TOKEN = "t" * 32
 AUTH = ("anything", TOKEN)
@@ -91,7 +91,7 @@ def test_the_list_shows_a_source(client: TestClient, app_session: Session) -> No
 
 
 def test_the_empty_list_says_so_rather_than_rendering_nothing(client: TestClient) -> None:
-    assert "No sources yet" in client.get("/admin/sources", auth=AUTH).text
+    assert "No publishers yet" in client.get("/admin/sources", auth=AUTH).text
 
 
 def test_a_source_name_is_escaped(client: TestClient, app_session: Session) -> None:
@@ -132,10 +132,52 @@ def test_every_governing_control_carries_the_version_token(
 
     body = client.get("/admin/sources", auth=AUTH).text
 
-    for action in ("enable", "rights", "tier"):
+    for action in ("enable", "rights", "permitted"):
         fields = _form(body, f"/admin/sources/{source.source_id}/{action}")
         assert "expected_updated_at" in fields, action
         assert fields["expected_updated_at"] == source.updated_at.isoformat()
+
+
+def test_every_governing_feed_control_carries_the_version_token(
+    client: TestClient, app_session: Session
+) -> None:
+    """The same guarantee on the feed half, whose token is a different row's."""
+    source = make_source(app_session, name="Example")
+    feed = make_feed(app_session, source)
+    app_session.commit()
+
+    body = client.get(f"/admin/sources/{source.source_id}", auth=AUTH).text
+
+    for action in ("enable", "tier"):
+        fields = _form(body, f"/admin/feeds/{feed.feed_id}/{action}")
+        assert "expected_updated_at" in fields, action
+        assert fields["expected_updated_at"] == feed.updated_at.isoformat(), action
+
+
+def test_a_publisher_with_no_feeds_says_it_polls_nothing(
+    client: TestClient, app_session: Session
+) -> None:
+    """Every other field on the page can look correct while nothing is ever fetched."""
+    source = make_source(app_session, name="Example")
+    app_session.commit()
+
+    body = client.get(f"/admin/sources/{source.source_id}", auth=AUTH).text
+
+    assert "nothing is polled" in body
+
+
+def test_the_feed_toggle_posts_the_opposite_of_the_current_state(
+    client: TestClient, app_session: Session
+) -> None:
+    source = make_source(app_session, name="Example")
+    on = make_feed(app_session, source, name="On")
+    off = make_feed(app_session, source, name="Off", enabled=False)
+    app_session.commit()
+
+    body = client.get(f"/admin/sources/{source.source_id}", auth=AUTH).text
+
+    assert _form(body, f"/admin/feeds/{on.feed_id}/enable")["enabled"] == "false"
+    assert _form(body, f"/admin/feeds/{off.feed_id}/enable")["enabled"] == "true"
 
 
 def test_headline_only_is_called_out_in_the_list(client: TestClient, app_session: Session) -> None:
@@ -149,18 +191,27 @@ def test_headline_only_is_called_out_in_the_list(client: TestClient, app_session
 # ------------------------------------------------------------------ the form
 
 
-@pytest.mark.parametrize(
-    "vocabulary", [list(DiscoveryMethod), list(AcquisitionTier), list(RightsLevel)]
-)
-def test_the_form_offers_every_member_of_the_contract_vocabulary(
-    client: TestClient, vocabulary: list[StrEnum]
-) -> None:
+def test_the_publisher_form_offers_every_rights_level(client: TestClient) -> None:
     """Options come from the contract enums, not from literals in the markup.
 
     Repeated as literals they drift from the CHECK constraint built off the same enum, and
     the form then offers a value the database rejects — or omits one it accepts.
     """
     body = client.get("/admin/sources/new", auth=AUTH).text
+
+    for member in RightsLevel:
+        assert f'value="{member.value}"' in body
+
+
+@pytest.mark.parametrize("vocabulary", [list(DiscoveryMethod), list(AcquisitionTier)])
+def test_the_feed_form_offers_every_member_of_the_contract_vocabulary(
+    client: TestClient, app_session: Session, vocabulary: list[StrEnum]
+) -> None:
+    """The same rule for the two vocabularies that describe a feed rather than a publisher."""
+    source = make_source(app_session, name="Example")
+    app_session.commit()
+
+    body = client.get(f"/admin/sources/{source.source_id}", auth=AUTH).text
 
     for member in vocabulary:
         assert f'value="{member.value}"' in body
@@ -172,11 +223,10 @@ def test_the_edit_form_is_filled_in_with_the_current_values(
     source = make_source(
         app_session,
         name="Example Wire",
-        discovery_method=DiscoveryMethod.SITEMAP,
-        acquisition_tier=AcquisitionTier.EXTRACTION,
         rights_level=RightsLevel.HEADLINE_ONLY,
         jurisdiction="US",
         rate_limit_per_min=5,
+        user_agent="MeridianBot/1.0",
     )
     app_session.commit()
 
@@ -186,13 +236,13 @@ def test_the_edit_form_is_filled_in_with_the_current_values(
     )
 
     assert fields["name"] == "Example Wire"
-    assert fields["discovery_method"] == "sitemap"
     assert fields["jurisdiction"] == "US"
     assert fields["rate_limit_per_min"] == "5"
+    assert fields["user_agent"] == "MeridianBot/1.0"
     # Governing fields are set from the list page, never from this form.
-    assert "acquisition_tier" not in fields
     assert "rights_level" not in fields
     assert "enabled" not in fields
+    assert "permitted_to_ingest" not in fields
 
 
 def test_a_disabled_source_renders_an_unchecked_box(
@@ -222,11 +272,10 @@ def test_submitting_the_edit_form_unchanged_changes_nothing(
     source = make_source(
         app_session,
         name="Example Wire",
-        discovery_method=DiscoveryMethod.SITEMAP,
-        acquisition_tier=AcquisitionTier.EXTRACTION,
         rights_level=RightsLevel.HEADLINE_ONLY,
         jurisdiction="US",
         rate_limit_per_min=5,
+        user_agent="MeridianBot/1.0",
     )
     app_session.commit()
     source_id = source.source_id
@@ -239,9 +288,146 @@ def test_submitting_the_edit_form_unchanged_changes_nothing(
     after = sources.get(app_session, source_id)
     assert after is not None
     assert after.name == "Example Wire"
-    assert after.discovery_method is DiscoveryMethod.SITEMAP
-    assert after.acquisition_tier is AcquisitionTier.EXTRACTION
-    assert after.rights_level is RightsLevel.HEADLINE_ONLY
     assert after.jurisdiction == "US"
     assert after.rate_limit_per_min == 5
+    assert after.user_agent == "MeridianBot/1.0"
+    assert after.rights_level is RightsLevel.HEADLINE_ONLY
     assert after.enabled is True
+    assert after.permitted_to_ingest is True
+
+
+def test_submitting_the_feed_form_unchanged_changes_nothing(
+    client: TestClient, app_session: Session
+) -> None:
+    """The same round trip for the feed row, which has its own template and its own route.
+
+    Worth repeating rather than trusting by analogy: the feed's descriptive fields share one
+    form inside a single table cell, and a form cannot span cells — an input pushed outside it
+    by a stray tag is simply not submitted, and every status-code test still passes.
+    """
+    source = make_source(app_session, name="Example Wire")
+    feed = make_feed(
+        app_session,
+        source,
+        name="World",
+        url="https://feeds.example/world.xml",
+        discovery_method=DiscoveryMethod.SITEMAP,
+        acquisition_tier=AcquisitionTier.EXTRACTION,
+        enabled=False,
+    )
+    app_session.commit()
+    feed_id = feed.feed_id
+    action = f"/admin/feeds/{feed_id}"
+
+    page = client.get(f"/admin/sources/{source.source_id}", auth=AUTH).text
+    fields = _form(page, action)
+    assert set(fields) == {"name", "url", "discovery_method"}, fields
+    assert client.post(action, auth=AUTH, data=fields, follow_redirects=False).status_code == 303
+
+    app_session.expire_all()
+    after = feeds.get(app_session, feed_id)
+    assert after is not None
+    assert after.name == "World"
+    assert after.url == "https://feeds.example/world.xml"
+    assert after.discovery_method is DiscoveryMethod.SITEMAP
+    assert after.acquisition_tier is AcquisitionTier.EXTRACTION
+    assert after.enabled is False
+
+
+# ------------------------------------------------------------------ the poll-state column
+
+
+class _TableShape(HTMLParser):
+    """Cells per row of the first table, so a mis-nested cell is visible.
+
+    A stray or missing ``<td>`` renders as a shifted column in a browser and changes no status
+    code, so nothing else here would notice it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[int] = []
+        self._depth = 0
+        self._cells = 0
+        self._in_row = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "table":
+            self._depth += 1
+        elif tag == "tr" and self._depth == 1:
+            self._in_row, self._cells = True, 0
+        elif tag in ("td", "th") and self._in_row:
+            self._cells += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "table":
+            self._depth -= 1
+        elif tag == "tr" and self._in_row:
+            self.rows.append(self._cells)
+            self._in_row = False
+
+
+def _feed_table(client: TestClient, source_id: int) -> tuple[str, list[int]]:
+    body = client.get(f"/admin/sources/{source_id}", auth=AUTH).text
+    feeds_table = body[body.index("<h2") :] if "<h2" in body else body
+    shape = _TableShape()
+    shape.feed(feeds_table)
+    return body, shape.rows
+
+
+def test_every_feed_row_has_as_many_cells_as_the_header(
+    client: TestClient, app_session: Session
+) -> None:
+    source = make_source(app_session)
+    make_feed(app_session, source)
+    make_feed(app_session, source, url="https://feeds.example/second.xml")
+    app_session.commit()
+
+    _, rows = _feed_table(client, source.source_id)
+
+    assert len(rows) >= 3, "expected a header and two feed rows"
+    assert len(set(rows)) == 1, f"ragged table: {rows} cells per row"
+
+
+def test_a_feed_never_polled_says_so(client: TestClient, app_session: Session) -> None:
+    """Distinct from a feed whose last poll failed — one has been tried, the other has not."""
+    source = make_source(app_session)
+    make_feed(app_session, source)
+    app_session.commit()
+
+    body, _ = _feed_table(client, source.source_id)
+
+    assert "never polled" in body
+
+
+def test_a_failing_feed_shows_its_run_of_failures_and_the_status(
+    client: TestClient, app_session: Session
+) -> None:
+    """The pair is the point: a 404 for a week is a rotted URL, no status at all is a publisher
+    we cannot reach, and only the two together tell them apart.
+    """
+    source = make_source(app_session)
+    feed = make_feed(app_session, source)
+    app_session.commit()
+    for _ in range(3):
+        poll_state.record(app_session, feed.feed_id, status=404, error="Not Found")
+    app_session.commit()
+
+    body, _ = _feed_table(client, source.source_id)
+
+    assert "3 failed" in body
+    assert "(404)" in body
+
+
+def test_an_unreachable_feed_is_distinguished_from_one_answering_an_error(
+    client: TestClient, app_session: Session
+) -> None:
+    source = make_source(app_session)
+    feed = make_feed(app_session, source)
+    app_session.commit()
+    poll_state.record(app_session, feed.feed_id, status=None, error="ReadTimeout")
+    app_session.commit()
+
+    body, _ = _feed_table(client, source.source_id)
+
+    assert "(unreachable)" in body

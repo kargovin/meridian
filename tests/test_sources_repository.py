@@ -5,13 +5,11 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
-from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
-from sqlalchemy.exc import OperationalError
+from meridian_contract import RightsLevel
 from sqlalchemy.orm import Session, aliased
 
 from meridian.db import sources
 from meridian.db.models import CanonicalRecord
-from meridian.db.session import session_factory
 from tests.factories import make_article, make_source
 
 NOW = dt.datetime.now(dt.UTC)
@@ -22,8 +20,6 @@ def test_create_then_read_back(app_session: Session) -> None:
         app_session,
         name="Example Times",
         home_url="https://times.example",
-        discovery_method=DiscoveryMethod.RSS,
-        acquisition_tier=AcquisitionTier.FULL_FEED,
         rights_level=RightsLevel.BODY_TEXT,
         jurisdiction="GB",
         rate_limit_per_min=20,
@@ -48,17 +44,17 @@ def test_describe_writes_the_descriptive_fields(app_session: Session) -> None:
         source.source_id,
         name="After",
         home_url="https://after.example",
-        discovery_method=DiscoveryMethod.SITEMAP,
         jurisdiction="US",
         rate_limit_per_min=5,
+        user_agent="MeridianBot/1.0",
     )
 
     fetched = sources.get(app_session, source.source_id)
     assert fetched is not None
     assert fetched.name == "After"
-    assert fetched.discovery_method is DiscoveryMethod.SITEMAP
     assert fetched.jurisdiction == "US"
     assert fetched.rate_limit_per_min == 5
+    assert fetched.user_agent == "MeridianBot/1.0"
 
 
 def test_describe_cannot_touch_the_governing_fields(app_session: Session) -> None:
@@ -67,8 +63,8 @@ def test_describe_cannot_touch_the_governing_fields(app_session: Session) -> Non
         app_session,
         name="Before",
         enabled=False,
+        permitted_to_ingest=False,
         rights_level=RightsLevel.HEADLINE_ONLY,
-        acquisition_tier=AcquisitionTier.EXTRACTION,
     )
 
     sources.describe(
@@ -76,16 +72,16 @@ def test_describe_cannot_touch_the_governing_fields(app_session: Session) -> Non
         source.source_id,
         name="After",
         home_url="https://after.example",
-        discovery_method=DiscoveryMethod.SITEMAP,
         jurisdiction="US",
         rate_limit_per_min=5,
+        user_agent=None,
     )
 
     fetched = sources.get(app_session, source.source_id)
     assert fetched is not None
     assert fetched.enabled is False
+    assert fetched.permitted_to_ingest is False
     assert fetched.rights_level is RightsLevel.HEADLINE_ONLY
-    assert fetched.acquisition_tier is AcquisitionTier.EXTRACTION
 
 
 # ------------------------------------------------------------------ AC1 and AC3
@@ -142,28 +138,32 @@ def test_the_emergency_stop_does_not_revalidate_the_rest_of_the_row(
     assert fetched.name == "Awkward"
 
 
-def test_tier_downgrade_takes_effect_on_the_next_read(app_session: Session) -> None:
-    """AC3, by the same path as AC1."""
-    source = make_source(app_session, acquisition_tier=AcquisitionTier.FULL_FEED)
+def test_withdrawing_permission_removes_a_publisher_from_what_discovery_polls(
+    app_session: Session,
+) -> None:
+    """The Legal stop and the operational stop are different columns and both must gate.
 
-    sources.set_acquisition_tier(
-        app_session,
-        source.source_id,
-        tier=AcquisitionTier.EXTRACTION,
-        expected_updated_at=source.updated_at,
+    A caller that checked only ``enabled`` would keep polling a publisher whose terms forbid
+    ingestion — the exact failure the two-column split exists to prevent, and one that looks
+    like nothing is wrong because the row is still enabled.
+    """
+    source = make_source(app_session, name="Excluded")
+    assert source.source_id in {s.source_id for s in sources.enabled(app_session)}
+
+    sources.set_permitted_to_ingest(
+        app_session, source.source_id, value=False, expected_updated_at=source.updated_at
     )
+    app_session.flush()
 
-    fetched = sources.get(app_session, source.source_id)
-    assert fetched is not None
-    assert fetched.acquisition_tier is AcquisitionTier.EXTRACTION
+    assert sources.enabled(app_session) == []
+    # Still administrable: the row has to be reachable to be permitted again.
+    assert sources.get(app_session, source.source_id) is not None
 
 
 def test_the_targeted_setters_report_an_unknown_id(app_session: Session) -> None:
     assert sources.set_enabled(app_session, 999_999, value=False, expected_updated_at=NOW) is None
     assert (
-        sources.set_acquisition_tier(
-            app_session, 999_999, tier=AcquisitionTier.EXTRACTION, expected_updated_at=NOW
-        )
+        sources.set_permitted_to_ingest(app_session, 999_999, value=False, expected_updated_at=NOW)
         is None
     )
 
@@ -285,10 +285,10 @@ def test_the_downgrade_writes_nothing_to_the_article(app_session: Session) -> No
         {"i": article.article_id},
     ).scalar_one()
 
-    sources.set_acquisition_tier(
+    sources.set_rights_level(
         app_session,
         source.source_id,
-        tier=AcquisitionTier.EXTRACTION,
+        level=RightsLevel.HEADLINE_ONLY,
         expected_updated_at=source.updated_at,
     )
     app_session.flush()
@@ -333,48 +333,3 @@ def test_the_rights_filter_survives_every_query_shape(app_session: Session, nega
     assert matching(CanonicalRecord.article_id) == expected, "bare table"
     assert matching(alias.article_id) == expected, "aliased"
     assert matching(sub.c.article_id) == expected, "outer FROM is a subquery"
-
-
-def test_the_version_check_holds_the_row_until_the_write_lands(
-    app_migrated: sa.Engine,
-) -> None:
-    """The compare and the write must be one step.
-
-    Without a lock on the read both requests pass the version check, and the second blocks on
-    the row only at flush time — then applies on top, which is the lost update this mechanism
-    exists to prevent. Three-valued ``acquisition_tier`` is where that is constructible; the
-    other two escape by accident, because their harmful direction writes back the value just
-    read and SQLAlchemy elides it.
-
-    Asserted as the property rather than the SQL: once one session has claimed the row, a
-    second cannot reach it. Two sessions in one thread, with ``lock_timeout`` standing in for
-    the second request, so the interleaving is deterministic rather than scheduled.
-    """
-    factory = session_factory(app_migrated)
-    with factory() as setup:
-        setup.execute(sa.text("TRUNCATE canonical_record, source RESTART IDENTITY CASCADE"))
-        source = make_source(setup, acquisition_tier=AcquisitionTier.FULL_FEED)
-        setup.commit()
-        source_id, token = source.source_id, source.updated_at
-
-    with factory() as holder, factory() as other:
-        claimed = sources._claim(holder, source_id, token)
-        assert claimed is not None
-
-        other.execute(sa.text("SET LOCAL lock_timeout = '1s'"))
-        with pytest.raises(OperationalError):
-            sources.set_acquisition_tier(
-                other,
-                source_id,
-                tier=AcquisitionTier.PUBLISHER_API,
-                expected_updated_at=token,
-            )
-        other.rollback()
-
-        claimed.acquisition_tier = AcquisitionTier.EXTRACTION
-        holder.commit()
-
-    with factory() as check:
-        after = sources.get(check, source_id)
-        assert after is not None
-        assert after.acquisition_tier is AcquisitionTier.EXTRACTION

@@ -2,6 +2,7 @@
 
 import datetime as dt
 import hashlib
+import itertools
 from typing import Any
 
 from meridian_contract import (
@@ -17,6 +18,7 @@ from meridian.db.models import (
     AlternateCopy,
     CanonicalRecord,
     Cluster,
+    Feed,
     PipelineWork,
     Source,
 )
@@ -27,11 +29,10 @@ def sha256(text: str) -> str:
 
 
 def make_source(app_session: Session, name: str = "Example News", **kw: Any) -> Source:
+    """A publisher. Its feeds are separate — see ``make_feed``."""
     defaults: dict[str, Any] = {
         "name": name,
         "home_url": f"https://{name.lower().replace(' ', '')}.example",
-        "discovery_method": DiscoveryMethod.RSS,
-        "acquisition_tier": AcquisitionTier.FULL_FEED,
         "rights_level": RightsLevel.BODY_TEXT,
         "jurisdiction": "GB",
         "rate_limit_per_min": 30,
@@ -40,6 +41,25 @@ def make_source(app_session: Session, name: str = "Example News", **kw: Any) -> 
     app_session.add(source)
     app_session.flush()
     return source
+
+
+_feed_seq = itertools.count(1)
+
+
+def make_feed(app_session: Session, source: Source, **kw: Any) -> Feed:
+    """A feed of one publisher. The URL is unique per call so two feeds can coexist."""
+    n = next(_feed_seq)
+    defaults: dict[str, Any] = {
+        "source_id": source.source_id,
+        "name": f"Feed {n}",
+        "url": f"https://feeds.example/{n}.xml",
+        "discovery_method": DiscoveryMethod.RSS,
+        "acquisition_tier": AcquisitionTier.FULL_FEED,
+    }
+    feed = Feed(**{**defaults, **kw})
+    app_session.add(feed)
+    app_session.flush()
+    return feed
 
 
 def make_article(

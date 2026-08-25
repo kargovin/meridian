@@ -100,8 +100,6 @@ def test_truncating_the_platform_leaves_the_application_intact(
         Source(
             name="Outlet A",
             home_url="https://a.example",
-            discovery_method="rss",
-            acquisition_tier="1_full_feed",
             rights_level="body_text",
             jurisdiction="GB",
             enabled=True,
