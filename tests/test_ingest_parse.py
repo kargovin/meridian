@@ -34,7 +34,7 @@ ATOM = b"""<?xml version="1.0"?>
 def test_rss_yields_the_four_fields_discovery_needs() -> None:
     item = parse(RSS).items[0]
     assert item.guid == "urn:x:1"
-    assert item.link == "https://x.example/1?utm_source=rss"
+    assert item.link == "https://x.example/1"  # canonical: the tracking parameter is gone
     assert item.title == "Floods displace thousands"
     assert item.published_at == dt.datetime(2026, 8, 25, 9, 14, 2, tzinfo=dt.UTC)
 
@@ -79,10 +79,13 @@ def test_content_mirrored_into_summary_is_not_reported_as_a_teaser() -> None:
     assert item.summary is None
 
 
-def test_an_item_with_no_guid_falls_back_to_its_link() -> None:
+def test_an_item_with_no_guid_falls_back_to_its_canonical_link() -> None:
+    """Canonical, not raw. Otherwise a per-feed tracking parameter defeats the guid uniqueness
+    constraint as well as the URL one, and one article lands twice under both.
+    """
     raw = RSS.replace(b"<guid>urn:x:1</guid>", b"")
     item = parse(raw).items[0]
-    assert item.guid == "https://x.example/1?utm_source=rss"
+    assert item.guid == "https://x.example/1"
 
 
 def test_an_undated_item_is_kept_with_no_timestamp() -> None:

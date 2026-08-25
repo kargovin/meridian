@@ -4,9 +4,15 @@ Pure: bytes in, items out. That is what lets the fiddly half of discovery — tw
 dozen date spellings, publishers who emit invalid XML — be tested against a fixture file with
 no network and no database.
 
-This module records what the feed said and judges none of it. Canonicalising the URL, stripping
-the HTML, detecting the language and hashing the content all belong to the normalize stage,
-which reads the record rather than the feed.
+This module records what the feed said and judges almost none of it. Stripping the HTML,
+detecting the language and hashing the content all belong to a later stage, which reads the
+record rather than the feed.
+
+The URL is the exception, and deliberately. ``url_canonical`` is UNIQUE and that constraint is
+what stops one article being stored twice — it can only do that if the value is canonical when
+the row is inserted, so the reduction happens here rather than downstream. It also settles the
+guid: an RSS item without a ``<guid>`` falls back to its link, so canonicalising first means two
+feeds carrying one article under different tracking parameters agree on both columns.
 """
 
 import calendar
@@ -14,6 +20,8 @@ import datetime as dt
 from dataclasses import dataclass
 
 import feedparser
+
+from meridian.ingest.urls import canonicalize
 
 
 @dataclass(frozen=True)
@@ -28,6 +36,7 @@ class FeedItem:
     """
 
     guid: str
+    #: Canonical, not as the feed wrote it — see the module docstring.
     link: str
     title: str
     published_at: dt.datetime | None
@@ -111,7 +120,7 @@ def parse(raw: bytes) -> ParsedFeed:
     for entry in entries:
         link = (entry.get("link") or "").strip()
         title = (entry.get("title") or "").strip()
-        if not title or not _is_http(link):
+        if not title or not _is_http(link):  # checked before canonicalising, on what arrived
             # Both are NOT NULL on the record, and an item with nowhere fetchable to point is
             # not an article any later stage can do anything with.
             #
@@ -120,12 +129,15 @@ def parse(raw: bytes) -> ParsedFeed:
             # "urn:x:1" — which would then be stored as the article's URL and fetched later.
             skipped += 1
             continue
+        link = canonicalize(link)
         summary, content = _texts(entry)
         items.append(
             FeedItem(
                 # RSS <guid> and Atom <id> both normalise to `id`. Falling back to the link is
                 # what the RSS spec itself suggests, and a feed with neither is rare enough
                 # that inventing an identity would create duplicates rather than prevent them.
+                # The fallback uses the canonical link, or a per-feed tracking parameter would
+                # defeat UNIQUE(source_id, guid) as well as UNIQUE(url_canonical).
                 guid=(entry.get("id") or link).strip(),
                 link=link,
                 title=title,

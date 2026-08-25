@@ -631,3 +631,57 @@ def test_no_transaction_is_held_open_across_the_fetch(app_session: Session) -> N
     run_cycle(app_session, watching_fetcher, sleep=lambda _: None)
 
     assert open_during_fetch == [False]
+
+
+# --------------------------------------------------------------- url canonicalisation
+
+
+def _item_without_guid(link: str) -> bytes:
+    """One article, no ``<guid>`` — so its identity is its link, as the RSS spec suggests."""
+    return (
+        '<?xml version="1.0"?><rss version="2.0"><channel><title>Ex</title>'
+        f"<item><title>Floods displace thousands</title><link>{link}</link>"
+        "<description>A teaser.</description></item></channel></rss>"
+    ).encode()
+
+
+def test_one_article_reached_by_two_feeds_is_stored_once(app_session: Session) -> None:
+    """⚠️ The defect this canonicalisation exists for, and it is on the live roster.
+
+    A publisher tags each feed's links with its own tracking parameter — one source decorates
+    every link with ``?traffic_source=``. Two section feeds then carry the same article under
+    two URLs, and with no ``<guid>`` the link *is* the identity, so both unique constraints see
+    two different articles. One story, two canonical records, and the ≥2-distinct-source rule
+    that gates summarization counts a publisher agreeing with itself.
+
+    It cannot be repaired downstream: the second row exists the moment it is inserted, so the
+    reduction has to happen before the write.
+    """
+    source = make_source(app_session)
+    world = make_feed(app_session, source, url="https://feeds.example/world.xml")
+    top = make_feed(app_session, source, url="https://feeds.example/top.xml")
+    app_session.commit()
+
+    run_cycle(
+        app_session,
+        FakeFetcher(
+            {
+                world.url: _item_without_guid("https://x.example/floods?traffic_source=world"),
+                top.url: _item_without_guid("https://x.example/floods?traffic_source=top"),
+            }
+        ),
+        sleep=lambda _: None,
+    )
+
+    stored = articles(app_session)
+    assert len(stored) == 1, [a.url_canonical for a in stored]
+    assert stored[0].url_canonical == "https://x.example/floods"
+
+
+def test_the_stored_url_is_canonical_not_what_the_feed_wrote(app_session: Session) -> None:
+    feed = _feed_with_source(app_session)
+    raw = _item_without_guid("https://X.Example/floods?utm_source=rss&b=2&a=1#top")
+
+    run_cycle(app_session, FakeFetcher({feed.url: raw}), sleep=lambda _: None)
+
+    assert articles(app_session)[0].url_canonical == "https://x.example/floods?a=1&b=2"

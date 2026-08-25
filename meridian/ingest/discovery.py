@@ -87,9 +87,10 @@ def _insert(session: Session, feed: Feed, item: FeedItem) -> bool:
     covers both. An item seen in twenty consecutive polls is inserted once and enqueued once,
     because the enqueue is conditional on the insert having happened.
 
-    ``url_canonical`` receives the link exactly as the feed gave it, tracking parameters and
-    all. Canonicalising belongs to the normalize stage, which runs seconds later and rewrites
-    it; nothing reads the column before then.
+    ``url_canonical`` is already canonical when it arrives here — ``parse`` reduces it. That
+    ordering is the whole point: the UNIQUE constraint can only refuse a duplicate if the value
+    is canonical at insert, and a later stage rewriting the column would run after the second
+    row already exists.
     """
     article_id = session.scalar(
         insert(CanonicalRecord)
