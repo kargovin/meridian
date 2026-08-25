@@ -15,7 +15,7 @@ from meridian_config import AdminSettings, AppSettings
 from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
 from sqlalchemy.orm import Session
 
-from meridian.db import feeds, sources
+from meridian.db import feeds, poll_state, sources
 from meridian.web.app import create_app
 from tests.factories import make_feed, make_source
 
@@ -332,3 +332,102 @@ def test_submitting_the_feed_form_unchanged_changes_nothing(
     assert after.discovery_method is DiscoveryMethod.SITEMAP
     assert after.acquisition_tier is AcquisitionTier.EXTRACTION
     assert after.enabled is False
+
+
+# ------------------------------------------------------------------ the poll-state column
+
+
+class _TableShape(HTMLParser):
+    """Cells per row of the first table, so a mis-nested cell is visible.
+
+    A stray or missing ``<td>`` renders as a shifted column in a browser and changes no status
+    code, so nothing else here would notice it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[int] = []
+        self._depth = 0
+        self._cells = 0
+        self._in_row = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "table":
+            self._depth += 1
+        elif tag == "tr" and self._depth == 1:
+            self._in_row, self._cells = True, 0
+        elif tag in ("td", "th") and self._in_row:
+            self._cells += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "table":
+            self._depth -= 1
+        elif tag == "tr" and self._in_row:
+            self.rows.append(self._cells)
+            self._in_row = False
+
+
+def _feed_table(client: TestClient, source_id: int) -> tuple[str, list[int]]:
+    body = client.get(f"/admin/sources/{source_id}", auth=AUTH).text
+    feeds_table = body[body.index("<h2") :] if "<h2" in body else body
+    shape = _TableShape()
+    shape.feed(feeds_table)
+    return body, shape.rows
+
+
+def test_every_feed_row_has_as_many_cells_as_the_header(
+    client: TestClient, app_session: Session
+) -> None:
+    source = make_source(app_session)
+    make_feed(app_session, source)
+    make_feed(app_session, source, url="https://feeds.example/second.xml")
+    app_session.commit()
+
+    _, rows = _feed_table(client, source.source_id)
+
+    assert len(rows) >= 3, "expected a header and two feed rows"
+    assert len(set(rows)) == 1, f"ragged table: {rows} cells per row"
+
+
+def test_a_feed_never_polled_says_so(client: TestClient, app_session: Session) -> None:
+    """Distinct from a feed whose last poll failed — one has been tried, the other has not."""
+    source = make_source(app_session)
+    make_feed(app_session, source)
+    app_session.commit()
+
+    body, _ = _feed_table(client, source.source_id)
+
+    assert "never polled" in body
+
+
+def test_a_failing_feed_shows_its_run_of_failures_and_the_status(
+    client: TestClient, app_session: Session
+) -> None:
+    """The pair is the point: a 404 for a week is a rotted URL, no status at all is a publisher
+    we cannot reach, and only the two together tell them apart.
+    """
+    source = make_source(app_session)
+    feed = make_feed(app_session, source)
+    app_session.commit()
+    for _ in range(3):
+        poll_state.record(app_session, feed.feed_id, status=404, error="Not Found")
+    app_session.commit()
+
+    body, _ = _feed_table(client, source.source_id)
+
+    assert "3 failed" in body
+    assert "(404)" in body
+
+
+def test_an_unreachable_feed_is_distinguished_from_one_answering_an_error(
+    client: TestClient, app_session: Session
+) -> None:
+    source = make_source(app_session)
+    feed = make_feed(app_session, source)
+    app_session.commit()
+    poll_state.record(app_session, feed.feed_id, status=None, error="ReadTimeout")
+    app_session.commit()
+
+    body, _ = _feed_table(client, source.source_id)
+
+    assert "(unreachable)" in body
