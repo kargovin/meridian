@@ -216,6 +216,64 @@ def test_malformed_xml_does_not_stop_the_others(app_session: Session) -> None:
     assert (report.failed, report.discovered) == (1, 1)
 
 
+def test_a_feed_that_raises_is_recorded_as_a_failure(app_session: Session) -> None:
+    """⚠️ The rollback that contains a crashing feed also discards the poll-state write, so
+    without a separate transaction the one failure class the except clause exists to survive is
+    the one that leaves no trace. A feed raising on every poll for a week would keep reading
+    ``last_status=200, consecutive_failures=0`` on the admin surface — reported as healthy.
+    """
+    feed = _feed_with_source(app_session)
+    run_cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}), sleep=lambda _: None)
+
+    for _ in range(3):
+        run_cycle(
+            app_session,
+            FakeFetcher({feed.url: RuntimeError("boom")}),
+            sleep=lambda _: None,
+        )
+
+    app_session.expire_all()
+    state = poll_state.get(app_session, feed.feed_id)
+    assert state is not None
+    assert state.consecutive_failures == 3
+    assert state.last_status is None
+    assert state.last_error is not None and "RuntimeError" in state.last_error
+
+
+def test_a_crashing_feed_does_not_lose_another_feeds_work(app_session: Session) -> None:
+    """The recovery write must not itself become a way to lose the cycle."""
+    bad = _feed_with_source(app_session, url="https://feeds.example/bad.xml")
+    good = make_feed(
+        app_session, make_source(app_session, "Other"), url="https://feeds.example/good.xml"
+    )
+    app_session.commit()
+
+    run_cycle(
+        app_session,
+        FakeFetcher({bad.url: RuntimeError("boom"), good.url: ONE_ITEM}),
+        sleep=lambda _: None,
+    )
+
+    assert len(articles(app_session)) == 1
+    app_session.expire_all()
+    assert poll_state.get(app_session, bad.feed_id) is not None
+
+
+def test_a_feed_we_cannot_read_yet_is_counted_not_dropped(app_session: Session) -> None:
+    """A sitemap source is registered correctly and simply not implemented here. Without a
+    count it appears in no report, no log line and no poll-state row — indistinguishable from a
+    publisher nobody added. One is on the live roster.
+    """
+    feed = _feed_with_source(app_session, discovery_method=DiscoveryMethod.SITEMAP)
+    fetcher = FakeFetcher({feed.url: ONE_ITEM})
+
+    report = run_cycle(app_session, fetcher, sleep=lambda _: None)
+
+    assert fetcher.calls == []
+    assert report.skipped_feeds == 1
+    assert (report.polled, report.failed) == (0, 0)
+
+
 def test_consecutive_failures_climb_and_reset(app_session: Session) -> None:
     """The count separates a rotted URL from an outage when read with last_status."""
     feed = _feed_with_source(app_session)
@@ -292,6 +350,37 @@ def test_a_tier_three_feed_never_stores_a_body_however_fat_the_teaser(
     article = articles(app_session)[0]
     assert article.body_text is None
     assert article.lede is not None and len(article.lede) == 4000
+
+
+def test_a_tier_three_feed_shipping_content_encoded_still_stores_no_body(
+    app_session: Session,
+) -> None:
+    """⚠️ The falsifier for the tier gate itself, which nothing else covers.
+
+    The teaser test above passes with the gate deleted: its feed is description-only, so
+    ``item.content`` is None either way and it verifies ``parse``'s teaser/body split rather
+    than the gate. A tier-3 feed that ships ``<content:encoded>`` anyway is the case that
+    separates them — and WordPress-based publishers ship it routinely.
+
+    What rests on this: ``body_text`` being empty until tier-3 acquisition lands is the premise
+    of the sprint-2 sequencing constraint. This gate is what keeps it true.
+    """
+    feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.EXTRACTION)
+    raw = (
+        b'<?xml version="1.0"?>'
+        b'<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        b"<channel><title>Ex</title><item><title>One</title>"
+        b"<link>https://x.example/g1</link><guid>g1</guid>"
+        b"<description>A teaser.</description>"
+        b"<content:encoded><![CDATA[THE WHOLE ARTICLE]]></content:encoded>"
+        b"</item></channel></rss>"
+    )
+
+    run_cycle(app_session, FakeFetcher({feed.url: raw}), sleep=lambda _: None)
+
+    article = articles(app_session)[0]
+    assert article.body_text is None
+    assert article.lede == "A teaser."
 
 
 def test_a_tier_one_feed_stores_the_content_element_as_the_body(

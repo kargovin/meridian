@@ -40,6 +40,9 @@ class CycleReport:
     discovered: int = 0
     #: Feed entries with no usable title or link.
     skipped_items: int = 0
+    #: Feeds the registry permits but this cycle cannot read — a discovery method we do not
+    #: implement yet. Not a failure and not a success; it must not read as either.
+    skipped_feeds: int = 0
 
     def __add__(self, other: "CycleReport") -> "CycleReport":
         return CycleReport(
@@ -48,6 +51,7 @@ class CycleReport:
             failed=self.failed + other.failed,
             discovered=self.discovered + other.discovered,
             skipped_items=self.skipped_items + other.skipped_items,
+            skipped_feeds=self.skipped_feeds + other.skipped_feeds,
         )
 
 
@@ -194,12 +198,17 @@ def run_cycle(
     of the roster being polled in this cycle — a single flaky source freezing ingestion for
     everyone is the failure this shape exists to prevent (§5.6: degrade predictably).
     """
-    due = [
-        feed
-        for feed in feeds_repo.pollable(session)
-        if feed.discovery_method is DiscoveryMethod.RSS
-    ]
-    report = CycleReport()
+    pollable = feeds_repo.pollable(session)
+    due = [feed for feed in pollable if feed.discovery_method is DiscoveryMethod.RSS]
+
+    # A feed the registry permits but this cycle cannot read. Counted rather than dropped
+    # silently: a sitemap source is registered correctly and is simply not implemented yet, and
+    # without this it appears in no count, no log line and no poll-state row — indistinguishable
+    # from a publisher nobody added.
+    skipped = len(pollable) - len(due)
+    report = CycleReport(skipped_feeds=skipped)
+    if skipped:
+        log.info("%d registered feed(s) skipped: discovery method not implemented", skipped)
     if not due:
         return report
 
@@ -211,11 +220,33 @@ def run_cycle(
         try:
             _pace(source, last_request_at, sleep, clock)
             report += _poll_one(session, feed, source, fetcher)
-        except Exception:
+        except Exception as exc:
             session.rollback()
             log.exception("feed %d (%s) raised during poll", feed.feed_id, feed.url)
+            _record_crash(session, feed, exc)
             report += CycleReport(polled=1, failed=1)
     return report
+
+
+def _record_crash(session: Session, feed: Feed, exc: Exception) -> None:
+    """Record a poll that raised, in a transaction of its own.
+
+    ⚠️ The rollback above discards the article inserts *and* the poll-state write, because they
+    share a transaction. Without this the failure class the except clause exists to survive is
+    the one class that leaves no trace: ``consecutive_failures`` stays wherever it was, and a
+    feed that has raised on every poll for a week still reads ``last_status=200`` on the admin
+    surface. That counter exists to separate a rotted URL from an unreachable publisher, and it
+    cannot count what it never sees.
+
+    Its own try/except because this loop must not die: a failure to record a failure is worth a
+    log line, not the rest of the roster.
+    """
+    try:
+        poll_state.record(session, feed.feed_id, status=None, error=f"{type(exc).__name__}: {exc}")
+        session.commit()
+    except Exception:
+        session.rollback()
+        log.exception("could not record the failed poll of feed %d", feed.feed_id)
 
 
 def _publishers(session: Session, due: Sequence[Feed]) -> dict[int, Source]:
