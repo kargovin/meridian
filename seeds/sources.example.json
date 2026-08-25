@@ -2,20 +2,48 @@
   {
     "name": "Example Times",
     "home_url": "https://times.example",
-    "discovery_method": "rss",
-    "acquisition_tier": "1_full_feed",
     "rights_level": "body_text",
     "jurisdiction": "GB",
-    "rate_limit_per_min": 20
+    "rate_limit_per_min": 20,
+    "feeds": [
+      {
+        "name": "World",
+        "url": "https://feeds.times.example/world.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction"
+      },
+      {
+        "name": "UK",
+        "url": "https://feeds.times.example/uk.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction"
+      }
+    ]
   },
   {
     "name": "Example Wire",
     "home_url": "https://wire.example",
-    "discovery_method": "sitemap",
-    "acquisition_tier": "3_extraction",
     "rights_level": "headline_only",
     "jurisdiction": "US",
     "rate_limit_per_min": 5,
-    "enabled": false
+    "user_agent": "MeridianBot/1.0",
+    "enabled": false,
+    "feeds": [
+      {
+        "name": "Sitemap",
+        "url": "https://wire.example/sitemap-news.xml",
+        "discovery_method": "sitemap",
+        "acquisition_tier": "3_extraction"
+      }
+    ]
+  },
+  {
+    "name": "Example Herald",
+    "home_url": "https://herald.example",
+    "rights_level": "headline_only",
+    "jurisdiction": "QA",
+    "rate_limit_per_min": 10,
+    "permitted_to_ingest": false,
+    "feeds": []
   }
 ]
