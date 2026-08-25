@@ -1,4 +1,4 @@
-"""The admin surface over the source registry (FR-I2, FR-I6).
+"""The admin surface over the source registry and the runtime config plane (FR-I2, FR-I6, RFC §9).
 
 Every write is a POST because an HTML form can send nothing else, so the route path carries
 the meaning the verb would in a machine API. Each one answers with a redirect rather than a
@@ -28,7 +28,7 @@ from fastapi.templating import Jinja2Templates
 from meridian_contract import AcquisitionTier, DiscoveryMethod, RightsLevel
 from sqlalchemy.orm import Session
 
-from meridian.db import feeds, sources
+from meridian.db import feeds, poll_state, runtime_config, sources
 from meridian.web.auth import RequireAdmin
 
 router = APIRouter(prefix="/admin", dependencies=[RequireAdmin])
@@ -105,7 +105,9 @@ def new_source(request: Request) -> HTMLResponse:
     the reverse order makes this URL unreachable.
     """
     return templates.TemplateResponse(
-        request, "sources/form.html", {"source": None, "feeds": [], **_VOCABULARIES}
+        request,
+        "sources/form.html",
+        {"source": None, "feeds": [], "poll_states": {}, **_VOCABULARIES},
     )
 
 
@@ -120,12 +122,17 @@ def edit_source(source_id: int, request: Request, session: Db) -> HTMLResponse:
     source = sources.get(session, source_id)
     if source is None:
         raise _missing("source")
+    owned = feeds.for_source(session, source_id)
     return templates.TemplateResponse(
         request,
         "sources/form.html",
         {
             "source": source,
-            "feeds": feeds.for_source(session, source_id),
+            "feeds": owned,
+            # Read as a mapping rather than a relationship: a lazy one would load after the
+            # request's session closed, and an eager one would put a join on the publisher
+            # list that does not want it. Same reasoning as feeds.counts_by_source.
+            "poll_states": poll_state.for_feeds(session, [f.feed_id for f in owned]),
             **_VOCABULARIES,
         },
     )
@@ -355,3 +362,54 @@ def delete_feed(feed_id: int, session: Db) -> RedirectResponse:
     source_id = _feed_or_404(session, feed_id)
     feeds.delete(session, feed_id)
     return _redirect(f"{_LIST}/{source_id}")
+
+
+# --------------------------------------------------------------------------- runtime config
+
+
+_CONFIG = "/admin/config"
+
+#: Declared knobs by key. A write names a key, and only a declared one is writable — the table
+#: is a config plane, not a place to store arbitrary rows through the web.
+_KNOBS = {knob.key: knob for knob in runtime_config.KNOBS}
+
+
+@router.get("/config", response_class=HTMLResponse)
+def list_config(request: Request, session: Db) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "config/list.html",
+        {"knobs": runtime_config.KNOBS, "rows": runtime_config.rows(session)},
+    )
+
+
+@router.post("/config/{key}")
+def set_config(
+    key: str,
+    session: Db,
+    value: Annotated[int, Form()],
+    expected_updated_at: Annotated[dt.datetime, Form()],
+) -> RedirectResponse:
+    """Write one knob.
+
+    Compare-and-set like the registry's governing fields, and for the same reason rather than by
+    analogy: the cadence is the primary freshness lever, so a page rendered before a change and
+    submitted after it would revert that change with a 303 and no error — and a freshness
+    regression is the kind nobody notices, because nothing fails.
+    """
+    knob = _KNOBS.get(key)
+    if knob is None:
+        raise _missing("knob")
+    try:
+        written = runtime_config.set_int(
+            session, knob, value=value, expected_updated_at=expected_updated_at
+        )
+    except sources.StaleWrite as stale:
+        raise _stale(stale) from stale
+    except ValueError as bad:
+        # The form carries min/max, so reaching this means the bounds were bypassed rather
+        # than mistyped — a hand-made request, or a browser that ignored them.
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(bad)) from bad
+    if written is None:
+        raise _missing("knob")
+    return _redirect(_CONFIG)

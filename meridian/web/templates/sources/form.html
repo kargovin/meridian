@@ -71,7 +71,7 @@
   <p class="warn">No feeds — nothing is polled for this publisher.</p>
 {% else %}
 <table>
-  <tr><th>Feed</th><th>Tier</th><th>Polling</th><th></th></tr>
+  <tr><th>Feed</th><th>Tier</th><th>Last poll</th><th>Polling</th><th></th></tr>
   {% for feed in feeds %}
   <tr {% if not feed.enabled %}class="off"{% endif %}>
     <td>
@@ -106,6 +106,23 @@
         </select>
         <button type="submit">Set</button>
       </form>
+    </td>
+    {# Written by the poller, never by this page — it lives on its own table so that writing
+       it cannot move feed.updated_at, which every form above compares against. #}
+    {% set poll = poll_states.get(feed.feed_id) %}
+    <td>
+      {% if not poll %}
+        <small>never polled</small>
+      {% elif poll.consecutive_failures %}
+        <small class="warn">
+          {{ poll.consecutive_failures }} failed
+          {% if poll.last_status %}({{ poll.last_status }}){% else %}(unreachable){% endif %}
+        </small><br>
+        <small>{{ poll.last_polled_at.strftime('%d %b %H:%M') }}</small>
+      {% else %}
+        <small>{{ poll.last_polled_at.strftime('%d %b %H:%M') }}</small>
+        {% if poll.last_status == 304 %}<br><small>unchanged</small>{% endif %}
+      {% endif %}
     </td>
     <td>
       <form method="post" action="/admin/feeds/{{ feed.feed_id }}/enable">

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Runtime config{% endblock %}
+{% block body %}
+<h1>Runtime config</h1>
+
+<p>Values here take effect without a redeploy. The discovery poll re-reads its cadence after
+every cycle, so a change applies on the next tick.</p>
+
+<table>
+  <tr><th>Knob</th><th>Value</th><th>Allowed</th><th></th></tr>
+  {% for knob in knobs %}
+  {% set row = rows.get(knob.key) %}
+  <tr>
+    <td>
+      <code>{{ knob.key }}</code><br>
+      <small>{{ knob.summary }}</small>
+    </td>
+    {% if row %}
+    <td>
+      <form method="post" action="/admin/config/{{ knob.key }}">
+        <input type="hidden" name="expected_updated_at" value="{{ row.updated_at.isoformat() }}">
+        <input type="number" name="value" value="{{ row.value }}"
+               min="{{ knob.minimum }}" max="{{ knob.maximum }}" required style="min-width: 8rem">
+        <button type="submit">Save</button>
+      </form>
+    </td>
+    <td>{{ knob.minimum }}–{{ knob.maximum }}</td>
+    <td><small>changed {{ row.updated_at.strftime('%Y-%m-%d %H:%M') }} UTC</small></td>
+    {% else %}
+    <td class="warn">no row</td>
+    <td>{{ knob.minimum }}–{{ knob.maximum }}</td>
+    <td><small class="warn">using default {{ knob.default }}; seed it to make it editable</small></td>
+    {% endif %}
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
