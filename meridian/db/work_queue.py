@@ -4,7 +4,15 @@ import datetime as dt
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from meridian_contract import STAGE_OWED_BY_STATE, PipelineState, Stage, owed_stage
+from meridian_contract import (
+    STAGE_OWED_BY_STATE,
+    STAGE_SUCCESSOR,
+    STATE_AFTER_STAGE,
+    PipelineState,
+    Stage,
+    TerminalReason,
+    owed_stage,
+)
 from sqlalchemy.orm import Session
 
 from meridian.db.models import CanonicalRecord, PipelineWork
@@ -118,3 +126,72 @@ def missing_article_work(session: Session) -> set[tuple[int, Stage]]:
     not a repair to absorb quietly (RFC §6.3).
     """
     return expected_article_work(session) - open_article_work(session)
+
+
+def advance(session: Session, work: PipelineWork) -> None:
+    """Complete a stage: move the subject's state, discharge this work row, enqueue the next.
+
+    The four writes that end every stage, in one place — which is the point of it existing
+    (RFC §6.2). A handler that writes its output and forgets the enqueue leaves an article
+    stopped with no error, no attempt count and no dead-letter row, and **no alarm can fire,
+    because every alarm hangs off the work row that is now gone.** With one helper, exactly
+    one place in the system can make that mistake, and one test covers it.
+
+    Does not commit. The caller has already written the stage's own output onto this session,
+    and a single commit is what makes all of it one transaction — a state that moved without
+    its successor being enqueued is precisely the failure above.
+
+    The order comes from ``libs/contract``: which state this stage leaves the subject in, and
+    which stage follows. Nothing here restates it, so adding a stage is still a one-line edit
+    to ``ARTICLE_CHAIN``.
+    """
+    new_state = STATE_AFTER_STAGE[work.stage]
+    successor = STAGE_SUCCESSOR[work.stage]
+
+    if work.article_id is not None and new_state is not None:
+        article = session.get(CanonicalRecord, work.article_id)
+        if article is None:
+            raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
+        article.pipeline_state = new_state
+
+    session.delete(work)
+    # ⚠️ Flush the delete before inserting the successor. SQLAlchemy orders INSERTs ahead of
+    # DELETEs within one flush, and `uq_pipeline_work_open_article` allows only one open row
+    # per article — so the natural spelling raises UniqueViolation on every single advance.
+    session.flush()
+
+    if successor is not None:
+        session.add(
+            PipelineWork(
+                article_id=work.article_id,
+                cluster_id=work.cluster_id,
+                stage=successor,
+            )
+        )
+        session.flush()
+
+
+def terminate(session: Session, work: PipelineWork, reason: TerminalReason) -> None:
+    """The article stops here for good: record why, discharge the work row, enqueue nothing.
+
+    Not a failure path. A dropped article is a decision, and the row survives it deliberately:
+    ``expected_article_work`` skips records with a ``terminal_reason``, so nothing re-enqueues
+    it, and discovery's ``UNIQUE(source_id, guid)`` recognises it on the next poll and inserts
+    nothing. Delete the record instead and every poll rediscovers, re-decides and re-drops the
+    same article forever, hitting the publisher each time.
+
+    ``pipeline_state`` deliberately does not move — the stage did not complete, it concluded
+    the article should not continue, and those are different claims.
+
+    Does not commit.
+    """
+    if work.article_id is None:
+        raise ValueError(
+            f"work {work.work_id} has a cluster subject; terminal_reason lives on an article"
+        )
+    article = session.get(CanonicalRecord, work.article_id)
+    if article is None:
+        raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
+    article.terminal_reason = reason
+    session.delete(work)
+    session.flush()
