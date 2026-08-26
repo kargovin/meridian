@@ -100,8 +100,16 @@ def strip_html(raw: str | None) -> str | None:
     an empty string, so "the publisher sent no teaser" and "the teaser was an empty div" are
     the same absence downstream instead of two.
 
-    Idempotent — stripping already-plain text is a no-op, which is what makes re-running the
-    stage on a record safe.
+    ⚠️ **Not a fixpoint, and the exception matters for replay.** Stripping already-plain text
+    is a no-op for ordinary prose, but not for text that *describes* markup: a teaser
+    containing ``&lt;redacted&gt;`` unescapes to ``<redacted>`` on the first pass and is read
+    as a tag and deleted on the second. ``&amp;amp;`` likewise decays one level per pass.
+
+    That is safe today only because the stage rewrites ``lede`` in place and the work row is
+    deleted, so nothing re-runs it. It stops being safe the moment a replay rewinds
+    ``pipeline_state`` and re-enqueues (RFC §9) — a second pass silently deletes content. The
+    fix is either a fixpoint or keeping the publisher's original alongside; both are larger
+    than this stage and belong with the work-queue story that owns replay.
     """
     if raw is None:
         return None
@@ -143,6 +151,30 @@ ENGLISH = "en"
 
 #: Below this share of Latin letters, the text is not in a Latin-script language.
 _LATIN_SHARE_REQUIRED = 0.5
+
+#: How sure the detector must be before FR-I7 deletes an article for good.
+#:
+#: ⚠️ Without this the rule is "drop on any non-English top-1", because lingua returns a
+#: normalised distribution and the top candidate is never 0.0 — the lowest seen anywhere in the
+#: calibration corpus is 0.23. Measured over 479 English and 240 foreign headlines at
+#: title-only length, which is what the two publishers that ship no teaser give us:
+#:
+#:      gate          false drops (permanent)   foreign kept (cheap)
+#:      none                  9  = 1.88%                0
+#:      >= 0.40               1  = 0.21%                1 = 0.42%
+#:      >= 0.50               0                         2 = 0.83%
+#:      >= 0.60               0                         5 = 2.08%
+#:      >= 0.70               0                        11 = 4.58%
+#:
+#: 0.60 rather than the first value that reaches zero, because the two populations separate
+#: cleanly and the gap is worth standing in the middle of: every false drop observed was
+#: between 0.274 and 0.427, while 92.5% of correct foreign calls came in at 0.8 or above and
+#: only 2% below 0.6. The cost is bounded by the foreign share of the roster; the benefit
+#: applies to every article we ingest.
+#:
+#: Not a runtime knob today. Making it one follows FR-C2's pattern for the classifier
+#: threshold, and there is no operator need until a source mix moves.
+_DROP_CONFIDENCE = 0.60
 
 
 @lru_cache(maxsize=1)
@@ -203,13 +235,15 @@ def detect_language(text: str) -> LanguageVerdict:
     The two errors do not cost the same. A wrong drop is permanent and silent — the record
     keeps a ``terminal_reason`` for good, ``owed_stage`` returns nothing for it forever, and
     no un-drop path exists — while a wrong keep merely lets one foreign article through to a
-    classifier that will handle it badly. So anything the detector will not commit to is kept.
+    classifier that will handle it badly. So anything the detector will not commit to is kept,
+    and "will not commit to" means ``_DROP_CONFIDENCE``, not merely "returned something".
 
-    Measured on 364 live feed items across four languages: no English item was dropped at any
-    length down to title-only, against 0.4% of foreign items kept. Deciding the other way —
-    keeping only what is confidently English — would have deleted real articles, because a
-    headline like "Zelensky Macron Starmer" is English at 0.38 confidence and "Markets fall"
-    at 0.59.
+    Measured over 479 English and 240 foreign headlines: with the gate, no English item is
+    dropped at any length down to title-only, against 2.08% of foreign items kept.
+
+    ⚠️ Deciding the other way — keeping only what is *confidently English* — inverts the
+    asymmetry and deletes real articles: "Zelensky Macron Starmer" is English at 0.38 and
+    "Markets fall" at 0.59. The bar applies to the foreign call, never to the English one.
     """
     if not text.strip():
         return LanguageVerdict(language=None, drop=False)
@@ -221,8 +255,21 @@ def detect_language(text: str) -> LanguageVerdict:
     if not confidences or confidences[0].value == 0.0:
         return LanguageVerdict(language=None, drop=False)
 
-    language = confidences[0].language.iso_code_639_1.name.lower()
-    return LanguageVerdict(language=language, drop=language != ENGLISH)
+    best = confidences[0]
+    language = best.language.iso_code_639_1.name.lower()
+    if language == ENGLISH:
+        return LanguageVerdict(language=language, drop=False)
+
+    # Foreign, but not confidently enough to delete an article over.
+    #
+    # ⚠️ The language is discarded rather than recorded here. Below the bar we are declining to
+    # conclude, and writing "de" onto an English sport headline would store a wrong fact for a
+    # future reader to trust. Detection is pure, so anyone debugging can re-run it; NULL is the
+    # honest answer and the recoverable one.
+    if best.value < _DROP_CONFIDENCE:
+        return LanguageVerdict(language=None, drop=False)
+
+    return LanguageVerdict(language=language, drop=True)
 
 
 def language_input(title: str, lede: str | None) -> str:
