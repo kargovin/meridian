@@ -15,6 +15,7 @@ and no diff to review), so the read has to happen on the clock, not at import.
 import datetime as dt
 import logging
 from collections.abc import Callable
+from typing import Protocol
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -25,6 +26,20 @@ from meridian.db.runtime_config import IntKnob
 from meridian.ingest.acquire import AcquireReport, run_batch
 from meridian.ingest.discovery import CycleReport, run_cycle
 from meridian.ingest.fetch import Fetcher
+
+
+class AcquireRun(Protocol):
+    """What the acquire job calls. Spelled out so the default is type-checked like a stub."""
+
+    def __call__(
+        self,
+        session: Session,
+        *,
+        lease: dt.timedelta,
+        limit: int = ...,
+        worker: str | None = ...,
+    ) -> AcquireReport: ...
+
 
 log = logging.getLogger(__name__)
 
@@ -190,7 +205,11 @@ class AcquireScheduler(_CadencedJob[AcquireReport]):
         lease: dt.timedelta,
         limit: int = 50,
         scheduler: BackgroundScheduler | None = None,
-        run: Callable[..., AcquireReport] = run_batch,
+        # ⚠️ A precise signature, not ``Callable[...]``. The ellipsis form disables argument
+        # checking entirely: renaming a keyword here left 24 tests passing and mypy clean
+        # while the job died on its first tick, because every test injects a stub and
+        # nothing exercises the default.
+        run: AcquireRun = run_batch,
     ) -> None:
         super().__init__(sessions, scheduler=scheduler)
         self._lease = lease
