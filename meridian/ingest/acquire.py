@@ -53,6 +53,10 @@ class AcquireReport:
     #: publisher changed language or the detector is being fed something it should not be.
     dropped: int = 0
     failed: int = 0
+    #: Rows another worker had already completed — an expired lease, not a fault. Counted
+    #: separately because a batch reporting these as failures sends someone hunting a bug in a
+    #: record that was processed correctly.
+    stale: int = 0
 
     def __add__(self, other: "AcquireReport") -> "AcquireReport":
         return AcquireReport(
@@ -60,6 +64,7 @@ class AcquireReport:
             acquired=self.acquired + other.acquired,
             dropped=self.dropped + other.dropped,
             failed=self.failed + other.failed,
+            stale=self.stale + other.stale,
         )
 
 
@@ -124,19 +129,32 @@ def run_batch(
     )
     report = AcquireReport(claimed=len(claimed))
     for work in claimed:
+        # ⚠️ Read the identifiers before entering the try, and use the copies afterwards.
+        # ``session.rollback()`` expires the instance, so touching an attribute re-queries the
+        # row — and if the row is gone, that raises ``ObjectDeletedError`` *from inside the
+        # handler that exists to contain failures*, taking the rest of the batch with it. The
+        # row being gone is not exotic: it is what a worker whose lease expired finds.
+        work_id, article_id = work.work_id, work.article_id
         try:
             report += (
                 AcquireReport(acquired=1) if handle(session, work) else AcquireReport(dropped=1)
             )
+        except work_queue.StaleWork:
+            # Another worker finished this row while our claim was expired. Nothing is wrong
+            # with the article, so this must not read as a failure — counting it as one sends
+            # someone looking for a bug in a record that was processed correctly.
+            session.rollback()
+            log.info("work %d was already completed by another worker", work_id)
+            report += AcquireReport(stale=1)
         except Exception as exc:
             session.rollback()
-            log.exception("article %s raised during acquire", work.article_id)
-            _record_failure(session, work, exc)
+            log.exception("article %s raised during acquire", article_id)
+            _record_failure(session, work_id, exc)
             report += AcquireReport(failed=1)
     return report
 
 
-def _record_failure(session: Session, work: PipelineWork, exc: Exception) -> None:
+def _record_failure(session: Session, work_id: int, exc: Exception) -> None:
     """Write why a row failed, in a transaction of its own.
 
     ⚠️ The rollback above discards everything the handler did, and a message written inside
@@ -144,14 +162,17 @@ def _record_failure(session: Session, work: PipelineWork, exc: Exception) -> Non
     survive as the one that says nothing about itself. ``attempts`` alone reports that a row
     keeps failing and never what it fails on.
 
+    Takes an id rather than the instance, because the instance is expired by the rollback and
+    the row may be gone.
+
     Its own try/except, because a failure to record a failure is worth a log line rather than
     the rest of the batch.
     """
     try:
-        row = session.get(PipelineWork, work.work_id)
+        row = session.get(PipelineWork, work_id)
         if row is not None:
             row.last_error = f"{type(exc).__name__}: {exc}"[:2000]
             session.commit()
     except Exception:
         session.rollback()
-        log.exception("could not record the failure of work %d", work.work_id)
+        log.exception("could not record the failure of work %d", work_id)
