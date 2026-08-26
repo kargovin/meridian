@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from meridian_contract import (
+    ARTICLE_CHAIN,
     STAGE_OWED_BY_STATE,
     STAGE_SUCCESSOR,
     STATE_AFTER_STAGE,
@@ -128,6 +129,65 @@ def missing_article_work(session: Session) -> set[tuple[int, Stage]]:
     return expected_article_work(session) - open_article_work(session)
 
 
+class StaleWork(Exception):
+    """The work row is no longer ours to complete — another worker discharged it first.
+
+    Raised rather than ignored. A caller that treats a vanished row as success has completed a
+    stage twice: two sets of stage output, two successors attempted, and for a model-backed
+    stage two lots of inference paid for.
+    """
+
+
+#: Stages whose subject is an article. ``SUMMARIZE`` acts on a cluster and is not in the chain.
+_ARTICLE_STAGES = frozenset(stage for stage, _ in ARTICLE_CHAIN)
+
+
+def _check_subject(work: PipelineWork) -> None:
+    """Refuse a work row whose subject is the wrong kind for its stage.
+
+    ``exactly_one_subject`` enforces that a row has one subject, not that it has the *right*
+    one. A row with ``stage='acquire'`` and a cluster subject otherwise advances silently to a
+    successor row that is also mis-subjected — and both ``expected_article_work`` and
+    ``open_article_work`` skip cluster rows, so the reconciler can never see it. ``terminate``
+    already refuses this; the two are symmetric on purpose.
+    """
+    if work.stage in _ARTICLE_STAGES:
+        if work.article_id is None:
+            raise ValueError(
+                f"stage {work.stage} acts on an article; work {work.work_id} has a cluster subject"
+            )
+    elif work.article_id is not None:
+        raise ValueError(
+            f"stage {work.stage} acts on a cluster; work {work.work_id} has an article subject"
+        )
+
+
+def _discharge(session: Session, work: PipelineWork) -> None:
+    """Delete the work row, and refuse to continue if it was not ours to delete.
+
+    ⚠️ ``session.delete()`` matching zero rows emits a ``SAWarning`` and carries on. That is
+    the whole failure: a worker whose lease expired, whose row was claimed and completed by
+    somebody else, would advance the article a second time. At ``acquire`` a unique index on
+    the successor happens to stop it; at the end of the chain there is no successor and so
+    nothing catches it at all.
+
+    Issued as a statement rather than through the unit of work for a second reason: it emits
+    the DELETE now. SQLAlchemy orders INSERTs ahead of DELETEs within one flush, and
+    ``uq_pipeline_work_open_article`` permits one open row per article, so a queued delete plus
+    a queued successor insert raises ``UniqueViolation`` on every advance.
+    """
+    discharged = session.scalar(
+        sa.delete(PipelineWork)
+        .where(PipelineWork.work_id == work.work_id)
+        .returning(PipelineWork.work_id)
+    )
+    if discharged is None:
+        raise StaleWork(
+            f"work {work.work_id} was already discharged; another worker completed this stage"
+        )
+    session.expunge(work)
+
+
 def advance(session: Session, work: PipelineWork) -> None:
     """Complete a stage: move the subject's state, discharge this work row, enqueue the next.
 
@@ -144,7 +204,11 @@ def advance(session: Session, work: PipelineWork) -> None:
     The order comes from ``libs/contract``: which state this stage leaves the subject in, and
     which stage follows. Nothing here restates it, so adding a stage is still a one-line edit
     to ``ARTICLE_CHAIN``.
+
+    Raises ``StaleWork`` if the row has already been discharged — see ``_discharge``. The
+    caller must not treat that as a completion.
     """
+    _check_subject(work)
     new_state = STATE_AFTER_STAGE[work.stage]
     successor = STAGE_SUCCESSOR[work.stage]
 
@@ -154,20 +218,11 @@ def advance(session: Session, work: PipelineWork) -> None:
             raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
         article.pipeline_state = new_state
 
-    session.delete(work)
-    # ⚠️ Flush the delete before inserting the successor. SQLAlchemy orders INSERTs ahead of
-    # DELETEs within one flush, and `uq_pipeline_work_open_article` allows only one open row
-    # per article — so the natural spelling raises UniqueViolation on every single advance.
-    session.flush()
+    article_id, cluster_id = work.article_id, work.cluster_id
+    _discharge(session, work)
 
     if successor is not None:
-        session.add(
-            PipelineWork(
-                article_id=work.article_id,
-                cluster_id=work.cluster_id,
-                stage=successor,
-            )
-        )
+        session.add(PipelineWork(article_id=article_id, cluster_id=cluster_id, stage=successor))
         session.flush()
 
 
@@ -193,5 +248,4 @@ def terminate(session: Session, work: PipelineWork, reason: TerminalReason) -> N
     if article is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
     article.terminal_reason = reason
-    session.delete(work)
-    session.flush()
+    _discharge(session, work)
