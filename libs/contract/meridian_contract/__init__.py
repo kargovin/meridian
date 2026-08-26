@@ -20,6 +20,7 @@ from .enums import (
 from .pipeline import (
     ARTICLE_CHAIN,
     ENTRY_STATE,
+    PROJECTABLE_STATE,
     STAGE_OWED_BY_STATE,
     STAGE_SUCCESSOR,
     STATE_AFTER_STAGE,
@@ -29,6 +30,7 @@ from .pipeline import (
 __all__ = [
     "ARTICLE_CHAIN",
     "ENTRY_STATE",
+    "PROJECTABLE_STATE",
     "STAGE_OWED_BY_STATE",
     "STAGE_SUCCESSOR",
     "STATE_AFTER_STAGE",
