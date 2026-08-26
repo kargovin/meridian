@@ -67,8 +67,21 @@ POLL_INTERVAL_SECONDS = IntKnob(
     summary="Seconds between discovery polls. The largest single term in the freshness budget.",
 )
 
+#: How long the acquire stage waits between batches. Config rather than a constant for the
+#: reason the poll cadence is (T6): it is a term in end-to-end freshness — an article waits
+#: the discovery interval, then this one — and raising it loses freshness with no code change
+#: and no failing test. The ceiling is what stops it being used to stall the pipeline.
+ACQUIRE_INTERVAL_SECONDS = IntKnob(
+    key="acquire_interval_seconds",
+    default=30,
+    minimum=5,
+    maximum=300,
+    summary="Seconds between acquire batches. Added to the poll interval, this is how long "
+    "a discovered article waits before it is normalized.",
+)
+
 #: Every declared knob, in the order the admin surface lists them.
-KNOBS: tuple[IntKnob, ...] = (POLL_INTERVAL_SECONDS,)
+KNOBS: tuple[IntKnob, ...] = (POLL_INTERVAL_SECONDS, ACQUIRE_INTERVAL_SECONDS)
 
 
 def get_int(session: Session, knob: IntKnob) -> int:

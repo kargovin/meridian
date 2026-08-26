@@ -8,7 +8,13 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import pytest
-from meridian_contract import AcquisitionTier, DiscoveryMethod, PipelineState, Stage
+from meridian_contract import (
+    AcquisitionTier,
+    BodyProvenance,
+    DiscoveryMethod,
+    PipelineState,
+    Stage,
+)
 from sqlalchemy.orm import Session
 
 from meridian.db import poll_state
@@ -409,6 +415,23 @@ def test_a_tier_one_feed_stores_the_content_element_as_the_body(
     article = articles(app_session)[0]
     assert article.body_text == "THE WHOLE ARTICLE"
     assert article.lede == "A teaser."
+    # ⚠️ Provenance records an *event*, and this is the only code that witnesses it. Written
+    # here rather than by a later stage because a body stored with NULL provenance is
+    # indistinguishable downstream from one nobody obtained (RFC §5.1).
+    assert article.body_provenance is BodyProvenance.TIER1_FEED
+
+
+def test_a_record_with_no_body_has_no_provenance(app_session: Session) -> None:
+    """The other half: provenance is not a default, it is a statement about where a body came
+    from. Every record on the current roster takes this branch.
+    """
+    feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.EXTRACTION)
+
+    run_cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}), sleep=lambda _: None)
+
+    article = articles(app_session)[0]
+    assert article.body_text is None
+    assert article.body_provenance is None
 
 
 # --------------------------------------------------------------------------- politeness

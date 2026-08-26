@@ -14,11 +14,17 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from meridian.db import runtime_config
 from meridian.db.models import RuntimeConfig
-from meridian.db.runtime_config import POLL_INTERVAL_SECONDS
+from meridian.db.runtime_config import ACQUIRE_INTERVAL_SECONDS, POLL_INTERVAL_SECONDS
 from meridian.db.session import session_factory
+from meridian.ingest.acquire import AcquireReport
 from meridian.ingest.discovery import CycleReport
 from meridian.ingest.fetch import Fetcher, FetchResult
-from meridian.ingest.scheduler import JOB_ID, DiscoveryScheduler
+from meridian.ingest.scheduler import (
+    ACQUIRE_JOB_ID,
+    JOB_ID,
+    AcquireScheduler,
+    DiscoveryScheduler,
+)
 
 pytestmark = pytest.mark.postgres
 
@@ -38,10 +44,22 @@ class StubScheduler:
         self.rescheduled.append((job_id, trigger.interval.total_seconds()))
 
     def start(self) -> None:
+        # ⚠️ Raises, because APScheduler raises SchedulerAlreadyRunningError. A stub that
+        # merely re-set a flag here would let the double-start test pass with the guard in
+        # `_start_scheduler` deleted — asserting nothing about the behaviour it is named for.
+        if self.started:
+            raise RuntimeError("scheduler is already running")
         self.started = True
 
     def shutdown(self) -> None:
         self.started = False
+
+    @property
+    def running(self) -> bool:
+        """Two jobs share one scheduler in a real process, so the second to start must not
+        try to start it again.
+        """
+        return self.started
 
 
 def _set_interval_with(sessions: sessionmaker[Session], seconds: int) -> None:
@@ -204,3 +222,88 @@ def test_a_cycle_inside_its_interval_is_not_reported(
         fast.tick()
 
     assert not [r for r in caplog.records if "effective cadence" in r.getMessage()]
+
+
+# --------------------------------------------------------------------------- the acquire job
+
+
+def _set_knob(sessions: sessionmaker[Session], knob: runtime_config.IntKnob, value: int) -> None:
+    with sessions() as session:
+        row = session.get(RuntimeConfig, knob.key)
+        assert row is not None
+        runtime_config.set_int(session, knob, value=value, expected_updated_at=row.updated_at)
+        session.commit()
+
+
+def _acquire(sessions: sessionmaker[Session], stub: StubScheduler, **kw: Any) -> AcquireScheduler:
+    return AcquireScheduler(
+        sessions,
+        lease=dt.timedelta(minutes=5),
+        scheduler=stub,
+        run=kw.pop("run", lambda session, **_: AcquireReport()),
+        **kw,
+    )
+
+
+def test_the_acquire_job_reads_its_own_cadence(sessions: sessionmaker[Session]) -> None:
+    """Its own knob, not the poll interval — the two are different terms in the same budget
+    and tying them together would mean one cannot be tuned without moving the other.
+    """
+    _set_knob(sessions, ACQUIRE_INTERVAL_SECONDS, 45)
+    stub = StubScheduler()
+
+    _acquire(sessions, stub).start()
+
+    assert stub.added == [(ACQUIRE_JOB_ID, 45.0)]
+
+
+def test_changing_the_acquire_cadence_takes_effect_without_a_restart(
+    sessions: sessionmaker[Session],
+) -> None:
+    stub = StubScheduler()
+    scheduler = _acquire(sessions, stub)
+    scheduler.start()
+
+    _set_knob(sessions, ACQUIRE_INTERVAL_SECONDS, 120)
+    scheduler.tick()
+
+    assert stub.rescheduled == [(ACQUIRE_JOB_ID, 120.0)]
+
+
+def test_a_batch_that_raises_still_leaves_the_job_scheduled(
+    sessions: sessionmaker[Session],
+) -> None:
+    """⚠️ Without the finally, one bad batch stops the stage permanently and the symptom is a
+    queue that quietly stops draining.
+    """
+
+    def explode(session: Session, **_: Any) -> AcquireReport:
+        raise RuntimeError("boom")
+
+    stub = StubScheduler()
+    scheduler = _acquire(sessions, stub, run=explode)
+    scheduler.start()
+
+    _set_knob(sessions, ACQUIRE_INTERVAL_SECONDS, 90)
+    with pytest.raises(RuntimeError):
+        scheduler.tick()
+
+    assert stub.rescheduled == [(ACQUIRE_JOB_ID, 90.0)]
+
+
+def test_two_jobs_share_one_scheduler_and_start_it_once(
+    sessions: sessionmaker[Session],
+) -> None:
+    """⚠️ APScheduler raises on start() when it is already running, so the second job to start
+    would take the process down at boot — after the first had been scheduled, which is the
+    kind of half-started state that reads as a crash loop with no obvious cause.
+    """
+    stub = StubScheduler()
+    discovery = _scheduler(sessions, stub)
+    acquire = _acquire(sessions, stub)
+
+    discovery.start()
+    acquire.start()
+
+    assert [job_id for job_id, _ in stub.added] == [JOB_ID, ACQUIRE_JOB_ID]
+    assert stub.started

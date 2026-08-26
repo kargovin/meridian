@@ -1,0 +1,282 @@
+"""Normalization's two judgements: where text ends, and whether it is English (FR-I4, FR-I7).
+
+No database — these are pure functions, which is the point of them being in their own module.
+"""
+
+import pytest
+
+from meridian.ingest.normalize import (
+    LanguageVerdict,
+    _is_latin_script,
+    detect_language,
+    language_input,
+    strip_html,
+)
+
+# --------------------------------------------------------------------------- strip_html
+
+
+def test_a_block_boundary_becomes_a_space() -> None:
+    """AC2. ⚠️ The falsifier for the whole module.
+
+    Strip the tags without emitting a separator and this reads "here.New" — one malformed
+    sentence where there were two. Nothing raises, the text still looks almost right, and
+    every later stage that splits on sentence boundaries is silently given bad input. Verified
+    by removing ``_BLOCK_TAGS`` from the start/end handlers: only this test fails.
+    """
+    assert strip_html("<p>Ends here.</p><p>New sentence.</p>") == "Ends here. New sentence."
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "<div>One.</div><div>Two.</div>",
+        "<ul><li>One.</li><li>Two.</li></ul>",
+        "One.<br>Two.",
+        "<h2>One.</h2>Two.",
+        "<table><tr><td>One.</td><td>Two.</td></tr></table>",
+    ],
+)
+def test_every_block_element_separates(raw: str) -> None:
+    """One list, several spellings. A feed picks whichever its CMS emits."""
+    assert strip_html(raw) == "One. Two."
+
+
+def test_an_inline_tag_does_not_split_a_word() -> None:
+    """The other direction: separating on <b> would break words apart mid-token."""
+    assert strip_html("<p>Ferry operators have <b>sus</b>pended sailings.</p>") == (
+        "Ferry operators have suspended sailings."
+    )
+
+
+def test_entities_are_resolved() -> None:
+    assert strip_html("Smith &amp; Sons said &quot;no&quot;") == 'Smith & Sons said "no"'
+
+
+def test_a_non_breaking_space_collapses_like_a_space() -> None:
+    """&nbsp; becomes \\xa0, which reads as a space and is not one to a naive splitter."""
+    assert strip_html("a&nbsp;&nbsp;b") == "a b"
+
+
+def test_script_content_is_not_text() -> None:
+    assert strip_html("<script>var x = 1;</script>Real text") == "Real text"
+    assert strip_html("<style>.a{color:red}</style>Real text") == "Real text"
+
+
+def test_markup_with_no_text_is_absent_rather_than_empty() -> None:
+    """So "no teaser" and "an empty div" are one absence downstream, not two."""
+    assert strip_html("<div></div>") is None
+    assert strip_html("   ") is None
+    assert strip_html(None) is None
+
+
+def test_stripping_ordinary_prose_is_a_fixpoint() -> None:
+    """The common case: a second pass over plain text changes nothing."""
+    once = strip_html("<p>Ends here.</p><p>New sentence.</p>")
+    assert strip_html(once) == once
+
+
+def test_stripping_escaped_markup_is_NOT_a_fixpoint() -> None:
+    """⚠️ The limit, asserted rather than assumed — and the reason this is written down.
+
+    An earlier version of this test used an entity-free input and claimed idempotence, which
+    is the shape of test that passes while asserting nothing about the property it names.
+
+    A teaser that *describes* markup decays one pass at a time: ``&lt;redacted&gt;`` becomes a
+    real ``<redacted>``, which the next pass reads as a tag and deletes. Harmless while the
+    stage runs once per record; a silent content deletion the moment RFC §9's replay rewinds
+    ``pipeline_state`` and re-enqueues.
+    """
+    once = strip_html("The company said &lt;redacted&gt; had been removed.")
+    assert once == "The company said <redacted> had been removed."
+    assert strip_html(once) == "The company said had been removed."
+
+    # Entities decay one level per pass, for the same reason.
+    assert (
+        strip_html("Profits rose 5 &amp;amp; margins held") == "Profits rose 5 &amp; margins held"
+    )
+
+
+def test_malformed_markup_still_yields_its_text() -> None:
+    """Publishers ship unclosed tags; a teaser is not worth failing an article over."""
+    assert strip_html("<p>Unclosed <b>bold text") == "Unclosed bold text"
+
+
+# --------------------------------------------------------------------------- detect_language
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Storm Bertha closes ports across the south coast",
+        "Markets fall",
+        "Zelensky Macron Starmer",
+        "2026 Q3 GDP 4.1%",
+        "WATCH: FLOODS HIT COASTAL TOWNS",
+        "Breaking",
+    ],
+)
+def test_english_survives_however_short(text: str) -> None:
+    """AC4, and the direction that matters.
+
+    ⚠️ These are real headline shapes, and the confidences behind them are low — "Zelensky
+    Macron Starmer" scores 0.38, "Markets fall" 0.59. A rule of "keep only what is confidently
+    English" passes every other test in this file and permanently deletes all of these.
+    """
+    assert detect_language(text).drop is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Por que Cuba no produce suficiente comida para alimentar a su poblacion",
+        "Le mysterieux voyage express du directeur de la CIA en Russie",
+        "Feuer-Katastrophe in einer Entbindungsstation in Pakistan",
+    ],
+)
+def test_a_confident_foreign_verdict_drops(text: str) -> None:
+    verdict = detect_language(text)
+    assert verdict.drop is True
+    assert verdict.language != "en"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "الحكومة تعلن عن إجراءات اقتصادية جديدة لاحتواء التضخم",
+        "政府宣布新的经济措施以遏制该国的通货膨胀",
+        # Cyrillic below is deliberate: RUF001 flags the confusable characters that are
+        # the entire point of the fixture.
+        "Правительство объявило о новых экономических мерах",  # noqa: RUF001
+        "सरकार ने नए आर्थिक उपायों की घोषणा की",
+    ],
+)
+def test_non_latin_script_drops(text: str) -> None:
+    """⚠️ The case the script gate exists for, and it is not a nicety.
+
+    The detector is restricted to Latin-script languages, so for these it returns *no opinion*
+    — and no opinion is what the drop rule treats as a reason to keep. Delete ``_is_latin_script``
+    and every one of these is kept as possibly-English, with nothing anywhere reporting it.
+    """
+    verdict = detect_language(text)
+    assert verdict.drop is True
+    assert verdict.language is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "C\u00f3mo puede contraatacar Canad\u00e1 a la econom\u00eda de EE.UU.",
+        "Le myst\u00e9rieux voyage express du directeur de la CIA en Russie",
+        "\u00dcber die Zukunft der deutschen Wirtschaft und ihrer Industrie",
+        "A a\u00e7\u00e3o do governo brasileiro sobre a economia nacional",
+    ],
+)
+def test_accented_latin_reaches_the_detector_rather_than_the_script_gate(text: str) -> None:
+    """⚠️ The gate returns *before* the detector runs, so a rule that counted only unaccented
+    ASCII as Latin would send every Spanish, French, German and Portuguese headline out through
+    it — dropped with ``language`` NULL, which is the right outcome reached by the wrong route
+    and would hide a broken detector completely.
+
+    ⚠️ These fixtures must keep their diacritics. An earlier version of this test had them
+    stripped to avoid a lint rule about confusable characters, which made it assert nothing
+    about accented text at all while still being named for it.
+    """
+    assert any(ord(char) > 127 for char in text), "fixture lost its diacritics"
+    assert _is_latin_script(text) is True
+
+    verdict = detect_language(text)
+    assert verdict.drop is True
+    assert verdict.language is not None  # the detector ran and had an opinion
+
+
+def test_mixed_script_goes_on_the_majority() -> None:
+    """An English headline quoting another script is still an English headline."""
+    verdict = detect_language(
+        "Protesters chanted \u0627\u0644\u062d\u0631\u064a\u0629 in the square today"
+    )
+    assert verdict.drop is False
+    assert verdict.language == "en"
+
+
+def test_text_with_no_letters_is_not_evidence_of_a_foreign_language() -> None:
+    """A headline of digits and punctuation is a bad headline, not a foreign one."""
+    assert detect_language("... 2026 ...") == LanguageVerdict(language=None, drop=False)
+    assert detect_language("").drop is False
+    assert detect_language("   ").drop is False
+
+
+def test_an_undetermined_language_is_stored_as_null_not_guessed() -> None:
+    """NULL and "en" are different claims; only one of them is true here."""
+    assert detect_language("...").language is None
+
+
+# --------------------------------------------------------------------------- language_input
+
+
+def test_the_teaser_joins_the_title_when_there_is_one() -> None:
+    assert language_input("Storm closes ports", "Ferries are cancelled.") == (
+        "Storm closes ports Ferries are cancelled."
+    )
+
+
+def test_the_title_is_the_whole_evidence_when_there_is_no_teaser() -> None:
+    """Two of the five publishers we can currently read ship no teaser at all."""
+    assert language_input("Storm closes ports", None) == "Storm closes ports"
+    assert language_input("Storm closes ports", "") == "Storm closes ports"
+
+
+# --------------------------------------------------------------------------- the drop bar
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Football transfer rumours: Jean-Philippe Mateta to Aston Villa?",
+        "Mercedes' upgrades & Ferrari team orders - F1 Q&A",
+        "Itauma v Hrgovic & Mayer v Cameron - all you need to know",
+        "Hrgovic taunts starting to wind me up - Itauma",
+        "Tech Life",
+    ],
+)
+def test_a_hesitant_foreign_call_does_not_delete_an_english_article(text: str) -> None:
+    """⚠️ Every one of these is a real headline from a roster publisher, and every one was
+    permanently deleted before the confidence bar existed.
+
+    lingua returns a normalised distribution, so its top candidate is never 0.0 — the lowest
+    seen anywhere in the calibration corpus is 0.23. A rule gated only on ``!= 0.0`` therefore
+    drops on *any* non-English top-1, including 0.288 with a 0.009 margin over the runner-up.
+    Measured at title-only length: 9 of 479 English headlines, 1.88%, gone with no trace.
+
+    ⚠️ These live in short proper-noun-heavy headlines — sport, markets, programme names. The
+    first calibration corpus was World/International only, minimum 6 tokens, and could not
+    produce this input at all. A corpus that cannot produce the failing case cannot falsify
+    the rule it is used to justify.
+    """
+    verdict = detect_language(text)
+    assert verdict.drop is False
+
+
+def test_a_hesitant_call_records_no_language() -> None:
+    """Below the bar we are declining to conclude, so NULL rather than a wrong label.
+
+    Writing "de" onto an English sport headline stores a false fact for a future reader to
+    trust. Detection is pure, so anyone debugging can re-run it.
+    """
+    assert detect_language("Tech Life").language is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Por que Cuba no produce suficiente comida para alimentar a su poblacion",
+        "Le mysterieux voyage express du directeur de la CIA en Russie",
+        "Feuer-Katastrophe in einer Entbindungsstation in Pakistan",
+    ],
+)
+def test_the_bar_does_not_stop_a_confident_foreign_call(text: str) -> None:
+    """The other direction: the bar must not turn FR-I7 off.
+
+    Correct foreign calls sit far above it — 92.5% land at 0.8 or better.
+    """
+    assert detect_language(text).drop is True
