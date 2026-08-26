@@ -181,9 +181,7 @@ def project_cluster(session: Session, cluster_id: int) -> None:
     # can leave a cluster when reconciliation moves an article, so an upsert alone would
     # leave the departed one behind.
     session.execute(
-        sa.delete(ClusterProjectionSource).where(
-            ClusterProjectionSource.cluster_id == cluster_id
-        )
+        sa.delete(ClusterProjectionSource).where(ClusterProjectionSource.cluster_id == cluster_id)
     )
     if coverage:
         session.execute(
