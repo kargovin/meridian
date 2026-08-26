@@ -141,6 +141,34 @@ def test_non_latin_script_drops(text: str) -> None:
     assert verdict.language is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Como puede contraatacar Canada a la economia de EE.UU.",
+        "Le mysterieux voyage express du directeur de la CIA",
+        "Uber die Wirtschaft und die Zukunft des Landes",
+    ],
+)
+def test_accented_latin_reaches_the_detector_rather_than_the_script_gate(text: str) -> None:
+    """⚠️ The gate returns *before* the detector runs, so a rule that counted only unaccented
+    ASCII as Latin would send every Spanish, French, German and Portuguese headline out through
+    it — dropped with ``language`` NULL, which is the right outcome reached by the wrong route
+    and would hide a broken detector completely.
+    """
+    verdict = detect_language(text)
+    assert verdict.drop is True
+    assert verdict.language is not None  # the detector ran and had an opinion
+
+
+def test_mixed_script_goes_on_the_majority() -> None:
+    """An English headline quoting another script is still an English headline."""
+    verdict = detect_language(
+        "Protesters chanted \u0627\u0644\u062d\u0631\u064a\u0629 in the square today"
+    )
+    assert verdict.drop is False
+    assert verdict.language == "en"
+
+
 def test_text_with_no_letters_is_not_evidence_of_a_foreign_language() -> None:
     """A headline of digits and punctuation is a bad headline, not a foreign one."""
     assert detect_language("... 2026 ...") == LanguageVerdict(language=None, drop=False)

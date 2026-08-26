@@ -75,6 +75,7 @@ class _TextExtractor(HTMLParser):
         self.parts: list[str] = []
         self._opaque = 0
 
+    # `attrs` is unused: this is HTMLParser's signature, which it calls positionally.
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _OPAQUE_TAGS:
             self._opaque += 1
@@ -118,11 +119,12 @@ def strip_html(raw: str | None) -> str | None:
 
 #: The languages the detector is allowed to answer with.
 #:
-#: Restricting it is not tidiness — it is the single biggest lever on short-text accuracy,
-#: measured. Against all 75 languages in low-accuracy mode, 8.9% of English title-only items
-#: were called foreign; restricted to this set, none were. Everything here is Latin-script,
-#: because non-Latin text never reaches the detector — ``_is_latin_script`` has already
-#: settled it, deterministically and without a model.
+#: Latin-script only, and **not to keep the model small** — ``_is_latin_script`` runs first and
+#: returns before the detector is built, so this only ever receives Latin-script text. A
+#: non-Latin member here would be unreachable. (Adding eight of them costs 0.1 MB resident,
+#: measured; the 292 MB shared object is compiled with all 75 either way. Loading all 75 costs
+#: 86 MB and 6x the latency, and in low-accuracy mode calls 8.9% of English title-only items
+#: foreign, against none for this set.)
 #:
 #: The set is wider than the roster needs because an out-of-set Latin language is forced onto
 #: whichever member is nearest, and Italian landed on ENGLISH before Italian was in the list.
@@ -161,7 +163,16 @@ def _is_latin_script(text: str) -> bool:
     an optimisation. A detector restricted to Latin-script languages answers *no opinion* for
     Arabic, Chinese, Russian and Hindi — and "no opinion" is exactly what the drop rule below
     treats as a reason to keep. Without this, every non-Latin article would be kept as
-    possibly-English. Script is a fact about the bytes, so it needs no model to settle.
+    possibly-English.
+
+    ⚠️ **Listing those languages in the detector instead does not work, and the reason is that
+    enumeration is open-ended.** Measured: adding eight non-Latin languages still fails to
+    identify Thai, Georgian and Amharic, and loading *all seventy-five* still fails Amharic —
+    there is always one more script. This closes the class instead of enumerating its members,
+    because script is a fact about the codepoints and needs no model to settle.
+
+    Accented Latin counts as Latin, so Spanish, French, German and Portuguese headlines reach
+    the detector rather than exiting here; mixed script goes on the majority.
 
     Text with no letters at all — a headline of digits and punctuation — is not evidence of a
     foreign language, so it passes.
