@@ -69,13 +69,15 @@ def make_article(
     guid: str = "guid-1",
     url: str | None = None,
     state: PipelineState = PipelineState.DISCOVERED,
+    title: str | None = None,
     **kw: Any,
 ) -> CanonicalRecord:
+    """An article. ``title`` is a parameter because normalization decides on its text."""
     article = CanonicalRecord(
         source_id=source.source_id,
         guid=guid,
         url_canonical=url or f"https://example.test/{guid}",
-        title=f"Headline {guid}",
+        title=title if title is not None else f"Headline {guid}",
         first_seen_at=dt.datetime.now(dt.UTC),
         pipeline_state=state,
         **kw,
