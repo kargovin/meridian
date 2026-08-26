@@ -16,7 +16,13 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from meridian_contract import ENTRY_STATE, AcquisitionTier, DiscoveryMethod, owed_stage
+from meridian_contract import (
+    ENTRY_STATE,
+    AcquisitionTier,
+    BodyProvenance,
+    DiscoveryMethod,
+    owed_stage,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -92,6 +98,7 @@ def _insert(session: Session, feed: Feed, item: FeedItem) -> bool:
     is canonical at insert, and a later stage rewriting the column would run after the second
     row already exists.
     """
+    body_text = _body_text(feed, item)
     article_id = session.scalar(
         insert(CanonicalRecord)
         .values(
@@ -101,7 +108,12 @@ def _insert(session: Session, feed: Feed, item: FeedItem) -> bool:
             url_canonical=item.link,
             title=item.title,
             lede=item.summary,
-            body_text=_body_text(feed, item),
+            body_text=body_text,
+            # Set here rather than by a later stage because provenance records an *event* —
+            # where this body came from — and this is the only code that witnesses it. A body
+            # written with NULL provenance is indistinguishable downstream from one nobody
+            # obtained (RFC §5.1).
+            body_provenance=BodyProvenance.TIER1_FEED if body_text is not None else None,
             published_at=item.published_at,
             pipeline_state=ENTRY_STATE,
         )
