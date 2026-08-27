@@ -37,10 +37,17 @@ class ClusterProjection(Base):
         # Mirrors summary.withheld_matches_reason. The read model is the last place a body
         # we hold no rights to could reach a reader, so a withheld row may not carry text.
         # NULL reason means no summary row exists yet, which must also carry no text.
+        #
+        # ⚠️ Every branch tests IS NOT NULL before comparing, and dropping those makes the
+        # constraint stop constraining rather than fail loudly. A CHECK rejects a row only
+        # when it evaluates to FALSE, and a comparison against NULL is NULL, not FALSE —
+        # so `(NULL, 'some text')` evaluates FALSE OR NULL OR FALSE, which is NULL, and is
+        # accepted. That is the one combination this constraint exists to forbid.
         sa.CheckConstraint(
             "(withhold_reason IS NULL AND summary_text IS NULL)"
-            " OR (withhold_reason = 'none')"
-            " OR (withhold_reason <> 'none' AND summary_text IS NULL)",
+            " OR (withhold_reason IS NOT NULL AND withhold_reason = 'none')"
+            " OR (withhold_reason IS NOT NULL AND withhold_reason <> 'none'"
+            " AND summary_text IS NULL)",
             name="summary_matches_withhold_reason",
         ),
         enum_check("withhold_reason", WithholdReason),
