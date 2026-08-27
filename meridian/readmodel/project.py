@@ -126,6 +126,40 @@ def _coverage(session: Session, article_ids: Sequence[int]) -> Sequence[tuple[in
     ]
 
 
+def _locked_cluster(session: Session, cluster_id: int) -> Cluster | None:
+    """The cluster row, locked for the rest of the transaction.
+
+    ``FOR UPDATE`` here serializes projections of one cluster: a second worker blocks until
+    the first commits, and then — READ COMMITTED taking a fresh snapshot per statement —
+    reads everything the first wrote. Taken before any other read, because a lock acquired
+    afterwards protects nothing that has already been read.
+
+    ``populate_existing`` because the identity map would otherwise answer from an instance
+    loaded earlier in this transaction, which is both stale and unlocked.
+    """
+    return session.scalars(
+        sa.select(Cluster)
+        .where(Cluster.cluster_id == cluster_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).one_or_none()
+
+
+def _current_summary(session: Session, cluster_id: int) -> Summary | None:
+    """The summary as the database holds it, not as the session remembers it.
+
+    ⚠️ The caller is the summarize stage, so this row is the one most likely to have just
+    been written — and a Core upsert, which is the natural way to write a row that may not
+    exist, leaves any instance already in the identity map stale. ``session.get`` would then
+    return the pre-write text and the projection would publish it, with no error.
+    """
+    return session.scalars(
+        sa.select(Summary)
+        .where(Summary.cluster_id == cluster_id)
+        .execution_options(populate_existing=True)
+    ).one_or_none()
+
+
 def project_cluster(session: Session, cluster_id: int) -> None:
     """Recompute one cluster's projection rows from the write tables.
 
@@ -138,8 +172,19 @@ def project_cluster(session: Session, cluster_id: int) -> None:
     A cluster with no members is removed rather than left behind. Reconciliation moves
     membership between clusters, so a cluster can legitimately empty out, and an empty one
     has no headline to render.
+
+    ⚠️ The cluster row is locked before anything is read, and the lock is what makes this
+    safe to run concurrently. Being inside the caller's transaction orders the *writes* and
+    does nothing for the *reads*: under READ COMMITTED two workers projecting one cluster
+    would each compute from a snapshot taken before the other committed, and the loser would
+    overwrite the winner with an answer the write tables never justified. The observed
+    result is a cluster whose summary exists and whose projection says "not summarized yet",
+    permanently — every work row discharged, ``pipeline_state`` reporting done, so §6.3's
+    reconciler cannot see it either. Two stage jobs sharing one scheduler is enough to reach
+    it; ``claim()``'s ``SKIP LOCKED`` gives workers disjoint *work rows*, which is not the
+    same as disjoint *clusters*.
     """
-    cluster = session.get(Cluster, cluster_id)
+    cluster = _locked_cluster(session, cluster_id)
     if cluster is None:
         raise ValueError(f"cannot project cluster {cluster_id}, which is gone")
 
@@ -151,7 +196,7 @@ def project_cluster(session: Session, cluster_id: int) -> None:
         return
 
     head = members[0]
-    summary = session.get(Summary, cluster_id)
+    summary = _current_summary(session, cluster_id)
     coverage = _coverage(session, [article.article_id for article in members])
 
     row = {
