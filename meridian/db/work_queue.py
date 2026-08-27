@@ -6,6 +6,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from meridian_contract import (
     ARTICLE_CHAIN,
+    PROJECTABLE_STATE,
     STAGE_OWED_BY_STATE,
     STAGE_SUCCESSOR,
     STATE_AFTER_STAGE,
@@ -17,6 +18,7 @@ from meridian_contract import (
 from sqlalchemy.orm import Session
 
 from meridian.db.models import CanonicalRecord, PipelineWork
+from meridian.readmodel.project import project_article_cluster, project_cluster
 
 #: States that still owe an article stage — the filter for the rebuild derivation.
 _OWING_STATES = [state for state in PipelineState if STAGE_OWED_BY_STATE[state] is not None]
@@ -189,13 +191,15 @@ def _discharge(session: Session, work: PipelineWork) -> None:
 
 
 def advance(session: Session, work: PipelineWork) -> None:
-    """Complete a stage: move the subject's state, discharge this work row, enqueue the next.
+    """Complete a stage: move the subject's state, discharge this row, project, enqueue the next.
 
-    The four writes that end every stage, in one place — which is the point of it existing
-    (RFC §6.2). A handler that writes its output and forgets the enqueue leaves an article
+    Every write that ends a stage, in one place — which is the point of it existing (RFC
+    §6.2). A handler that writes its output and forgets the enqueue leaves an article
     stopped with no error, no attempt count and no dead-letter row, and **no alarm can fire,
     because every alarm hangs off the work row that is now gone.** With one helper, exactly
-    one place in the system can make that mistake, and one test covers it.
+    one place in the system can make that mistake, and one test covers it. The read-model
+    projection (§6.3) is here for the same reason and fails the same way: an article that is
+    finished and unreadable is invisible to the reconciler, which asks pipeline_state.
 
     Does not commit. The caller has already written the stage's own output onto this session,
     and a single commit is what makes all of it one transaction — a state that moved without
@@ -220,6 +224,21 @@ def advance(session: Session, work: PipelineWork) -> None:
 
     article_id, cluster_id = work.article_id, work.cluster_id
     _discharge(session, work)
+
+    # The read model is refreshed here, inside the same transaction, for the reason this
+    # helper exists at all: a projection written after the commit leaves a window in which
+    # the subject is finished and unreadable, and nothing can find it afterwards — §6.3's
+    # reconciler derives owed work from pipeline_state, which already says it is done. After
+    # the discharge, not before, so a worker whose lease expired projects nothing: the
+    # projection is idempotent, but doing the work and then finding out it was not ours is
+    # the shape this helper exists to remove.
+    #
+    # RFC §6.3's two triggers, and neither is "the pipeline finished with this cluster":
+    # an article becoming readable, and a cluster's summary changing.
+    if article_id is not None and new_state is PROJECTABLE_STATE:
+        project_article_cluster(session, article_id)
+    elif cluster_id is not None:
+        project_cluster(session, cluster_id)
 
     if successor is not None:
         session.add(PipelineWork(article_id=article_id, cluster_id=cluster_id, stage=successor))

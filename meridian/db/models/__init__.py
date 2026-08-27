@@ -11,6 +11,7 @@ from meridian.db.models.clustering import Cluster, ClusterMember, Summary
 from meridian.db.models.config import RuntimeConfig
 from meridian.db.models.enrichment import Classification
 from meridian.db.models.polling import FeedPollState
+from meridian.db.models.readmodel import ClusterProjection, ClusterProjectionSource
 from meridian.db.models.source import Feed, Source
 from meridian.db.models.takedown import Takedown
 from meridian.db.models.work import PipelineWork
@@ -22,6 +23,8 @@ __all__ = [
     "Classification",
     "Cluster",
     "ClusterMember",
+    "ClusterProjection",
+    "ClusterProjectionSource",
     "Feed",
     "FeedPollState",
     "PipelineWork",

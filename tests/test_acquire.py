@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from meridian.db import work_queue
 from meridian.db.models import CanonicalRecord, PipelineWork
 from meridian.ingest.acquire import handle, run_batch
-from tests.factories import make_article, make_source, make_work
+from tests.factories import make_article, make_cluster, make_member, make_source, make_work
 
 pytestmark = pytest.mark.postgres
 
@@ -54,6 +54,10 @@ def test_advance_at_the_end_of_the_chain_enqueues_nothing(app_session: Session) 
     """``cluster`` is last. The article is done, not owed a stage that does not exist."""
     source = make_source(app_session)
     article = make_article(app_session, source, state=PipelineState.CLASSIFIED)
+    # Membership is not decoration: completing ``cluster`` also projects the article into
+    # the read model, and one that reached the end of the chain belonging to no cluster is
+    # refused rather than left finished and unreadable.
+    make_member(app_session, make_cluster(app_session), article)
     work = make_work(app_session, stage=Stage.CLUSTER, article=article)
 
     work_queue.advance(app_session, work)
@@ -96,8 +100,6 @@ def test_a_stage_completion_is_atomic(app_session: Session) -> None:
 
 def test_terminate_refuses_cluster_work(app_session: Session) -> None:
     """``terminal_reason`` lives on an article; summarize work has a cluster subject."""
-    from tests.factories import make_cluster
-
     cluster = make_cluster(app_session)
     work = make_work(app_session, stage=Stage.SUMMARIZE, cluster=cluster)
 

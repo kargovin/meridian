@@ -49,6 +49,13 @@ _successor.update(
 # MappingProxyType creates an dyanamic and immutable copy of _successor
 STAGE_SUCCESSOR: Mapping[Stage, Stage | None] = MappingProxyType(_successor)
 
+#: The state at which an article becomes readable: it has a topic and a cluster, which is
+#: everything topic-browse needs. Declared here beside the chain rather than tested for in
+#: the helper that acts on it, so what makes an article readable is data like the sequence
+#: is. Deliberately not "the end of the chain" — a stage added after clustering would not
+#: move the point at which a reader can see the article.
+PROJECTABLE_STATE = PipelineState.CLUSTERED
+
 _owed: dict[PipelineState, Stage | None] = dict.fromkeys(PipelineState)
 _owed[ENTRY_STATE] = ARTICLE_CHAIN[0][0]
 _owed.update((state, ARTICLE_CHAIN[i + 1][0]) for i, (_, state) in enumerate(ARTICLE_CHAIN[:-1]))

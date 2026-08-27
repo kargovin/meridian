@@ -11,6 +11,7 @@ from meridian_contract import (
     PipelineState,
     RightsLevel,
     Stage,
+    WithholdReason,
 )
 from sqlalchemy.orm import Session
 
@@ -18,9 +19,11 @@ from meridian.db.models import (
     AlternateCopy,
     CanonicalRecord,
     Cluster,
+    ClusterMember,
     Feed,
     PipelineWork,
     Source,
+    Summary,
 )
 
 
@@ -112,6 +115,41 @@ def make_cluster(app_session: Session, **kw: Any) -> Cluster:
     app_session.add(cluster)
     app_session.flush()
     return cluster
+
+
+def make_member(app_session: Session, cluster: Cluster, article: CanonicalRecord) -> ClusterMember:
+    """Put an article in a cluster. One row per article — the PK enforces it."""
+    member = ClusterMember(cluster_id=cluster.cluster_id, article_id=article.article_id)
+    app_session.add(member)
+    app_session.flush()
+    return member
+
+
+def make_summary(
+    app_session: Session,
+    cluster: Cluster,
+    *,
+    text: str | None = None,
+    withhold_reason: WithholdReason = WithholdReason.NONE,
+    **kw: Any,
+) -> Summary:
+    """A cluster's summary, withheld or not.
+
+    A withheld summary is a row, never an absent one, so ``withhold_reason`` alone decides
+    ``withheld`` — passing them separately is the only way to build a row the CHECK rejects,
+    and no test wants that by accident.
+    """
+    withheld = withhold_reason is not WithholdReason.NONE
+    summary = Summary(
+        cluster_id=cluster.cluster_id,
+        text=None if withheld else text,
+        withheld=withheld,
+        withhold_reason=withhold_reason,
+        **kw,
+    )
+    app_session.add(summary)
+    app_session.flush()
+    return summary
 
 
 def make_work(
