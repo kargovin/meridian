@@ -15,7 +15,8 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from meridian_contract import PipelineState, Stage, WithholdReason
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from meridian.db import work_queue
@@ -24,8 +25,9 @@ from meridian.db.models import (
     Cluster,
     ClusterProjection,
     ClusterProjectionSource,
+    Summary,
 )
-from meridian.readmodel.project import project_cluster, rebuild
+from meridian.readmodel.project import _locked_cluster, project_cluster, rebuild
 from tests.factories import (
     make_alternate_copy,
     make_article,
@@ -203,11 +205,37 @@ def test_the_four_no_summary_states_are_distinguishable(app_session: Session) ->
     assert len(set(seen)) == 5
 
 
+def test_summary_text_with_no_reason_is_rejected(app_session: Session) -> None:
+    """The branch three-valued logic left open, and the one the constraint exists for.
+
+    ⚠️ A CHECK rejects a row only when it evaluates to FALSE, and a comparison against a
+    NULL ``withhold_reason`` is NULL rather than FALSE. Without the ``IS NOT NULL`` guard on
+    each branch this row evaluates FALSE OR NULL OR FALSE — NULL — and is **accepted**: a
+    projection carrying summary text while claiming no summary has been attempted.
+
+    ``alembic check`` compares CHECK constraints by name only and cannot see the expression,
+    so nothing but this test stands between that state and the reader.
+    """
+    cluster, _ = _single_source_cluster(app_session)
+
+    with pytest.raises(IntegrityError, match="summary_matches_withhold_reason"):
+        app_session.execute(
+            sa.insert(ClusterProjection).values(
+                cluster_id=cluster.cluster_id,
+                headline="h",
+                summary_text="text with no reason beside it",
+                withhold_reason=None,
+                article_count=1,
+                distinct_source_count=1,
+            )
+        )
+
+
 def test_a_withheld_projection_cannot_carry_summary_text(app_session: Session) -> None:
     """The read model is the last place a body we hold no rights to could reach a reader."""
     cluster, _ = _single_source_cluster(app_session)
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="summary_matches_withhold_reason"):
         app_session.execute(
             sa.insert(ClusterProjection).values(
                 cluster_id=cluster.cluster_id,
@@ -416,6 +444,104 @@ def test_articles_without_a_publication_date_sort_last(app_session: Session) -> 
     assert row.headline == "Dated"
 
 
+def test_a_tied_headline_does_not_depend_on_the_query_plan(app_session: Session) -> None:
+    """The tie-break, which the rest of the corpus cannot exercise.
+
+    ⚠️ ``_members`` claims its order must be total or the projection stops being rebuildable,
+    and nothing could fail if that were false: every other cluster in the suite has members
+    with distinct ``published_at``, so a corpus that cannot produce a tie cannot falsify the
+    rule that handles ties. Same family as the MER-17 calibration corpus and the MER-18
+    silver standard. Two articles at one instant is not exotic — a publisher's feed
+    timestamps a batch identically, and a feed with no per-item date leaves them all NULL.
+
+    ⚠️ Nor is it enough to project twice and compare: with no tie-break PostgreSQL still
+    returns a small table in a repeatable order, so the wrong answer is repeatably wrong and
+    an equality check passes. What actually distinguishes a total ordering is that the
+    result does not depend on the **plan**. Forcing the join off its index reorders the
+    input to the sort, and only a tie-break makes the output invariant under that. Measured
+    before this test was written: with the tie-break deleted the two plans disagree.
+
+    Membership is inserted in reverse id order so physical order and id order differ.
+    """
+    source = make_source(app_session, "BBC")
+    cluster = make_cluster(app_session, article_count=12, distinct_source_count=1)
+    articles = [
+        make_article(
+            app_session,
+            source,
+            guid=f"g{n:02d}",
+            url=f"https://bbc.test/{n:02d}",
+            title=f"title-{n:02d}",
+            state=PipelineState.CLUSTERED,
+            published_at=NOW,
+        )
+        for n in range(12)
+    ]
+    for article in reversed(articles):
+        make_member(app_session, cluster, article)
+    app_session.commit()
+
+    project_cluster(app_session, cluster.cluster_id)
+    default_plan = _projection(app_session, cluster.cluster_id)
+
+    app_session.execute(sa.text("SET LOCAL enable_seqscan = off"))
+    project_cluster(app_session, cluster.cluster_id)
+    other_plan = _projection(app_session, cluster.cluster_id)
+
+    assert default_plan is not None and other_plan is not None
+    # The lowest article_id breaks the tie, and it is the first one inserted.
+    assert default_plan.headline == "title-00"
+    assert other_plan.headline == default_plan.headline
+
+
+def test_one_publisher_covering_twice_at_one_instant_picks_a_stable_url(
+    app_session: Session,
+) -> None:
+    """The same gap in ``_coverage``: its rank and timestamp both tie, so ``url`` decides.
+
+    A publisher reissuing a story under a second guid in one batch produces exactly this.
+    """
+    source = make_source(app_session, "BBC")
+    cluster = make_cluster(app_session, article_count=2, distinct_source_count=1)
+    for guid, url in (("b", "https://bbc.test/z"), ("a", "https://bbc.test/a")):
+        make_member(
+            app_session,
+            cluster,
+            make_article(
+                app_session,
+                source,
+                guid=guid,
+                url=url,
+                state=PipelineState.CLUSTERED,
+                published_at=NOW,
+            ),
+        )
+
+    project_cluster(app_session, cluster.cluster_id)
+    first = _coverage(app_session, cluster.cluster_id)
+
+    app_session.execute(sa.text("TRUNCATE cluster_projection, cluster_projection_source"))
+    rebuild(app_session)
+
+    assert first == [("BBC", "https://bbc.test/a")]
+    assert _coverage(app_session, cluster.cluster_id) == first
+
+
+def test_rebuild_counts_readable_rows_not_clusters_visited(app_session: Session) -> None:
+    """An empty cluster is removed rather than projected, so the two numbers differ.
+
+    ``rebuild``'s docstring says only the first answers what an operator is asking. Nothing
+    asserted it, because no corpus in the suite contained a cluster with no members.
+    """
+    cluster, _ = _single_source_cluster(app_session)
+    make_cluster(app_session)  # no members, therefore not readable
+    app_session.flush()
+
+    assert app_session.scalar(sa.select(sa.func.count()).select_from(Cluster)) == 2
+    assert rebuild(app_session) == 1
+    assert _projection(app_session, cluster.cluster_id) is not None
+
+
 # --------------------------------------------------------------------------------------
 # AC2 — the projection is rebuildable.
 # --------------------------------------------------------------------------------------
@@ -538,6 +664,119 @@ def test_rebuild_removes_a_cluster_that_lost_its_members(app_session: Session) -
 
     assert _projection(app_session, cluster.cluster_id) is None
     assert _coverage(app_session, cluster.cluster_id) == []
+
+
+# --------------------------------------------------------------------------------------
+# Concurrency — being inside the transaction orders the writes, not the reads.
+# --------------------------------------------------------------------------------------
+
+
+def test_the_cluster_row_is_locked_rather_than_merely_read(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """Two workers must not project one cluster from snapshots taken before each other.
+
+    ⚠️ Running inside the stage's transaction orders the *writes* and does nothing for the
+    *reads*. Under READ COMMITTED both workers would read the write tables, then upsert, and
+    the loser would overwrite the winner with an answer the write tables never justified —
+    the observed shape being a summarized cluster whose projection says "not summarized
+    yet", forever, with every work row discharged and ``pipeline_state`` reporting done.
+    Two stage jobs on one scheduler reach this without any horizontal scaling; ``claim()``
+    hands out disjoint *work rows*, and two articles of one cluster are two work rows.
+
+    ⚠️ This calls the locking read directly, and that is the point. Calling
+    ``project_cluster`` here proves nothing: ``cluster_projection`` has a foreign key to
+    ``cluster``, and inserting a child row takes ``FOR KEY SHARE`` on the parent — so the
+    upsert blocks against the holder whether or not we ever took a lock of our own. The
+    first version of this test passed with ``FOR UPDATE`` deleted, measuring the foreign
+    key's incidental lock at write time instead of ours at read time.
+
+    ``lock_timeout`` turns "blocked" into a failure rather than a hung suite, and is set
+    LOCAL so the pooled connection does not carry it into the next test.
+    """
+    cluster, _ = _single_source_cluster(app_session)
+    cluster_id = cluster.cluster_id
+    app_session.commit()
+
+    holder = app_migrated.connect()
+    try:
+        holder.execute(
+            sa.text("SELECT cluster_id FROM cluster WHERE cluster_id = :id FOR UPDATE"),
+            {"id": cluster_id},
+        )
+        with Session(app_migrated, expire_on_commit=False) as other:
+            other.execute(sa.text("SET LOCAL lock_timeout = '1s'"))
+            with pytest.raises(OperationalError, match="lock timeout"):
+                _locked_cluster(other, cluster_id)
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def test_the_lock_is_taken_before_anything_else_is_read(app_session: Session) -> None:
+    """A lock acquired after a read protects nothing that has already been read.
+
+    The ordering *is* the correctness argument, so it is asserted rather than left to the
+    order the statements happen to sit in. Move the locking read below the member query and
+    the race is back with the lock still present and looking right.
+    """
+    cluster, _ = _single_source_cluster(app_session)
+    app_session.commit()
+
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        statements.append(" ".join(statement.split()))
+
+    engine = app_session.get_bind()
+    sa.event.listen(engine, "before_cursor_execute", record)
+    try:
+        project_cluster(app_session, cluster.cluster_id)
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", record)
+
+    reads = [text for text in statements if text.upper().startswith("SELECT")]
+    assert reads, "the projection read nothing, so this asserts nothing"
+    assert "FOR UPDATE" in reads[0], f"first read was not the lock: {reads[0]}"
+    assert "FROM cluster " in reads[0]
+
+
+def test_the_summary_is_read_from_the_database_not_the_session(app_session: Session) -> None:
+    """The summarize stage is trigger two's only caller, and it has just written this row.
+
+    ⚠️ A Core upsert — the natural way to write a row that may not exist — leaves any
+    instance already in the identity map stale, and ``session.get`` would then hand back the
+    pre-write text for the projection to publish. No error, no warning: the read model
+    quietly serves an older summary than the one the database holds.
+    """
+    cluster, _ = _single_source_cluster(app_session)
+    make_summary(app_session, cluster, text="draft one")
+    app_session.commit()
+
+    # Load it into the identity map the way a handler that inspected it first would.
+    stale = app_session.get(Summary, cluster.cluster_id)
+    assert stale is not None and stale.text == "draft one"
+
+    # ⚠️ The write has to be the shape the summarize stage will actually use: an upsert,
+    # because the row may not exist. A plain ``sa.update()`` on the mapped class is
+    # ORM-enabled and synchronizes the session, so the identity map is refreshed and this
+    # test then passes whatever the projection reads — the first version did exactly that
+    # and proved nothing.
+    app_session.execute(
+        pg_insert(Summary)
+        .values(cluster_id=cluster.cluster_id, text="final text")
+        .on_conflict_do_update(index_elements=[Summary.cluster_id], set_={"text": "final text"})
+    )
+    assert (
+        app_session.scalar(sa.select(Summary.text).where(Summary.cluster_id == cluster.cluster_id))
+        == "final text"
+    ), "the database did not take the write, so the rest of this test is vacuous"
+
+    project_cluster(app_session, cluster.cluster_id)
+
+    row = _projection(app_session, cluster.cluster_id)
+    assert row is not None
+    assert row.summary_text == "final text"
 
 
 # --------------------------------------------------------------------------------------
