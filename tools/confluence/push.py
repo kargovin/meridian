@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adf  # noqa: E402
@@ -39,9 +40,19 @@ def _curl(method, path, payload=None):
     email, token, site = _conf()
     cmd = ["curl", "-sS", "-u", "%s:%s" % (email, token), "-X", method,
            "-H", "Content-Type: application/json", site + path]
-    if payload is not None:
-        cmd += ["-d", json.dumps(payload, ensure_ascii=False)]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    # The payload goes via a temp file, not -d: a grown phase doc renders past
+    # ARG_MAX and execve fails with "Argument list too long" before any request.
+    tmp = None
+    try:
+        if payload is not None:
+            fd, tmp = tempfile.mkstemp(suffix=".json")
+            with os.fdopen(fd, "w") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+            cmd += ["-d", "@" + tmp]
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    finally:
+        if tmp:
+            os.unlink(tmp)
     return json.loads(out) if out.strip() else {}
 
 
