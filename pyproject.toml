@@ -27,6 +27,9 @@ dev = [
     "pytest>=8.2",
     "ruff>=0.6",
     "mypy>=1.11",
+    # The eval harness's tracking client (T8). "skinny" is the client without the server,
+    # the UI and the scientific stack behind them; the harness ships in neither deployable.
+    "mlflow-skinny>=2.16",
 ]
 
 [tool.uv.workspace]
@@ -72,7 +75,7 @@ no_implicit_optional = true
 
 # Neither ships stubs or a py.typed marker.
 [[tool.mypy.overrides]]
-module = ["feedparser.*", "apscheduler.*"]
+module = ["feedparser.*", "apscheduler.*", "mlflow.*"]
 ignore_missing_imports = true
 
 # A2's seams are "typed interfaces, no shared mutable state" — strict where that claim lives.

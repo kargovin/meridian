@@ -1,0 +1,235 @@
+"""The run harness: one config in, one recorded run out.
+
+Everything that differs between two runs — which set, which predictor, its parameters, the
+seed — is read from a config file. Nothing is edited to change what a run does, because a
+run tagged with a commit is making a claim: *this code produced this number*. If behaviour
+can change without the commit changing, the tag is false and two runs stop being
+comparable — silently, and only discovered much later when a result will not reproduce.
+``git_dirty`` covers the remaining gap, where the tree has uncommitted changes.
+
+Scoring and recording are separate functions on purpose: ``execute`` needs no tracking
+server, so the harness can be exercised end to end without one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import tomllib
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from meridian_contract.taxonomy import TAXONOMY_VERSION
+
+from eval.evalset import EvalSet, EvalSetError, load
+from eval.metrics import ClassificationMetrics, score_classification
+from eval.predictors import build
+
+
+@dataclass(frozen=True, slots=True)
+class RunConfig:
+    """The whole of what varies between two runs."""
+
+    eval_set: str
+    experiment: str
+    predictor: str
+    predictor_params: dict[str, Any]
+    jira: str | None
+    sets_root: Path | None
+
+    def as_mlflow_params(self) -> dict[str, str]:
+        """Every input to the run, as strings, so a results table can be filtered on any."""
+        params = {
+            "eval_set": self.eval_set,
+            "predictor": self.predictor,
+            "taxonomy_version": TAXONOMY_VERSION,
+        }
+        params.update({f"predictor.{k}": str(v) for k, v in sorted(self.predictor_params.items())})
+        return params
+
+
+@dataclass(frozen=True, slots=True)
+class RunResult:
+    eval_set: EvalSet
+    metrics: ClassificationMetrics
+
+
+def load_config(path: Path) -> RunConfig:
+    """Read a run config. Unknown keys are refused rather than ignored.
+
+    A misspelled key that is silently dropped means the run did something other than what
+    its config appears to say, and the config is the only record of what was intended.
+    """
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise EvalSetError(f"no such config: {path}") from None
+    except tomllib.TOMLDecodeError as exc:
+        raise EvalSetError(f"{path}: not valid TOML — {exc}") from exc
+
+    known = {"eval_set", "experiment", "predictor", "jira", "sets_root"}
+    unknown = raw.keys() - known
+    if unknown:
+        raise EvalSetError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}")
+
+    for required in ("eval_set", "experiment"):
+        if not isinstance(raw.get(required), str):
+            raise EvalSetError(f"{path}: '{required}' is required and must be a string")
+
+    predictor = raw.get("predictor")
+    if not isinstance(predictor, dict) or not isinstance(predictor.get("name"), str):
+        raise EvalSetError(f"{path}: [predictor] must declare a string 'name'")
+
+    sets_root = raw.get("sets_root")
+    return RunConfig(
+        eval_set=raw["eval_set"],
+        experiment=raw["experiment"],
+        predictor=predictor["name"],
+        predictor_params={k: v for k, v in predictor.items() if k != "name"},
+        jira=raw.get("jira"),
+        sets_root=Path(sets_root) if isinstance(sets_root, str) else None,
+    )
+
+
+def execute(config: RunConfig) -> RunResult:
+    """Load, predict, score. No tracking server, no side effects."""
+    eval_set = load(config.eval_set, root=config.sets_root)
+    predictor = build(config.predictor, **config.predictor_params)
+    predictions = predictor.predict(eval_set.rows)
+    return RunResult(eval_set=eval_set, metrics=score_classification(eval_set.rows, predictions))
+
+
+#: The checkout this harness was loaded from. Provenance is asked of *this* repository, not
+#: of whatever directory the command happened to be run in — otherwise a run started from
+#: anywhere else records "unknown" for both tags and looks entirely healthy doing it, which
+#: is the exact failure the tags exist to prevent.
+_REPO = Path(__file__).resolve().parent.parent
+
+
+def _git(*args: str) -> str | None:
+    """Run a git command against the harness's own checkout.
+
+    Returns ``None`` if git is missing or the directory is not a repository — which is
+    honest for an installed copy, and is why the tag says ``unknown`` rather than lying.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(_REPO), *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def provenance() -> dict[str, str]:
+    """Tags identifying the code that produced a run.
+
+    ``git_dirty`` is what keeps ``git_sha`` honest: a commit hash on a run made from a tree
+    with uncommitted edits names code that never existed anywhere.
+    """
+    sha = _git("rev-parse", "HEAD")
+    status = _git("status", "--porcelain")
+    return {
+        "git_sha": sha or "unknown",
+        "git_dirty": "unknown" if status is None else str(bool(status)).lower(),
+    }
+
+
+def log_to_mlflow(config: RunConfig, result: RunResult) -> None:
+    """Record the run. The only part of the harness that talks to a tracking server.
+
+    Uses whatever ``MLFLOW_TRACKING_URI`` names. ⚠ Leaving it unset does *not* give a working
+    local fallback: the filesystem backend is in maintenance mode and raises on use. For a
+    run with no server reachable, point it at a local database instead —
+    ``MLFLOW_TRACKING_URI=sqlite:///mlflow.db`` (measured against mlflow-skinny 3.x).
+    """
+    import mlflow
+
+    mlflow.set_experiment(config.experiment)
+    with mlflow.start_run():
+        tags = provenance()
+        if config.jira:
+            tags["jira"] = config.jira
+        mlflow.set_tags(tags)
+        mlflow.log_params(config.as_mlflow_params())
+        # The set is identified by its hash as well as its name: two sets can share a name
+        # across machines, but a number is only comparable against identical bytes.
+        mlflow.log_param("eval_set_sha256", result.eval_set.sha256)
+        mlflow.log_param("eval_set_rows", len(result.eval_set))
+        mlflow.log_metrics(result.metrics.as_mlflow_metrics())
+
+
+def format_report(result: RunResult) -> str:
+    """A human-readable summary. The harness reports; it does not assert."""
+    m = result.metrics
+    accuracy = (
+        "n/a (nothing assigned)"
+        if m.accuracy_on_assigned is None
+        else f"{m.accuracy_on_assigned:.3f}"
+    )
+    plural = "" if m.misassigned_other == 1 else "s"
+    misassigned = (
+        "n/a (no Other rows)"
+        if m.misassigned_other_rate is None
+        else f"{m.misassigned_other_rate:.3f} ({m.misassigned_other} row{plural})"
+    )
+    return "\n".join(
+        [
+            f"eval set              {result.eval_set.name}  ({len(result.eval_set)} rows, "
+            f"sha256 {result.eval_set.sha256[:12]})",
+            f"scorable rows         {m.scorable_rows}",
+            "",
+            f"coverage              {m.coverage:.3f}   ({m.assigned}/{m.scorable_rows})",
+            f"accuracy on assigned  {accuracy}   ({m.correct}/{m.assigned})",
+            "",
+            f"body coverage         {m.body_coverage:.3f}",
+            f"median text chars     {m.median_text_chars:.1f}",
+            f"misassigned Other     {misassigned}",
+        ]
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run one evaluation and record it.")
+    parser.add_argument("config", type=Path, help="path to a run config (TOML)")
+    parser.add_argument(
+        "--no-log", action="store_true", help="score and print without recording the run"
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        config = load_config(args.config)
+        result = execute(config)
+    except (EvalSetError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(format_report(result))
+    if args.no_log:
+        return 0
+
+    # The numbers are already printed, so the work is not lost — but an unrecorded run does
+    # not exist for comparison, which is the whole point of running one. Report the cause
+    # plainly and exit non-zero, rather than dying in a traceback under a healthy report.
+    try:
+        log_to_mlflow(config, result)
+    except Exception as exc:
+        print(f"error: scored, but could not record the run: {exc}", file=sys.stderr)
+        print(
+            "hint: set MLFLOW_TRACKING_URI to the tracking server, or to a local database "
+            "such as sqlite:///mlflow.db",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -38,3 +38,6 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local MLflow runs when MLFLOW_TRACKING_URI is unset.
+mlruns/

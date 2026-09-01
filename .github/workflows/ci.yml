@@ -47,7 +47,7 @@ jobs:
           uv run ruff format --check .
 
       - name: mypy
-        run: uv run mypy meridian platform libs tests
+        run: uv run mypy meridian platform libs eval tests
 
       # Includes the check that autogenerate finds no difference between the models and the
       # migrated database.

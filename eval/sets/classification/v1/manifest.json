@@ -1,0 +1,6 @@
+{
+  "set": "classification/v1",
+  "sha256": "5196c99c4b6288295bd736956592fd3f403531556072b087ef68eb3e9ff2ce59",
+  "row_count": 12,
+  "description": "Hand-built fixture, not a sample of production. Its job is to prove the harness computes correctly, against a population small enough to verify by hand: 8 rows whose gold label is a real topic, 2 genuine Other, 2 unsure. Two of the 8 carry a body. Labels are ours, not an annotator's, and no model decision may rest on them."
+}
