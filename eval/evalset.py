@@ -4,6 +4,14 @@ A set is a directory holding ``rows.jsonl`` and ``manifest.json``, addressed by 
 includes its version (``classification/v1``). It is never edited in place — a change
 produces a new version.
 
+⚠ **This module holds classification's row format, not a universal one.** A dedup row is a
+*pair* of articles, a clustering row is a whole day's articles, a faithfulness row is a
+summary and its sources — none of them is a ``ClassificationRow``, and none should be bent
+into one. What generalises to those tasks is the manifest-and-hash pattern around the rows:
+address by version, hash the bytes on disk, refuse on disagreement. When the second task
+arrives, factor that envelope out against two real examples rather than guessing now which
+parts of this shape were the general ones.
+
 Two properties do the work:
 
 * **The rows carry their own text.** A set storing article ids and resolving them against
@@ -49,7 +57,7 @@ class EvalSetError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
-class EvalRow:
+class ClassificationRow:
     """One labelled article.
 
     ``body`` is ``None`` rather than ``""`` when absent, so presence is a single unambiguous
@@ -97,14 +105,14 @@ class EvalSet:
     """A loaded set, verified against its manifest."""
 
     name: str
-    rows: tuple[EvalRow, ...]
+    rows: tuple[ClassificationRow, ...]
     sha256: str
 
     def __len__(self) -> int:
         return len(self.rows)
 
     @property
-    def scorable(self) -> tuple[EvalRow, ...]:
+    def scorable(self) -> tuple[ClassificationRow, ...]:
         """The rows whose gold label is a real topic."""
         return tuple(row for row in self.rows if row.gold_is_real_topic)
 
@@ -123,7 +131,7 @@ def _parse_gold(raw: object, *, where: str) -> GoldLabel:
         ) from None
 
 
-def _parse_row(line: str, *, where: str) -> EvalRow:
+def _parse_row(line: str, *, where: str) -> ClassificationRow:
     try:
         obj = json.loads(line)
     except json.JSONDecodeError as exc:
@@ -143,7 +151,7 @@ def _parse_row(line: str, *, where: str) -> EvalRow:
     if body is not None and not body.strip():
         body = None
 
-    return EvalRow(
+    return ClassificationRow(
         id=str(obj["id"]),
         title=str(obj["title"]),
         body=body,

@@ -9,7 +9,7 @@ import pytest
 
 from eval.evalset import DEFAULT_ROOT, EvalSetError, load
 from eval.metrics import score_classification
-from eval.predictors import Classifier, Oracle, SeededStub, build
+from eval.predictors import Oracle, SeededStub, TopicClassifier, build
 from eval.run import execute, format_report, load_config, main, provenance
 
 FIXTURE = "classification/v1"
@@ -38,8 +38,8 @@ def _smoke_config(tmp_path: Path) -> Path:
 def test_both_stubs_satisfy_the_seam() -> None:
     """The seam is a Protocol, not a Callable alias: ``Callable[..., X]`` switches off
     argument checking, so a renamed parameter would type-check clean and fail on first use."""
-    assert isinstance(Oracle(), Classifier)
-    assert isinstance(SeededStub(seed=1), Classifier)
+    assert isinstance(Oracle(), TopicClassifier)
+    assert isinstance(SeededStub(seed=1), TopicClassifier)
 
 
 def test_the_oracle_scores_a_perfect_pair() -> None:

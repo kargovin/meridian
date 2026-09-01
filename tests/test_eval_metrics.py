@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 from meridian_contract.taxonomy import Topic
 
-from eval.evalset import EvalRow, load
+from eval.evalset import ClassificationRow, load
 from eval.metrics import ClassificationMetrics, Prediction, Predictions, score_classification
 
 FIXTURE = "classification/v1"
@@ -83,8 +83,8 @@ def test_genuine_other_rows_are_outside_both_numbers() -> None:
     """
     rows = list(load(FIXTURE).rows)
     extra = [
-        EvalRow(id="fx-900", title="Sudoku No. 91", body=None, gold=Topic.OTHER),
-        EvalRow(id="fx-901", title="Today's weather", body=None, gold=Topic.OTHER),
+        ClassificationRow(id="fx-900", title="Sudoku No. 91", body=None, gold=Topic.OTHER),
+        ClassificationRow(id="fx-901", title="Today's weather", body=None, gold=Topic.OTHER),
     ]
     widened_script = {**SCRIPT, "fx-900": Topic.OTHER, "fx-901": Topic.OTHER}
 

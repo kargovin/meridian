@@ -17,7 +17,7 @@ from typing import Protocol, runtime_checkable
 
 from meridian_contract.taxonomy import Topic
 
-from eval.evalset import EvalRow
+from eval.evalset import ClassificationRow
 from eval.metrics import Prediction, Predictions
 
 #: Drawn from in stub predictions. ``Other`` is included: a predictor that can never abstain
@@ -26,10 +26,10 @@ _DRAWABLE: tuple[Topic, ...] = tuple(Topic)
 
 
 @runtime_checkable
-class Classifier(Protocol):
+class TopicClassifier(Protocol):
     """Anything the harness can score."""
 
-    def predict(self, rows: Sequence[EvalRow]) -> Predictions:
+    def predict(self, rows: Sequence[ClassificationRow]) -> Predictions:
         """Return one prediction per row, keyed by ``row.id``."""
         ...
 
@@ -49,7 +49,7 @@ class SeededStub:
     def __init__(self, seed: int) -> None:
         self.seed = seed
 
-    def predict(self, rows: Sequence[EvalRow]) -> Predictions:
+    def predict(self, rows: Sequence[ClassificationRow]) -> Predictions:
         out: dict[str, Prediction] = {}
         for row in rows:
             # A str seed is hashed with sha512, so this is stable across processes and
@@ -74,7 +74,7 @@ class Oracle:
     to return, and abstaining is the honest output.
     """
 
-    def predict(self, rows: Sequence[EvalRow]) -> Predictions:
+    def predict(self, rows: Sequence[ClassificationRow]) -> Predictions:
         return {
             row.id: Prediction(
                 topic=row.gold if isinstance(row.gold, Topic) else Topic.OTHER,
@@ -84,7 +84,7 @@ class Oracle:
         }
 
 
-def build(name: str, **params: object) -> Classifier:
+def build(name: str, **params: object) -> TopicClassifier:
     """Construct a predictor by name, as written in a run config.
 
     Raises ``ValueError`` on an unknown name or an unusable parameter, rather than falling

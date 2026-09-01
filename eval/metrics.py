@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 from meridian_contract.taxonomy import Topic
 
-from eval.evalset import EvalRow
+from eval.evalset import ClassificationRow
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +113,7 @@ class ClassificationMetrics:
 
 
 def score_classification(
-    rows: Sequence[EvalRow], predictions: Predictions
+    rows: Sequence[ClassificationRow], predictions: Predictions
 ) -> ClassificationMetrics:
     """Compute KR3's pair, plus the run-level text statistics and one diagnostic.
 
