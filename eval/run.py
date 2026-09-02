@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from meridian_contract.taxonomy import TAXONOMY_VERSION
 
@@ -165,6 +166,24 @@ def provenance() -> dict[str, str]:
 TRACKING_URI_ENV = "MLFLOW_TRACKING_URI"
 
 
+def without_credentials(uri: str) -> str:
+    """Strip any username and password from a tracking address.
+
+    The address is recorded as a run parameter so a reader can tell which server a number
+    came from. ⚠️ ``mlflow.get_tracking_uri()`` returns credentials embedded in the URL
+    verbatim, so logging it unfiltered writes the password into MLflow itself, in plain text,
+    where anyone who can read the experiment can read it. The same shape as ``str(engine.url)``
+    on a SQLAlchemy engine: a value that prints harmlessly in one place and leaks in another.
+
+    Addresses with no host part — ``sqlite:///mlflow.db`` and the like — pass through unchanged.
+    """
+    parts = urlsplit(uri)
+    if "@" not in parts.netloc:
+        return uri
+    # rsplit: a password may itself contain "@", and only the last one separates host.
+    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+
+
 def log_to_mlflow(config: RunConfig, result: RunResult) -> None:
     """Record the run. The only part of the harness that talks to a tracking server.
 
@@ -188,7 +207,16 @@ def log_to_mlflow(config: RunConfig, result: RunResult) -> None:
         # across machines, but a number is only comparable against identical bytes.
         mlflow.log_param("eval_set_sha256", result.eval_set.sha256)
         mlflow.log_param("eval_set_rows", len(result.eval_set))
-        mlflow.log_param("tracking_uri", mlflow.get_tracking_uri())
+        tracking_uri = mlflow.get_tracking_uri()
+        if without_credentials(tracking_uri) != tracking_uri:
+            # Said out loud rather than silently cleaned: the caller is passing a secret
+            # somewhere it does not belong, and the next tool they use may not strip it.
+            print(
+                "warning: credentials in MLFLOW_TRACKING_URI were kept out of the run record. "
+                "Pass MLFLOW_TRACKING_USERNAME and MLFLOW_TRACKING_PASSWORD instead.",
+                file=sys.stderr,
+            )
+        mlflow.log_param("tracking_uri", without_credentials(tracking_uri))
         mlflow.log_metrics(result.metrics.as_mlflow_metrics())
 
 

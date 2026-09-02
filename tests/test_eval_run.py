@@ -16,7 +16,15 @@ from eval import run as run_module
 from eval.evalset import DEFAULT_ROOT, EvalSetError, load
 from eval.metrics import score_classification
 from eval.predictors import Oracle, SeededStub, TopicClassifier, build
-from eval.run import execute, format_report, load_config, main, provenance
+from eval.run import (
+    execute,
+    format_report,
+    load_config,
+    log_to_mlflow,
+    main,
+    provenance,
+    without_credentials,
+)
 
 FIXTURE = "classification/v1"
 
@@ -477,6 +485,63 @@ def test_a_blank_tracking_uri_is_treated_as_unset(
 
     assert main([str(_smoke_config(tmp_path))]) == 1
     assert "MLFLOW_TRACKING_URI is not set" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("https://user:hunter2@mlflow.example.com", "https://mlflow.example.com"),
+        # A password may itself contain "@"; only the last one separates the host.
+        ("https://user:p@ss@mlflow.example.com", "https://mlflow.example.com"),
+        ("https://user@mlflow.example.com", "https://mlflow.example.com"),
+        ("https://mlflow.example.com", "https://mlflow.example.com"),
+        ("sqlite:///mlflow.db", "sqlite:///mlflow.db"),
+        # No host part, so the "@" is just a character in a path and must survive.
+        ("sqlite:////tmp/a@b/mlflow.db", "sqlite:////tmp/a@b/mlflow.db"),
+    ],
+)
+def test_credentials_are_stripped_from_a_tracking_address(given: str, expected: str) -> None:
+    assert without_credentials(given) == expected
+
+
+def test_credentials_in_the_address_never_reach_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """That the stripping is *used*, not merely correct.
+
+    A helper that does the right thing and is called by nothing looks identical to one that
+    works. The recorded parameter is the thing at risk, so the assertion is on what reached
+    ``log_param`` — with a stand-in for the tracking server, so no real one is needed.
+    """
+    import mlflow
+
+    secret = "https://user:hunter2@mlflow.example.com"
+    logged: dict[str, object] = {}
+
+    class _NullRun:
+        def __enter__(self) -> _NullRun:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            # Not bool: a truthy __exit__ swallows exceptions, and mypy refuses the
+            # ambiguity. This stand-in must never hide a failure in the code under test.
+            return None
+
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", secret)
+    monkeypatch.setattr(mlflow, "get_tracking_uri", lambda: secret)
+    monkeypatch.setattr(mlflow, "set_experiment", lambda *a, **k: None)
+    monkeypatch.setattr(mlflow, "start_run", lambda *a, **k: _NullRun())
+    monkeypatch.setattr(mlflow, "set_tags", lambda *a, **k: None)
+    monkeypatch.setattr(mlflow, "log_params", lambda *a, **k: None)
+    monkeypatch.setattr(mlflow, "log_metrics", lambda *a, **k: None)
+    monkeypatch.setattr(mlflow, "log_param", lambda key, value: logged.__setitem__(key, value))
+
+    config = load_config(_smoke_config(tmp_path))
+    log_to_mlflow(config, execute(config))
+
+    assert logged["tracking_uri"] == "https://mlflow.example.com"
+    assert "hunter2" not in str(logged), "the password reached the run record"
+    assert "credentials in MLFLOW_TRACKING_URI" in capsys.readouterr().err
 
 
 def test_a_tracking_failure_is_reported_rather_than_raised(
