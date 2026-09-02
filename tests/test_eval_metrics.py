@@ -242,6 +242,21 @@ def test_a_fallback_is_not_counted_as_an_assignment() -> None:
     assert baseline.fallback == 0
 
 
+def test_a_prediction_outside_the_taxonomy_is_refused() -> None:
+    """Gold labels are validated when a set is parsed; predictions were not, and the type
+    annotation enforces nothing at runtime.
+
+    The failure this prevents is quiet: a predictor returning "Sports" — the case a
+    HuggingFace id2label mapping commonly gives — scores coverage 1.0 and accuracy 0.0 with
+    no error, because a plain string is not the enum member it looks like.
+    """
+    with pytest.raises(ValueError, match="topic must be a Topic, got 'Sports'"):
+        Prediction(topic="Sports", confidence=0.9, fallback=False)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="topic must be a Topic, got 'politics'"):
+        Prediction(topic="politics", confidence=0.9, fallback=False)  # type: ignore[arg-type]
+
+
 def test_confidence_outside_the_unit_interval_is_refused() -> None:
     with pytest.raises(ValueError, match=r"confidence must be in \[0, 1\]"):
         Prediction(topic=Topic.WORLD, confidence=1.4, fallback=False)

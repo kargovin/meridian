@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
+import sys
+import textwrap
+from functools import partial
 from pathlib import Path
 
 import pytest
 
+from eval import run as run_module
 from eval.evalset import DEFAULT_ROOT, EvalSetError, load
 from eval.metrics import score_classification
 from eval.predictors import Oracle, SeededStub, TopicClassifier, build
@@ -111,7 +117,7 @@ def test_the_threshold_reaches_the_predictor_from_config(tmp_path: Path) -> None
     reporting the default while its params say otherwise."""
     path = _write_config(
         tmp_path / "run.toml",
-        f'eval_set = "{FIXTURE}"\nexperiment = "t"\n'
+        f'eval_set = "{FIXTURE}"\nexperiment = "t"\njira = "MER-27"\n'
         '[predictor]\nname = "seeded"\nseed = 7\nmin_confidence = 0.6\n',
     )
     config = load_config(path)
@@ -164,14 +170,58 @@ def test_an_unknown_config_key_is_refused(tmp_path: Path) -> None:
     its config appears to say — and the config is the only record of what was intended."""
     path = _write_config(
         tmp_path / "run.toml",
-        f'eval_set = "{FIXTURE}"\nexperiment = "t"\nseed = 7\n[predictor]\nname = "oracle"\n',
+        f'eval_set = "{FIXTURE}"\nexperiment = "t"\njira = "MER-27"\nseed = 7\n'
+        '[predictor]\nname = "oracle"\n',
     )
     with pytest.raises(EvalSetError, match="unknown key\\(s\\) seed"):
         load_config(path)
 
 
+def test_a_config_without_a_jira_key_is_refused(tmp_path: Path) -> None:
+    """A run nobody can attribute cannot be found again when its number is questioned, and
+    the tag is what groups the runs of one experiment into a cohort."""
+    path = _write_config(
+        tmp_path / "run.toml",
+        f'eval_set = "{FIXTURE}"\nexperiment = "t"\n[predictor]\nname = "oracle"\n',
+    )
+    with pytest.raises(EvalSetError, match="'jira' is required"):
+        load_config(path)
+
+
+def test_a_wrongly_typed_config_value_is_refused_not_dropped(tmp_path: Path) -> None:
+    """The unknown-key check catches a misspelled *name*; this catches a wrong *type*.
+
+    Dropped instead, ``sets_root = 42`` would fall through to the default and the run would
+    score a different corpus than the one its config names — the same failure the key check
+    exists to prevent, reached from the other side.
+    """
+    path = _write_config(
+        tmp_path / "run.toml",
+        f'eval_set = "{FIXTURE}"\nexperiment = "t"\njira = "MER-27"\nsets_root = 42\n'
+        '[predictor]\nname = "oracle"\n',
+    )
+    with pytest.raises(EvalSetError, match="'sets_root' must be a string path"):
+        load_config(path)
+
+
+def test_the_corpus_root_is_logged(tmp_path: Path) -> None:
+    """The set hash makes a different corpus *detectable*; this makes it *resolvable*.
+    Without it two rows differ by a hash nobody can trace back to a directory."""
+    root = tmp_path / "sets"
+    shutil.copytree(DEFAULT_ROOT, root)
+    path = _write_config(
+        tmp_path / "run.toml",
+        f'eval_set = "{FIXTURE}"\nexperiment = "t"\njira = "MER-27"\nsets_root = "{root}"\n'
+        '[predictor]\nname = "oracle"\n',
+    )
+    assert load_config(path).as_mlflow_params()["sets_root"] == str(root)
+    assert load_config(_smoke_config(tmp_path)).as_mlflow_params()["sets_root"] == "default"
+
+
 def test_a_config_without_a_predictor_is_refused(tmp_path: Path) -> None:
-    path = _write_config(tmp_path / "run.toml", f'eval_set = "{FIXTURE}"\nexperiment = "t"\n')
+    path = _write_config(
+        tmp_path / "run.toml", f'eval_set = "{FIXTURE}"\nexperiment = "t"\njira = "MER-27"\n'
+    )
     with pytest.raises(EvalSetError, match="must declare a string 'name'"):
         load_config(path)
 
@@ -180,10 +230,50 @@ def test_a_config_without_a_predictor_is_refused(tmp_path: Path) -> None:
 
 
 def test_two_runs_of_one_config_produce_identical_metrics(tmp_path: Path) -> None:
-    """AC1's property. If this can fail, a run's commit tag is not evidence of anything and
-    two runs stop being comparable — silently."""
+    """Within one process. Necessary, and on its own it does not reach the property — see
+    the cross-process test below."""
     config = load_config(_smoke_config(tmp_path))
     assert execute(config).metrics == execute(config).metrics
+
+
+_METRICS_PROBE = textwrap.dedent("""
+    import json, sys
+    from eval.run import execute, load_config
+    from pathlib import Path
+    m = execute(load_config(Path(sys.argv[1]))).metrics
+    print(json.dumps({"coverage": m.coverage, "accuracy": m.accuracy_on_assigned,
+                      "assigned": m.assigned, "correct": m.correct, "fallback": m.fallback}))
+""")
+
+
+def test_the_same_config_scores_the_same_in_a_fresh_interpreter(tmp_path: Path) -> None:
+    """The property the in-process test cannot see.
+
+    A predictor seeded from ``hash()`` is deterministic within one process and different in
+    the next, because string hashing is randomised per interpreter. Measured: swapping the
+    per-row seed for a ``hash()``-based one left every in-process test green while three
+    invocations of this config returned coverage 0.25, 0.5 and 0.5. Two runs of one config
+    are then not comparable and nothing says so.
+
+    Varying ``PYTHONHASHSEED`` explicitly rather than trusting two default-seeded runs to
+    differ — they usually would, but a test that fails one time in N is a test people learn
+    to re-run.
+    """
+    config_path = _smoke_config(tmp_path)
+
+    def score(hash_seed: str) -> str:
+        done = subprocess.run(
+            [sys.executable, "-c", _METRICS_PROBE, str(config_path)],
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, "PYTHONHASHSEED": hash_seed},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert done.returncode == 0, f"probe failed:\n{done.stderr}"
+        return done.stdout.strip()
+
+    assert score("0") == score("12345")
 
 
 def test_a_run_records_the_hash_of_what_it_scored(tmp_path: Path) -> None:
@@ -203,7 +293,7 @@ def test_a_corrupted_set_stops_the_run(tmp_path: Path) -> None:
 
     path = _write_config(
         tmp_path / "run.toml",
-        f'eval_set = "{FIXTURE}"\nexperiment = "t"\nsets_root = "{root}"\n'
+        f'eval_set = "{FIXTURE}"\nexperiment = "t"\njira = "MER-27"\nsets_root = "{root}"\n'
         '[predictor]\nname = "oracle"\n',
     )
     assert main([str(path), "--no-log"]) == 1
@@ -230,7 +320,8 @@ def test_the_report_says_not_applicable_rather_than_zero_accuracy(tmp_path: Path
     wrong, which is a different and untrue statement."""
     path = _write_config(
         tmp_path / "run.toml",
-        f'eval_set = "{FIXTURE}"\nexperiment = "t"\n[predictor]\nname = "seeded"\nseed = 7\n',
+        f'eval_set = "{FIXTURE}"\nexperiment = "t"\njira = "MER-27"\n'
+        '[predictor]\nname = "seeded"\nseed = 7\n',
     )
     config = load_config(path)
     result = execute(config)
@@ -263,13 +354,82 @@ def test_every_shipped_config_loads_and_runs() -> None:
 # --------------------------------------------------------------------------- provenance
 
 
+def _throwaway_repo(path: Path) -> str:
+    """A real git repository with one commit. Returns its HEAD sha."""
+    path.mkdir(parents=True, exist_ok=True)
+    run = partial(subprocess.run, cwd=path, check=True, capture_output=True, text=True)
+    run(["git", "init", "-q"])
+    run(["git", "config", "user.email", "t@example.invalid"])
+    run(["git", "config", "user.name", "test"])
+    (path / "tracked.txt").write_text("original\n")
+    run(["git", "add", "tracked.txt"])
+    run(["git", "commit", "-qm", "initial"])
+    return subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def test_provenance_carries_the_commit_and_whether_the_tree_was_clean() -> None:
-    """``git_dirty`` is what keeps ``git_sha`` honest: a commit hash on a run made from a
-    tree with uncommitted edits names code that never existed anywhere."""
     tags = provenance()
     assert set(tags) == {"git_sha", "git_dirty"}
     assert tags["git_dirty"] in {"true", "false", "unknown"}
     assert tags["git_sha"] != "unknown"
+
+
+def test_git_dirty_reports_a_clean_tree_as_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Against a real repository, not just a value from the allowed set.
+
+    Asserting only that the tag is one of three strings is satisfied by hardcoding it, by
+    inverting it, and by reading the wrong thing — measured: all three passed the whole
+    suite. The tag has to be checked against a tree whose state the test controls.
+    """
+    repo = tmp_path / "clean"
+    sha = _throwaway_repo(repo)
+    monkeypatch.setattr(run_module, "_REPO", repo)
+
+    assert provenance() == {"git_sha": sha, "git_dirty": "false"}
+
+
+def test_git_dirty_sees_an_edit_to_a_tracked_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure AC1 names: a commit hash on a run made from an edited tree.
+
+    Unstaged, so a check reading only the index would report clean here.
+    """
+    repo = tmp_path / "edited"
+    _throwaway_repo(repo)
+    (repo / "tracked.txt").write_text("changed\n")
+    monkeypatch.setattr(run_module, "_REPO", repo)
+
+    assert provenance()["git_dirty"] == "true"
+
+
+def test_git_dirty_sees_an_untracked_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Untracked counts. A new module the run imported but nobody committed is exactly the
+    code a commit hash would fail to name."""
+    repo = tmp_path / "untracked"
+    _throwaway_repo(repo)
+    (repo / "extra.py").write_text("x = 1\n")
+    monkeypatch.setattr(run_module, "_REPO", repo)
+
+    assert provenance()["git_dirty"] == "true"
+
+
+def test_provenance_is_unknown_outside_a_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Honest for an installed copy — and it must be ``unknown``, never a plausible-looking
+    default that a results table would read as a real answer."""
+    monkeypatch.setattr(run_module, "_REPO", tmp_path / "not-a-repo")
+    (tmp_path / "not-a-repo").mkdir()
+
+    assert provenance() == {"git_sha": "unknown", "git_dirty": "unknown"}
 
 
 def test_provenance_does_not_depend_on_the_working_directory(
@@ -283,6 +443,40 @@ def test_provenance_does_not_depend_on_the_working_directory(
     """
     monkeypatch.chdir(tmp_path)
     assert provenance()["git_sha"] != "unknown"
+
+
+def test_an_unset_tracking_uri_refuses_to_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unset, MLflow does not fail — it resolves to a local scratch database and reports
+    success, so a run that reached nothing looks exactly like one that reached the server.
+
+    Measured before this guard existed: running from a scratch directory with the variable
+    unset exited 0 and left an 872 KB mlflow.db behind. Run from the repository root, that
+    file is untracked and every later run then reports git_dirty=true.
+    """
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    assert main([str(_smoke_config(tmp_path))]) == 1
+    assert "MLFLOW_TRACKING_URI is not set" in capsys.readouterr().err
+    assert not list(tmp_path.glob("mlflow.db")), "a scratch backend was created anyway"
+
+
+def test_a_blank_tracking_uri_is_treated_as_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An exported-but-empty variable is the shape an unset one takes in a shell profile.
+
+    The message is asserted, not just the exit code: MLflow also fails on a blank URI, so a
+    test checking only for a non-zero exit passes with our guard deleted — it would be
+    measuring MLflow choking rather than the guard firing.
+    """
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "   ")
+    monkeypatch.chdir(tmp_path)
+
+    assert main([str(_smoke_config(tmp_path))]) == 1
+    assert "MLFLOW_TRACKING_URI is not set" in capsys.readouterr().err
 
 
 def test_a_tracking_failure_is_reported_rather_than_raised(

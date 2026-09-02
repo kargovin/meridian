@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
-from meridian_contract.taxonomy import Topic
+from meridian_contract.taxonomy import REAL_TOPICS, Topic
 
 #: An annotator could not place the article. Deliberately *not* a ``Topic`` member: it is
 #: something a human says, not something a classifier can emit, and a taxonomy that could
@@ -97,7 +97,10 @@ class ClassificationRow:
         The population both KR3 numbers are computed over. ``Other`` is excluded because it
         is not a topic anyone follows, and ``unsure`` because it is not an answer.
         """
-        return isinstance(self.gold, Topic) and self.gold is not Topic.OTHER
+        # The isinstance is load-bearing beyond the membership test: `gold` may hold the
+        # UNSURE sentinel, and a bare string equal to a topic's value would otherwise
+        # satisfy `in` against a StrEnum.
+        return isinstance(self.gold, Topic) and self.gold in REAL_TOPICS
 
 
 @dataclass(frozen=True, slots=True)

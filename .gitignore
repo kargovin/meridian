@@ -39,5 +39,8 @@ build/
 .DS_Store
 Thumbs.db
 
-# Local MLflow runs when MLFLOW_TRACKING_URI is unset.
+# A deliberate local MLflow backend (MLFLOW_TRACKING_URI=sqlite:///mlflow.db). The
+# harness refuses to run with the variable unset, so neither of these should appear
+# by accident — an untracked file here would make every run report git_dirty=true.
+mlflow.db
 mlruns/

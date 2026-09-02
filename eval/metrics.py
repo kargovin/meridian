@@ -31,7 +31,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from meridian_contract.taxonomy import Topic
+from meridian_contract.taxonomy import REAL_TOPICS, Topic
 
 from eval.evalset import ClassificationRow
 
@@ -57,6 +57,13 @@ class Prediction:
         # the two causes of non-assignment uncountable, which is the whole point of it.
         if self.fallback and self.topic is not Topic.OTHER:
             raise ValueError(f"a fallback must carry Other, got {self.topic.value}")
+        # Gold labels are validated when a set is parsed; predictions are not, and the
+        # annotation alone enforces nothing at runtime. The predictors after these stubs are
+        # adapters over model output, where a label arrives as a plain string — one whose
+        # case or spelling does not match scores as an assignment that is never correct.
+        if not isinstance(self.topic, Topic):
+            known = ", ".join(sorted(t.value for t in Topic))
+            raise ValueError(f"topic must be a Topic, got {self.topic!r}. Known: {known}")
 
     @property
     def is_assigned(self) -> bool:
@@ -67,7 +74,7 @@ class Prediction:
         a topic a reader browses, so KR3 counts them alike. ``fallback`` records *which*, so
         the two are separable afterwards without re-running the model.
         """
-        return self.topic is not Topic.OTHER
+        return self.topic in REAL_TOPICS
 
 
 #: Predictions are matched back to rows **by id**, never by position. The published classify

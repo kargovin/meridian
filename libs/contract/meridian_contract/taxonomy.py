@@ -41,6 +41,11 @@ class Topic(StrEnum):
 #: internal/wire boundary in either direction.
 TAXONOMY_VERSION = "v1"
 
-#: The topics that count as *assigned* for KR3 coverage. Derived, never hand-listed, so it
-#: cannot drift from ``Topic``.
+#: The topics that count as *assigned* for KR3 coverage — everything a reader can browse.
+#: Derived, never hand-listed, so it cannot drift from ``Topic``.
+#:
+#: ⚠ Membership alone is not a type check. ``Topic`` is a ``StrEnum``, so the bare string
+#: ``"sports"`` satisfies ``in`` here. Where the value may not be a ``Topic`` already — a
+#: gold label that can hold the unsure sentinel, a prediction arriving from a model adapter
+#: — test the type first and use this for the ``Other`` question only.
 REAL_TOPICS = frozenset(topic for topic in Topic if topic is not Topic.OTHER)

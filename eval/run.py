@@ -14,6 +14,7 @@ server, so the harness can be exercised end to end without one.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tomllib
@@ -37,7 +38,7 @@ class RunConfig:
     experiment: str
     predictor: str
     predictor_params: dict[str, Any]
-    jira: str | None
+    jira: str
     sets_root: Path | None
 
     def as_mlflow_params(self) -> dict[str, str]:
@@ -46,6 +47,10 @@ class RunConfig:
             "eval_set": self.eval_set,
             "predictor": self.predictor,
             "taxonomy_version": TAXONOMY_VERSION,
+            # A set name alone does not identify a corpus: the same name under a different
+            # root is different bytes. The hash makes that detectable; this makes it
+            # resolvable, by saying which tree the rows were read from.
+            "sets_root": str(self.sets_root) if self.sets_root is not None else "default",
         }
         params.update({f"predictor.{k}": str(v) for k, v in sorted(self.predictor_params.items())})
         return params
@@ -75,7 +80,9 @@ def load_config(path: Path) -> RunConfig:
     if unknown:
         raise EvalSetError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}")
 
-    for required in ("eval_set", "experiment"):
+    # ``jira`` is required: a run nobody can attribute cannot be found again when its number
+    # is questioned, and it is what groups the runs of one experiment into a cohort.
+    for required in ("eval_set", "experiment", "jira"):
         if not isinstance(raw.get(required), str):
             raise EvalSetError(f"{path}: '{required}' is required and must be a string")
 
@@ -83,14 +90,21 @@ def load_config(path: Path) -> RunConfig:
     if not isinstance(predictor, dict) or not isinstance(predictor.get("name"), str):
         raise EvalSetError(f"{path}: [predictor] must declare a string 'name'")
 
+    # Refused rather than dropped. The unknown-key check above catches a misspelled *name*;
+    # a key of the wrong *type* would otherwise fall through to the default and the run would
+    # score something other than what its config appears to say — which is the same failure,
+    # reached differently.
     sets_root = raw.get("sets_root")
+    if sets_root is not None and not isinstance(sets_root, str):
+        raise EvalSetError(f"{path}: 'sets_root' must be a string path")
+
     return RunConfig(
         eval_set=raw["eval_set"],
         experiment=raw["experiment"],
         predictor=predictor["name"],
         predictor_params={k: v for k, v in predictor.items() if k != "name"},
-        jira=raw.get("jira"),
-        sets_root=Path(sets_root) if isinstance(sets_root, str) else None,
+        jira=raw["jira"],
+        sets_root=Path(sets_root) if sets_root is not None else None,
     )
 
 
@@ -142,27 +156,39 @@ def provenance() -> dict[str, str]:
     }
 
 
+#: A run must name where it is being recorded. ⚠ Left unset, MLflow does *not* fail — it
+#: silently resolves to ``sqlite:///$CWD/mlflow.db`` and reports success, so a run that
+#: reached nothing but a scratch file in whatever directory it started from is
+#: indistinguishable from one that reached the shared server (measured, mlflow-skinny 3.15).
+#: Worse, run from the repository root that database is an untracked file, and every later
+#: run then tags itself ``git_dirty=true`` on an otherwise clean checkout.
+TRACKING_URI_ENV = "MLFLOW_TRACKING_URI"
+
+
 def log_to_mlflow(config: RunConfig, result: RunResult) -> None:
     """Record the run. The only part of the harness that talks to a tracking server.
 
-    Uses whatever ``MLFLOW_TRACKING_URI`` names. ⚠ Leaving it unset does *not* give a working
-    local fallback: the filesystem backend is in maintenance mode and raises on use. For a
-    run with no server reachable, point it at a local database instead —
-    ``MLFLOW_TRACKING_URI=sqlite:///mlflow.db`` (measured against mlflow-skinny 3.x).
+    Refuses to run unless ``MLFLOW_TRACKING_URI`` is set, for the reason above. A deliberate
+    local run is still available by saying so — ``MLFLOW_TRACKING_URI=sqlite:///mlflow.db``.
     """
     import mlflow
 
+    if not os.environ.get(TRACKING_URI_ENV, "").strip():
+        raise EvalSetError(
+            f"{TRACKING_URI_ENV} is not set. Unset, MLflow writes to a local scratch file "
+            "and reports success, which is indistinguishable from reaching the tracking "
+            "server. Name the server, or say sqlite:///mlflow.db to keep the run local."
+        )
+
     mlflow.set_experiment(config.experiment)
     with mlflow.start_run():
-        tags = provenance()
-        if config.jira:
-            tags["jira"] = config.jira
-        mlflow.set_tags(tags)
+        mlflow.set_tags({**provenance(), "jira": config.jira})
         mlflow.log_params(config.as_mlflow_params())
         # The set is identified by its hash as well as its name: two sets can share a name
         # across machines, but a number is only comparable against identical bytes.
         mlflow.log_param("eval_set_sha256", result.eval_set.sha256)
         mlflow.log_param("eval_set_rows", len(result.eval_set))
+        mlflow.log_param("tracking_uri", mlflow.get_tracking_uri())
         mlflow.log_metrics(result.metrics.as_mlflow_metrics())
 
 
