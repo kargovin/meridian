@@ -189,6 +189,12 @@ def format_report(result: RunResult) -> str:
             f"coverage              {m.coverage:.3f}   ({m.assigned}/{m.scorable_rows})",
             f"accuracy on assigned  {accuracy}   ({m.correct}/{m.assigned})",
             "",
+            # The shortfall behind coverage, split by cause: uncertainty is answered by a
+            # better model or a moved threshold, confident-but-wrong Other by the taxonomy
+            # or the labels. One number cannot tell you which you are looking at.
+            f"not assigned          {m.fallback} below threshold, {m.confident_other} judged Other",
+            f"fallback rate         {m.fallback_rate:.3f}",
+            "",
             f"body coverage         {m.body_coverage:.3f}",
             f"median text chars     {m.median_text_chars:.1f}",
             f"misassigned Other     {misassigned}",

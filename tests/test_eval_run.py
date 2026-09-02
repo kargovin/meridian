@@ -74,6 +74,58 @@ def test_a_prediction_depends_on_the_article_alone_not_on_row_order() -> None:
     assert all(subset[row.id] == full[row.id] for row in rows[3:])
 
 
+def test_the_threshold_changes_what_is_reported_and_not_what_is_drawn() -> None:
+    """The property a threshold sweep needs.
+
+    Raising the bar must only reclassify rows as fallbacks — it must not change the topic or
+    the confidence the model produced. If the draw moved with the bar, two runs differing
+    only in the threshold would not be comparable row by row, and a sweep would be measuring
+    two things at once.
+    """
+    rows = load(FIXTURE).rows
+    open_bar = SeededStub(seed=7, min_confidence=0.0).predict(rows)
+    high_bar = SeededStub(seed=7, min_confidence=0.6).predict(rows)
+
+    assert any(p.fallback for p in high_bar.values()), "bar too low to punt on anything"
+    assert not any(p.fallback for p in open_bar.values())
+    for row in rows:
+        assert high_bar[row.id].confidence == open_bar[row.id].confidence
+        if not high_bar[row.id].fallback:
+            assert high_bar[row.id].topic == open_bar[row.id].topic
+
+
+def test_a_higher_bar_never_raises_coverage() -> None:
+    """Punting can only remove assignments. Coverage rising with the threshold would mean
+    the fallback path was assigning topics, which is the one thing it must not do."""
+    rows = load(FIXTURE).rows
+    scores = [
+        score_classification(rows, SeededStub(seed=7, min_confidence=bar).predict(rows)).coverage
+        for bar in (0.0, 0.4, 0.7, 1.0)
+    ]
+    assert scores == sorted(scores, reverse=True)
+    assert scores[-1] == 0.0
+
+
+def test_the_threshold_reaches_the_predictor_from_config(tmp_path: Path) -> None:
+    """A parameter accepted by the config and dropped on the floor would leave every run
+    reporting the default while its params say otherwise."""
+    path = _write_config(
+        tmp_path / "run.toml",
+        f'eval_set = "{FIXTURE}"\nexperiment = "t"\n'
+        '[predictor]\nname = "seeded"\nseed = 7\nmin_confidence = 0.6\n',
+    )
+    config = load_config(path)
+    assert config.as_mlflow_params()["predictor.min_confidence"] == "0.6"
+    assert execute(config).metrics.fallback > 0
+
+
+def test_a_misspelled_predictor_parameter_is_refused() -> None:
+    """Silently ignored, it would leave the run scoring at a threshold nobody chose while
+    its logged params name one that was never applied."""
+    with pytest.raises(ValueError, match="unknown parameter"):
+        build("seeded", seed=7, min_confidence_=0.6)
+
+
 def test_an_unknown_predictor_is_refused_rather_than_defaulted() -> None:
     """A run that silently scored something other than what its config names is a row in a
     results table that cannot be trusted."""
@@ -188,6 +240,7 @@ def test_the_report_says_not_applicable_rather_than_zero_accuracy(tmp_path: Path
         scorable_rows=8,
         assigned=0,
         correct=0,
+        fallback=0,
         body_coverage=0.25,
         median_text_chars=61.5,
         misassigned_other=0,

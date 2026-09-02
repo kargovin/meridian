@@ -47,18 +47,25 @@ class Prediction:
 
     topic: Topic
     confidence: float
+    fallback: bool
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError(f"confidence must be in [0, 1], got {self.confidence}")
+        # A fallback *is* the fall back to Other (FR-C2), so the pair has one legal shape.
+        # Left unchecked, a predictor reporting `fallback` beside a real topic would make
+        # the two causes of non-assignment uncountable, which is the whole point of it.
+        if self.fallback and self.topic is not Topic.OTHER:
+            raise ValueError(f"a fallback must carry Other, got {self.topic.value}")
 
     @property
     def is_assigned(self) -> bool:
         """Whether this counts as placing the article in a topic.
 
         ``Other`` is both the genuine catch-all and the low-confidence fallback (FR-C2).
-        The distinction is invisible to a reader — under either, the article does not appear
-        in a topic they browse — so it is not drawn here.
+        The distinction does not belong here — under either, the article does not appear in
+        a topic a reader browses, so KR3 counts them alike. ``fallback`` records *which*, so
+        the two are separable afterwards without re-running the model.
         """
         return self.topic is not Topic.OTHER
 
@@ -84,10 +91,26 @@ class ClassificationMetrics:
     scorable_rows: int
     assigned: int
     correct: int
+    #: Non-assignment has two causes and they are not the same problem. ``fallback`` counts
+    #: the rows the model punted on because it was not confident enough; the rest of the
+    #: shortfall is rows it positively judged to be Other. Uncertainty is fixed by a better
+    #: model or a moved threshold; confident-but-wrong Other is a taxonomy or label problem.
+    #: assigned + fallback + confident_other == scorable_rows.
+    fallback: int
     body_coverage: float
     median_text_chars: float
     misassigned_other: int
     misassigned_other_rate: float | None
+
+    @property
+    def fallback_rate(self) -> float:
+        """Share of the scored population the model declined to place through uncertainty."""
+        return self.fallback / self.scorable_rows
+
+    @property
+    def confident_other(self) -> int:
+        """Rows positively judged Other, as opposed to punted on."""
+        return self.scorable_rows - self.assigned - self.fallback
 
     def as_mlflow_metrics(self) -> dict[str, float]:
         """Flatten for logging. Undefined values are omitted rather than sent as zero.
@@ -101,6 +124,9 @@ class ClassificationMetrics:
             "scorable_rows": float(self.scorable_rows),
             "assigned": float(self.assigned),
             "correct": float(self.correct),
+            "fallback": float(self.fallback),
+            "fallback_rate": self.fallback_rate,
+            "confident_other": float(self.confident_other),
             "body_coverage": self.body_coverage,
             "median_text_chars": self.median_text_chars,
             "misassigned_other": float(self.misassigned_other),
@@ -136,6 +162,7 @@ def score_classification(
 
     assigned = [row for row in scorable if predictions[row.id].is_assigned]
     correct = [row for row in assigned if predictions[row.id].topic == row.gold]
+    fallback = [row for row in scorable if predictions[row.id].fallback]
 
     lengths = [len(row.text) for row in scorable]
     with_body = sum(1 for row in scorable if row.has_body)
@@ -152,6 +179,7 @@ def score_classification(
         scorable_rows=len(scorable),
         assigned=len(assigned),
         correct=len(correct),
+        fallback=len(fallback),
         body_coverage=with_body / len(scorable),
         median_text_chars=float(statistics.median(lengths)),
         misassigned_other=len(misassigned),

@@ -44,10 +44,17 @@ class SeededStub:
     stream consumed in row order, so a prediction depends on the article alone. Reordering a
     set — or scoring a subset of it — then leaves every other prediction unchanged, which is
     what makes a difference between two runs attributable to the thing that changed.
+
+    ``min_confidence`` gives it the shape a real classifier has (FR-C2): below the bar it
+    falls back to ``Other`` and says so, rather than answering anyway. At the default of 0.0
+    no threshold applies and every ``Other`` it emits is a genuine draw.
     """
 
-    def __init__(self, seed: int) -> None:
+    def __init__(self, seed: int, min_confidence: float = 0.0) -> None:
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError(f"min_confidence must be in [0, 1], got {min_confidence}")
         self.seed = seed
+        self.min_confidence = min_confidence
 
     def predict(self, rows: Sequence[ClassificationRow]) -> Predictions:
         out: dict[str, Prediction] = {}
@@ -55,9 +62,16 @@ class SeededStub:
             # A str seed is hashed with sha512, so this is stable across processes and
             # unaffected by PYTHONHASHSEED — unlike anything built on hash().
             rng = random.Random(f"{self.seed}:{row.id}")
+            topic = rng.choice(_DRAWABLE)
+            confidence = round(rng.uniform(0.3, 1.0), 4)
+            # Both draws happen either way, so the threshold changes what is *reported* and
+            # never what is drawn: two runs differing only in the bar stay comparable row by
+            # row, which is the property a threshold sweep needs.
+            punted = confidence < self.min_confidence
             out[row.id] = Prediction(
-                topic=rng.choice(_DRAWABLE),
-                confidence=round(rng.uniform(0.3, 1.0), 4),
+                topic=Topic.OTHER if punted else topic,
+                confidence=confidence,
+                fallback=punted,
             )
         return out
 
@@ -79,6 +93,7 @@ class Oracle:
             row.id: Prediction(
                 topic=row.gold if isinstance(row.gold, Topic) else Topic.OTHER,
                 confidence=1.0,
+                fallback=False,
             )
             for row in rows
         }
@@ -95,7 +110,13 @@ def build(name: str, **params: object) -> TopicClassifier:
         seed = params.get("seed")
         if not isinstance(seed, int) or isinstance(seed, bool):
             raise ValueError("predictor 'seeded' requires an integer 'seed'")
-        return SeededStub(seed=seed)
+        bar = params.get("min_confidence", 0.0)
+        if not isinstance(bar, int | float) or isinstance(bar, bool):
+            raise ValueError("predictor 'seeded' takes a numeric 'min_confidence'")
+        unknown = params.keys() - {"seed", "min_confidence"}
+        if unknown:
+            raise ValueError(f"predictor 'seeded' got unknown parameter(s) {sorted(unknown)}")
+        return SeededStub(seed=seed, min_confidence=float(bar))
     if name == "oracle":
         if params:
             raise ValueError(f"predictor 'oracle' takes no parameters, got {sorted(params)}")

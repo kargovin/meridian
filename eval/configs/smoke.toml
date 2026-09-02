@@ -8,3 +8,5 @@ jira = "MER-27"
 [predictor]
 name = "seeded"
 seed = 2
+# Exercises the FR-C2 fallback path: below this the stub punts to Other and says so.
+min_confidence = 0.6

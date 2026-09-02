@@ -39,7 +39,12 @@ SCRIPT: dict[str, Topic] = {
 
 
 def _predictions(script: dict[str, Topic]) -> Predictions:
-    return {row_id: Prediction(topic=topic, confidence=0.9) for row_id, topic in script.items()}
+    # A scripted predictor applies no confidence threshold, so nothing it emits is a
+    # fallback: every Other in SCRIPT is a positive judgement.
+    return {
+        row_id: Prediction(topic=topic, confidence=0.9, fallback=False)
+        for row_id, topic in script.items()
+    }
 
 
 @pytest.fixture
@@ -183,6 +188,60 @@ def test_accuracy_is_none_rather_than_zero_when_nothing_was_assigned() -> None:
     assert "accuracy_on_assigned" not in scored.as_mlflow_metrics()
 
 
+def test_a_fallback_must_carry_other() -> None:
+    """A fallback *is* the fall back to Other (FR-C2), so the pair has one legal shape.
+
+    Unchecked, a predictor reporting a fallback beside a real topic would be counted as both
+    assigned and punted, and the two causes of non-assignment would stop adding up.
+    """
+    with pytest.raises(ValueError, match="a fallback must carry Other, got sports"):
+        Prediction(topic=Topic.SPORTS, confidence=0.2, fallback=True)
+
+
+def test_non_assignment_splits_into_uncertainty_and_judgement() -> None:
+    """The reason the field exists.
+
+    Two runs can report the same coverage for opposite reasons: one model unsure of
+    everything, another confidently filing everything as Other. Coverage alone cannot tell
+    them apart, and they need completely different fixes.
+    """
+    rows = load(FIXTURE).rows
+    predictions = {
+        **_predictions(SCRIPT),
+        # fx-007 punted on, fx-008 positively judged Other. Both cost coverage; only one is
+        # a confidence problem.
+        "fx-007": Prediction(topic=Topic.OTHER, confidence=0.2, fallback=True),
+        # fx-009's gold label is Other, so it is outside the scored population entirely.
+        # Punting on it must not move the count — without a fallback on a non-scorable row
+        # the test cannot tell "count over the scored rows" from "count over the whole set",
+        # and a corpus that cannot produce the failing input falsifies nothing.
+        "fx-009": Prediction(topic=Topic.OTHER, confidence=0.15, fallback=True),
+    }
+    scored = score_classification(rows, predictions)
+
+    assert scored.assigned == 6
+    assert scored.fallback == 1
+    assert scored.confident_other == 1
+    assert scored.fallback_rate == pytest.approx(1 / 8)
+
+
+def test_a_fallback_is_not_counted_as_an_assignment() -> None:
+    """It still costs coverage — the reader does not find the article under a topic either
+    way. Recording *why* must not change *whether*."""
+    rows = load(FIXTURE).rows
+    baseline = score_classification(rows, _predictions(SCRIPT))
+    punted = score_classification(
+        rows,
+        {**_predictions(SCRIPT), "fx-008": Prediction(Topic.OTHER, 0.1, fallback=True)},
+    )
+    # fx-008 was already an abstention in SCRIPT; relabelling its cause moves the split and
+    # leaves KR3 untouched.
+    assert punted.coverage == baseline.coverage
+    assert punted.accuracy_on_assigned == baseline.accuracy_on_assigned
+    assert punted.fallback == 1
+    assert baseline.fallback == 0
+
+
 def test_confidence_outside_the_unit_interval_is_refused() -> None:
     with pytest.raises(ValueError, match=r"confidence must be in \[0, 1\]"):
-        Prediction(topic=Topic.WORLD, confidence=1.4)
+        Prediction(topic=Topic.WORLD, confidence=1.4, fallback=False)
