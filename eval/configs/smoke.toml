@@ -1,0 +1,12 @@
+# Exercises the harness end to end against the hand-built fixture. It measures nothing
+# about any model: the predictor is deterministic nonsense, and the fixture's labels are
+# ours rather than an annotator's.
+eval_set = "classification/v1"
+experiment = "meridian-classification"
+jira = "MER-27"
+
+[predictor]
+name = "seeded"
+seed = 2
+# Exercises the FR-C2 fallback path: below this the stub punts to Other and says so.
+min_confidence = 0.6

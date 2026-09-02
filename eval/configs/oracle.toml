@@ -1,0 +1,8 @@
+# The ceiling. If this does not score a perfect coverage and accuracy, the fault is in the
+# measurement rather than in anything being measured.
+eval_set = "classification/v1"
+experiment = "meridian-classification"
+jira = "MER-27"
+
+[predictor]
+name = "oracle"
