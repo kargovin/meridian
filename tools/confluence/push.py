@@ -2,12 +2,22 @@
 
     python3 tools/confluence/push.py docs/phase-3-sprint-plan.md            # dry run
     python3 tools/confluence/push.py docs/phase-3-sprint-plan.md --publish
+    python3 tools/confluence/push.py docs/phase-3-sprint-plan.md --publish --force
 
 Frontmatter drives the target:
     page_id           existing page to update (omit to create)
+    page_version      the page version this working copy was last in step with
     parent_id         parent when creating
     title             page title
     version_message   Confluence version comment
+
+`page_version` is written back after every publish and checked before the next
+one. Confluence is the source of truth and these files are working copies, so a
+page that moved underneath us — most often a structural ADF patch, which is how
+an already-published page normally gets amended — means this copy is behind and
+pushing it would silently delete whatever the page gained. The publish refuses;
+`--force` overrides once you know what you are overwriting. Use check.py to see
+the difference first.
 
 Credentials come from ~/.config/atlassian/{token,env}. The page body never
 passes through the model's context in either direction.
@@ -56,6 +66,28 @@ def _curl(method, path, payload=None):
     return json.loads(out) if out.strip() else {}
 
 
+def stamp(src_path, key, value):
+    """Set a frontmatter key in place, inserting it if absent.
+
+    Only the frontmatter block is touched: the scan stops at its closing ``---``,
+    so a body line that happens to start with the key is left alone.
+    """
+    src = open(src_path).read()
+    assert src.startswith("---\n"), "no frontmatter in %s" % src_path
+    head, sep, body = src[4:].partition("\n---\n")
+    assert sep, "unterminated frontmatter in %s" % src_path
+    out, seen = [], False
+    for line in head.split("\n"):
+        if line.split(":", 1)[0].strip() == key:
+            out.append("%s: %s" % (key, value))
+            seen = True
+        else:
+            out.append(line)
+    if not seen:
+        out.insert(1 if out else 0, "%s: %s" % (key, value))
+    open(src_path, "w").write("---\n" + "\n".join(out) + "\n---\n" + body)
+
+
 def fetch(page_id):
     return _curl("GET", "/wiki/api/v2/pages/%s?body-format=atlas_doc_format" % page_id)
 
@@ -79,7 +111,25 @@ def main():
     payload_body = {"representation": "atlas_doc_format", "value": body}
     if page_id:
         live = fetch(page_id)
-        nxt = live["version"]["number"] + 1
+        seen = meta.get("page_version")
+        now = live["version"]["number"]
+        if seen is None:
+            print("note     : no page_version recorded — stamping v%d, not checked"
+                  % now)
+        elif int(seen) != now:
+            print("\nREFUSED  : page %s is at v%d; this working copy was last in "
+                  "step with v%s." % (page_id, now, seen))
+            print("           The page moved without this file — most likely a "
+                   "structural patch. Publishing now would delete whatever it "
+                   "gained.")
+            print("           Look first:  python3 tools/confluence/check.py %s"
+                  % src_path)
+            print("           Override:    add --force once you know what you are "
+                  "overwriting.")
+            if "--force" not in sys.argv:
+                sys.exit(1)
+            print("           --force given; overwriting v%d." % now)
+        nxt = now + 1
         res = _curl("PUT", "/wiki/api/v2/pages/%s" % page_id, {
             "id": page_id, "status": "current",
             "title": meta.get("title", live["title"]),
@@ -99,9 +149,7 @@ def main():
 
     if not page_id:
         # Without this the next --publish creates a SECOND page instead of updating.
-        src = open(src_path).read()
-        assert src.startswith("---\n"), "no frontmatter to write page_id into"
-        open(src_path, "w").write("---\npage_id: %s\n" % pid + src[4:])
+        stamp(src_path, "page_id", pid)
         print("page_id  : %s written back to %s" % (pid, src_path))
 
     back = fetch(pid)
@@ -110,8 +158,14 @@ def main():
     drift = {k: (sent.get(k), got.get(k))
              for k in set(sent) | set(got) if sent.get(k) != got.get(k)}
 
-    print("\npage     : %s v%s" % (pid, back["version"]["number"]))
+    live_version = back["version"]["number"]
+    # Recorded last, so a failed verify still leaves the file pointing at what is
+    # actually on the page rather than at a version that never existed.
+    stamp(src_path, "page_version", live_version)
+
+    print("\npage     : %s v%s" % (pid, live_version))
     print("verify   : %s" % ("census matches" if not drift else "DRIFT %s" % drift))
+    print("stamped  : page_version %s -> %s" % (live_version, src_path))
 
 
 if __name__ == "__main__":

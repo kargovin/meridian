@@ -19,11 +19,33 @@ That last row is the real win. Revisions stop costing a full re-emission.
 ```sh
 python3 tools/confluence/push.py docs/phase-3-sprint-plan.md            # dry run: census + size
 python3 tools/confluence/push.py docs/phase-3-sprint-plan.md --publish  # write + verify
+python3 tools/confluence/check.py                                       # all docs vs live pages
+python3 tools/confluence/check.py docs/phase-3-sprint-plan.md --verbose  # one, with the diff
 ```
 
 Frontmatter picks the target: `page_id` updates, `parent_id` creates. After a
 write, push re-fetches and diffs the node-type census against what was sent —
 a mismatch means Confluence rewrote something and needs a look.
+
+## Confluence is the source of truth
+
+These `.md` files are working copies. The page is what counts, and an
+already-published page is often amended by a **structural ADF patch** that never
+touches the local Markdown. The copy then falls behind silently: it still
+renders, still pushes, and the push would delete whatever the page gained.
+
+`check.py` compares each working copy against its live page — flattened text
+plus the node census, **status-lozenge text included**, so a stale revision
+badge is caught. It deliberately does not compare raw ADF: Confluence assigns
+its own `localId`s on write, so byte equality is always false.
+
+`push.py` stamps **`page_version`** into the frontmatter after every publish and
+checks it before the next one. If the page moved underneath the working copy the
+publish is **refused** (exit 1, nothing written) with a pointer at `check.py`;
+`--force` overrides once you know what you would overwrite.
+
+⚠️ A working copy carrying a real `page_id` is live ammunition. Copying it
+elsewhere does not make it safe — `--publish` still writes to the real page.
 
 ⚠️ **Quote any frontmatter value containing `: `** — most of our titles do
 (`title: "Phase 3 — Delivery Plan: epic breakdown…"`). `parse()` splits on the
