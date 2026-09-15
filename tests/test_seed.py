@@ -150,10 +150,182 @@ def test_a_bad_enum_inside_a_feed_names_the_feed(app_session: Session) -> None:
 
 
 def test_a_missing_field_names_the_entry() -> None:
+    entry = {
+        "home_url": "https://times.example",
+        "permitted_to_ingest": True,
+        "determination": {"read_on": "2026-01-01", "basis": "b", "sources": ["https://x.test"]},
+    }
     with pytest.raises(ValueError, match=r"entry 0.*name"):
-        seeder.parse([{"home_url": "https://times.example"}])
+        seeder.parse([entry])
 
 
 def test_a_roster_must_be_a_list() -> None:
     with pytest.raises(ValueError, match="JSON array"):
         seeder.parse({"name": "Example Times"})
+
+
+# --- the v1 roster ---------------------------------------------------------------------------
+
+V1 = Path("seeds/v1.json")
+
+# Named here, not derived from the file: the file is what is under test. A publisher moving
+# between these sets is a rights determination changing, and that should fail a test until
+# someone updates both.
+V1_BODY_TEXT = {
+    "Global Voices",
+    "Inter Press Service",
+    "Waging Nonviolence",
+    "Africa Is a Country",
+    "openDemocracy",
+    "European Commission",
+    "World Health Organization",
+    "NASA",
+    "European Southern Observatory",
+}
+V1_HEADLINE_ONLY = {
+    "NPR",
+    "Sky News",
+    "CBC News",
+    "The Conversation",
+    "ProPublica",
+    "Common Dreams",
+    "KFF Health News",
+}
+V1_REFUSED = {"BBC", "The Guardian", "Associated Press", "Al Jazeera", "Reuters", "Deutsche Welle"}
+
+
+def test_the_v1_roster_seeds_to_exactly_the_intended_poll_set(app_session: Session) -> None:
+    """The file can read correctly and still poll a forbidden publisher; only the poll set says.
+
+    ``feeds.pollable()`` is the query discovery runs, so its answer is what gets polled — not
+    what the file appears to say. A refused publisher must be *present* (the determination
+    survives) and *absent from the poll set* (it is never touched).
+    """
+    entries = seeder.parse(json.loads(V1.read_text()))
+    inserted, skipped = seeder.seed(app_session, entries)
+    assert skipped == []
+    assert set(inserted) == V1_BODY_TEXT | V1_HEADLINE_ONLY | V1_REFUSED
+
+    polled_publishers = {source.name for _feed, source in feeds.pollable(app_session)}
+    assert polled_publishers == V1_BODY_TEXT | V1_HEADLINE_ONLY
+    assert polled_publishers.isdisjoint(V1_REFUSED)
+    assert {s.name for s in sources.enabled(app_session)} == V1_BODY_TEXT | V1_HEADLINE_ONLY
+
+    # Present, not deleted: the roster can say "we looked, and the answer was no".
+    by_name = {s.name: s for s in sources.list_all(app_session)}
+    assert set(by_name) >= V1_REFUSED
+    assert all(by_name[n].permitted_to_ingest is False for n in V1_REFUSED)
+    assert all(by_name[n].rights_level == RightsLevel.BODY_TEXT for n in V1_BODY_TEXT)
+    assert all(by_name[n].rights_level == RightsLevel.HEADLINE_ONLY for n in V1_HEADLINE_ONLY)
+
+
+def test_a_headline_only_publisher_never_has_a_full_feed_tier() -> None:
+    """A feed that ships full text is not a licence to store it.
+
+    ``1_full_feed`` writes the body from the feed at discovery. For a publisher whose terms
+    forbid using the body, that stores what may not be held — so the tier must be extraction
+    even where the feed carries the text, and the rights gate then never asks for it.
+    """
+    for entry in seeder.parse(json.loads(V1.read_text())):
+        if entry.rights_level is RightsLevel.HEADLINE_ONLY:
+            tiers = {f.acquisition_tier for f in entry.feeds}
+            assert AcquisitionTier.FULL_FEED not in tiers, entry.name
+
+
+def test_every_v1_publisher_states_permitted_to_ingest_explicitly() -> None:
+    """The key, not the value: an omitted key and a considered "yes" are the same bytes."""
+    for index, item in enumerate(json.loads(V1.read_text())):
+        assert "permitted_to_ingest" in item, f"entry {index} ({item.get('name')})"
+        assert isinstance(item["permitted_to_ingest"], bool)
+
+
+# --- what the file must say -------------------------------------------------------------------
+
+
+def _publisher(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "name": "Example Times",
+        "home_url": "https://times.example",
+        "permitted_to_ingest": True,
+        "rights_level": "headline_only",
+        "jurisdiction": "GB",
+        "rate_limit_per_min": 5,
+        "determination": {
+            "read_on": "2026-09-04",
+            "basis": "fictional",
+            "sources": ["https://times.example/terms"],
+        },
+    }
+    return {**base, **overrides}
+
+
+def test_permitted_to_ingest_is_required_not_defaulted() -> None:
+    entry = _publisher()
+    del entry["permitted_to_ingest"]
+
+    with pytest.raises(ValueError, match=r"entry 0 is missing 'permitted_to_ingest'"):
+        seeder.parse([entry])
+
+
+def test_a_misspelled_key_is_an_error_not_a_silent_default() -> None:
+    """The failure this guards against: a typo parses clean and the publisher is polled.
+
+    Before this check, ``permited_to_ingest: false`` was ignored and the entry came out with
+    ``permitted_to_ingest == True`` — the file recording a refusal that the registry never saw.
+    """
+    entry = _publisher()
+    del entry["permitted_to_ingest"]
+    entry["permited_to_ingest"] = False
+
+    with pytest.raises(ValueError, match=r"unknown key.*permited_to_ingest"):
+        seeder.parse([entry])
+
+
+def test_an_unknown_key_on_a_feed_names_the_feed() -> None:
+    entry = _publisher(
+        feeds=[
+            {
+                "name": "World",
+                "url": "https://feeds.times.example/world.xml",
+                "discovery_method": "rss",
+                "acquisiton_tier": "3_extraction",
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match=r"entry 0 feed 0 has unknown key.*acquisiton_tier"):
+        seeder.parse([entry])
+
+
+@pytest.mark.parametrize(
+    ("determination", "message"),
+    [
+        (None, r"missing 'determination'"),
+        ({"basis": "b", "sources": ["https://x.test/t"]}, r"missing 'read_on'"),
+        ({"read_on": "yesterday", "basis": "b", "sources": ["https://x.test/t"]}, r"read_on"),
+        ({"read_on": "2026-09-04", "basis": "  ", "sources": ["https://x.test/t"]}, r"basis"),
+        ({"read_on": "2026-09-04", "basis": "b", "sources": []}, r"sources"),
+        ({"read_on": "2026-09-04", "basis": "b", "sources": ["not a url"]}, r"sources"),
+        (
+            {"read_on": "2026-09-04", "basis": "b", "sources": ["https://x.test/t"], "why": "?"},
+            r"unknown key",
+        ),
+    ],
+)
+def test_a_determination_must_cite_what_it_rests_on(
+    determination: dict[str, object] | None, message: str
+) -> None:
+    """An unsourced determination cannot be re-checked — only re-decided, or trusted forever."""
+    entry = _publisher()
+    if determination is None:
+        del entry["determination"]
+    else:
+        entry["determination"] = determination
+
+    with pytest.raises(ValueError, match=message):
+        seeder.parse([entry])
+
+
+def test_permitted_to_ingest_must_be_a_boolean() -> None:
+    with pytest.raises(ValueError, match=r"true or false"):
+        seeder.parse([_publisher(permitted_to_ingest="no")])

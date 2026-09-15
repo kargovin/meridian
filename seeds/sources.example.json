@@ -2,9 +2,16 @@
   {
     "name": "Example Times",
     "home_url": "https://times.example",
+    "permitted_to_ingest": true,
     "rights_level": "body_text",
     "jurisdiction": "GB",
     "rate_limit_per_min": 20,
+    "determination": {
+      "read_on": "2026-01-01",
+      "basis": "Fictional. Shows the shape: quote the clause the rights rest on, so the next reader re-checks it rather than re-deciding it.",
+      "sources": ["https://times.example/terms"],
+      "conditions": ["Attribute Example Times."]
+    },
     "feeds": [
       {
         "name": "World",
@@ -23,27 +30,39 @@
   {
     "name": "Example Wire",
     "home_url": "https://wire.example",
+    "permitted_to_ingest": true,
     "rights_level": "headline_only",
     "jurisdiction": "US",
     "rate_limit_per_min": 5,
     "user_agent": "MeridianBot/1.0",
     "enabled": false,
+    "determination": {
+      "read_on": "2026-01-01",
+      "basis": "Fictional. A publisher whose feed may be shown but whose bodies may not be used; switched off operationally (enabled: false) — a stop that is lifted when the incident passes, unlike permitted_to_ingest.",
+      "sources": ["https://wire.example/terms"]
+    },
     "feeds": [
       {
         "name": "Sitemap",
         "url": "https://wire.example/sitemap-news.xml",
         "discovery_method": "sitemap",
-        "acquisition_tier": "3_extraction"
+        "acquisition_tier": "3_extraction",
+        "note": "Optional free-text on a feed; validated as a string, never stored."
       }
     ]
   },
   {
     "name": "Example Herald",
     "home_url": "https://herald.example",
+    "permitted_to_ingest": false,
     "rights_level": "headline_only",
     "jurisdiction": "QA",
     "rate_limit_per_min": 10,
-    "permitted_to_ingest": false,
+    "determination": {
+      "read_on": "2026-01-01",
+      "basis": "Fictional. A publisher whose terms forbid ingestion. It stays IN the file so the answer 'we looked, and it was no' survives; rights_level is a placeholder because the permitted gate is read first.",
+      "sources": ["https://herald.example/terms"]
+    },
     "feeds": []
   }
 ]
