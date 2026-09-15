@@ -189,8 +189,7 @@ V1_HEADLINE_ONLY = {
     "Common Dreams",
     "KFF Health News",
 }
-# Refused by their terms, plus CBC — whose terms could not be read, which is not the same as
-# silence, so it is off until a person reads them.
+# Refused by their terms. CBC's could not be fetched by a script and were read in a browser.
 V1_NOT_PERMITTED = {
     "BBC",
     "The Guardian",

@@ -14,10 +14,9 @@ has no usable feed at all and is discovered by news sitemap instead.
 
 - **`v1.json`** — the v1 roster. Twenty-two publishers: eight whose licence permits storing and
   summarizing the article body (`body_text`), six whose terms permit showing the feed but not
-  using the body (`headline_only`), and eight with `permitted_to_ingest: false` — seven whose
-  terms refuse ingestion outright, and one whose terms could not be read, which is recorded as
-  *undetermined* rather than assumed. Every one carries a `determination` naming the clause it
-  rests on, where it was read and when.
+  using the body (`headline_only`), and eight whose terms refuse ingestion outright
+  (`permitted_to_ingest: false`). Every one carries a `determination` naming the clause it rests
+  on, where it was read and when.
 - **`sources.example.json`** — the shape, on reserved example domains. Not a roster.
 
 ## What the file must say

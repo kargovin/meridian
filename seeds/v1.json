@@ -607,7 +607,7 @@
         "https://news.sky.com/robots.txt"
       ],
       "conditions": [
-        "Do not enable. Reopening this requires a ruling that the robots.txt aggregator comment constitutes Sky's written authorisation for RSS use under clause 2.8."
+        "Do not enable. Determined 15 Sep 2026: the robots.txt aggregator comment is not treated as the express written authorisation clause 2.8 requires. Reopening this needs a licence or written authorisation from Sky, not a re-reading."
       ]
     },
     "feeds": [
@@ -671,13 +671,14 @@
     "rate_limit_per_min": 10,
     "determination": {
       "read_on": "2026-09-15",
-      "basis": "UNDETERMINED, therefore off. The terms of use (cbc.radio-canada.ca, an Angular application whose content API returns 500 without a browser session) could not be read by an automated fetch on 4 or 15 Sep. robots.txt permits article paths under 'User-agent: *' and blocks every named AI/LLM agent including user-initiated ones. An earlier reading filed this as headline_only on robots.txt alone; that treated unread terms as silent terms, which they are not. permitted_to_ingest is false until a person reads the terms and records what they say — this is not a refusal, it is the absence of a determination, and the column must not default to yes.",
+      "basis": "REFUSED by the Terms of Use. The page is a browser application that returns nothing to a script; the terms were read by a person in a browser on 15 Sep 2026 and transcribed. 'CBC/Radio-Canada does not allow the reproduction or public communication of content that it produces or commissions … Your access to CBC/Radio-Canada digital services does not give you any rights to that content. CBC/Radio-Canada also does not allow the use of its content to train and develop artificial intelligence models and software programs. This means you can't, among other things, use any automated tools or applications to scrape data and content from CBC/Radio-Canada's digital services without written permission. … To be allowed to reproduce or present certain content in public, you must first obtain a licence from CBC/Radio-Canada, unless use is permitted by law or by special notice.' No automated collection, no reproduction, no AI use — the same shape as AP's and Sky's clauses. robots.txt permits the article paths and blocks every named AI agent; the terms decide.",
       "sources": [
         "https://cbc.radio-canada.ca/en/vision/governance/terms-of-use-digital-services",
         "https://www.cbc.ca/robots.txt"
       ],
       "conditions": [
-        "Read the terms by hand in a browser and re-determine. Until then: do not enable.",
+        "Do not enable. A licence from CBC/Radio-Canada is the only route.",
+        "The terms page cannot be fetched by a script; re-check it in a browser.",
         "The feed host is rss.cbc.ca; the path published on cbc.ca 404s (observed 19 Aug 2026)."
       ]
     },
