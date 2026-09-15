@@ -9,8 +9,12 @@
     "determination": {
       "read_on": "2026-01-01",
       "basis": "Fictional. Shows the shape: quote the clause the rights rest on, so the next reader re-checks it rather than re-deciding it.",
-      "sources": ["https://times.example/terms"],
-      "conditions": ["Attribute Example Times."]
+      "sources": [
+        "https://times.example/terms"
+      ],
+      "conditions": [
+        "Attribute Example Times."
+      ]
     },
     "feeds": [
       {
@@ -39,7 +43,9 @@
     "determination": {
       "read_on": "2026-01-01",
       "basis": "Fictional. A publisher whose feed may be shown but whose bodies may not be used; switched off operationally (enabled: false) — a stop that is lifted when the incident passes, unlike permitted_to_ingest.",
-      "sources": ["https://wire.example/terms"]
+      "sources": [
+        "https://wire.example/terms"
+      ]
     },
     "feeds": [
       {
@@ -61,8 +67,18 @@
     "determination": {
       "read_on": "2026-01-01",
       "basis": "Fictional. A publisher whose terms forbid ingestion. It stays IN the file so the answer 'we looked, and it was no' survives; rights_level is a placeholder because the permitted gate is read first.",
-      "sources": ["https://herald.example/terms"]
+      "sources": [
+        "https://herald.example/terms"
+      ]
     },
-    "feeds": []
+    "feeds": [
+      {
+        "name": "World",
+        "url": "https://herald.example/feed.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded so the determination keeps what was found; unreachable while permitted_to_ingest is false."
+      }
+    ]
   }
 ]

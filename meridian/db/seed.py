@@ -29,7 +29,9 @@ and poll a publisher the file meant to refuse.
 
 import datetime as dt
 import json
+import re
 import sys
+import urllib.parse
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +86,28 @@ _PUBLISHER_KEYS = frozenset(
 _DETERMINATION_KEYS = frozenset({"read_on", "basis", "sources", "conditions"})
 
 
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _bool(item: dict[str, object], key: str, where: str, default: bool | None = None) -> bool:
+    """A real JSON boolean, never coerced: ``"false"`` is truthy and ``0`` is not an answer."""
+    if key not in item:
+        if default is None:
+            raise ValueError(f"{where} is missing '{key}'")
+        return default
+    value = item[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"{where}: {key} must be true or false")
+    return value
+
+
+def _nonempty(item: dict[str, object], key: str, where: str) -> str:
+    value = item.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{where}: {key} must be a non-empty string")
+    return value
+
+
 def _reject_unknown(item: dict[str, object], allowed: frozenset[str], where: str) -> None:
     unknown = sorted(set(item) - allowed)
     if unknown:
@@ -99,25 +123,32 @@ def _check_determination(raw: object, where: str) -> None:
     if not isinstance(raw, dict):
         raise ValueError(f"{where}: determination is not an object")
     _reject_unknown(raw, _DETERMINATION_KEYS, f"{where} determination")
+    for key in ("read_on", "basis", "sources"):
+        if key not in raw:
+            raise ValueError(f"{where} determination is missing '{key}'")
+    read_on = raw["read_on"]
+    if not isinstance(read_on, str) or not _ISO_DATE.match(read_on):
+        raise ValueError(f"{where} determination: read_on must be a YYYY-MM-DD date")
     try:
-        dt.date.fromisoformat(str(raw["read_on"]))
-        basis = raw["basis"]
-        sources = raw["sources"]
-    except KeyError as missing:
-        raise ValueError(f"{where} determination is missing {missing}") from missing
+        dt.date.fromisoformat(read_on)
     except ValueError as bad:
         raise ValueError(f"{where} determination: read_on {bad}") from bad
+    basis = raw["basis"]
     if not isinstance(basis, str) or not basis.strip():
         raise ValueError(f"{where} determination: basis must be a non-empty string")
-    if (
-        not isinstance(sources, list)
-        or not sources
-        or not all(isinstance(u, str) and u.startswith(("http://", "https://")) for u in sources)
-    ):
-        raise ValueError(f"{where} determination: sources must be a non-empty list of URLs")
+    sources = raw["sources"]
+    if not isinstance(sources, list) or not sources or not all(_is_url(u) for u in sources):
+        raise ValueError(f"{where} determination: sources must be a non-empty list of http(s) URLs")
     conditions = raw.get("conditions", [])
     if not isinstance(conditions, list) or not all(isinstance(c, str) for c in conditions):
         raise ValueError(f"{where} determination: conditions must be a list of strings")
+
+
+def _is_url(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = urllib.parse.urlsplit(value)
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
 
 
 def _parse_feed(item: object, where: str) -> FeedEntry:
@@ -126,13 +157,18 @@ def _parse_feed(item: object, where: str) -> FeedEntry:
     _reject_unknown(item, _FEED_KEYS, where)
     if "note" in item and not isinstance(item["note"], str):
         raise ValueError(f"{where}: note must be a string")
+    name = _nonempty(item, "name", where)
+    url = _nonempty(item, "url", where)
+    if not _is_url(url):
+        raise ValueError(f"{where}: url must be an http(s) URL")
+    enabled = _bool(item, "enabled", where, default=True)
     try:
         return FeedEntry(
-            name=str(item["name"]),
-            url=str(item["url"]),
+            name=name,
+            url=url,
             discovery_method=DiscoveryMethod(item["discovery_method"]),
             acquisition_tier=AcquisitionTier(item["acquisition_tier"]),
-            enabled=bool(item.get("enabled", True)),
+            enabled=enabled,
         )
     except KeyError as missing:
         raise ValueError(f"{where} is missing {missing}") from missing
@@ -151,6 +187,7 @@ def parse(raw: object) -> list[SeedEntry]:
     if not isinstance(raw, list):
         raise ValueError("a roster is a JSON array of publisher objects")
     entries = []
+    seen_feed_urls: set[str] = set()
     for index, item in enumerate(raw):
         where = f"entry {index}"
         if not isinstance(item, dict):
@@ -159,27 +196,36 @@ def parse(raw: object) -> list[SeedEntry]:
         raw_feeds = item.get("feeds", [])
         if not isinstance(raw_feeds, list):
             raise ValueError(f"{where}: feeds is not an array")
-        for key in ("permitted_to_ingest", "determination"):
-            if key not in item:
-                raise ValueError(f"{where} is missing '{key}'")
-        permitted = item["permitted_to_ingest"]
-        if not isinstance(permitted, bool):
-            raise ValueError(f"{where}: permitted_to_ingest must be true or false")
+        permitted = _bool(item, "permitted_to_ingest", where)
+        enabled = _bool(item, "enabled", where, default=True)
+        if "determination" not in item:
+            raise ValueError(f"{where} is missing 'determination'")
         _check_determination(item["determination"], where)
+        name = _nonempty(item, "name", where)
+        home_url = _nonempty(item, "home_url", where)
+        if not _is_url(home_url):
+            raise ValueError(f"{where}: home_url must be an http(s) URL")
+        rate = item.get("rate_limit_per_min")
+        if not isinstance(rate, int) or isinstance(rate, bool) or rate <= 0:
+            raise ValueError(f"{where}: rate_limit_per_min must be a positive integer")
         parsed_feeds = tuple(_parse_feed(f, f"{where} feed {n}") for n, f in enumerate(raw_feeds))
+        for url in (f.url for f in parsed_feeds):
+            if url in seen_feed_urls:
+                raise ValueError(f"{where}: feed url {url!r} appears twice in the roster")
+            seen_feed_urls.add(url)
         try:
             entries.append(
                 SeedEntry(
-                    name=str(item["name"]),
-                    home_url=str(item["home_url"]),
+                    name=name,
+                    home_url=home_url,
                     rights_level=RightsLevel(item["rights_level"]),
-                    jurisdiction=str(item["jurisdiction"]),
-                    rate_limit_per_min=int(item["rate_limit_per_min"]),
+                    jurisdiction=_nonempty(item, "jurisdiction", where),
+                    rate_limit_per_min=rate,
                     feeds=parsed_feeds,
                     user_agent=(
                         str(item["user_agent"]) if item.get("user_agent") is not None else None
                     ),
-                    enabled=bool(item.get("enabled", True)),
+                    enabled=enabled,
                     permitted_to_ingest=permitted,
                 )
             )

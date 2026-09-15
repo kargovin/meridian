@@ -8,7 +8,7 @@
     "rate_limit_per_min": 5,
     "determination": {
       "read_on": "2026-09-04",
-      "basis": "CC BY (attribution only). Attribution policy: 'Adapt — remix, transform, and build upon the material for any purpose, even commercially', on condition of attribution. No AI, TDM or aggregation clause. Full article text ships in the feed (5,725–13,266 chars measured).",
+      "basis": "CC BY 3.0 (attribution only; the attribution page links the 3.0 licence). Attribution policy: 'Adapt — remix, transform, and build upon the material for any purpose, even commercially', on condition of attribution. No AI, TDM or aggregation clause. Full article text ships in the feed (5,725–13,266 chars measured).",
       "sources": [
         "https://globalvoices.org/about/global-voices-attribution-policy/",
         "https://globalvoices.org/robots.txt"
@@ -21,34 +21,6 @@
       {
         "name": "All",
         "url": "https://globalvoices.org/feed/",
-        "discovery_method": "rss",
-        "acquisition_tier": "1_full_feed"
-      }
-    ]
-  },
-  {
-    "name": "Inter Press Service",
-    "home_url": "https://www.ipsnews.net",
-    "permitted_to_ingest": true,
-    "rights_level": "body_text",
-    "jurisdiction": "IT",
-    "rate_limit_per_min": 5,
-    "determination": {
-      "read_on": "2026-09-04",
-      "basis": "CC BY-SA 3.0, declared inside the publisher's own feed (creativecommons.org/licenses/by-sa/3.0/deed.en). Derivatives permitted; ShareAlike applies to anything we publish from it. Full article text ships in the feed (4,616–8,198 chars measured).",
-      "sources": [
-        "https://www.ipsnews.net/feed/",
-        "https://creativecommons.org/licenses/by-sa/3.0/deed.en"
-      ],
-      "conditions": [
-        "Attribute IPS.",
-        "ShareAlike: a summary published from IPS text carries CC BY-SA 3.0 or a compatible licence."
-      ]
-    },
-    "feeds": [
-      {
-        "name": "All",
-        "url": "https://www.ipsnews.net/feed/",
         "discovery_method": "rss",
         "acquisition_tier": "1_full_feed"
       }
@@ -118,14 +90,17 @@
     "rate_limit_per_min": 5,
     "determination": {
       "read_on": "2026-09-04",
-      "basis": "CC BY-NC 4.0, stated on each article: 'This article is published under a Creative Commons Attribution-NonCommercial 4.0 International licence.' NonCommercial, no NoDerivatives — derivatives permitted for non-commercial use. The feed carries a ~900-char teaser only; the body must be fetched.",
+      "basis": "CC BY-NC 4.0, stated at the foot of each article: 'This article is published under a Creative Commons Attribution-NonCommercial 4.0 International licence.' Verified on five articles. The syndication page says 'we publish most of our content under Creative Commons' and 'Always check the licensing note at the bottom of each article page' — a per-article exception is possible. NonCommercial, no NoDerivatives — derivatives permitted for non-commercial use. The feed carries a ~900-char teaser only and no licence element; the body must be fetched, and the licence note read per article.",
       "sources": [
-        "https://www.opendemocracy.net/en/feed/",
+        "https://www.opendemocracy.net/syndication/",
+        "https://www.opendemocracy.net/podcasts/the-climate-wars-how-superpowers-are-carving-up-the-earth/",
         "https://creativecommons.org/licenses/by-nc/4.0/"
       ],
       "conditions": [
         "Attribute openDemocracy and the author.",
-        "NON-COMMERCIAL ONLY. This determination rests on the deployment being personal and non-commercial (user ruling, 2026-09-04). It must be re-made before any commercial or public launch."
+        "NON-COMMERCIAL ONLY. This determination rests on the deployment being personal and non-commercial; it must be re-made before any commercial or public launch.",
+        "'Most of our content' — check the licence note on each fetched article; an article without one is not covered.",
+        "The syndication page asks anyone republishing more than two pieces a month on a regular basis to contact them; a summary is not a republication, but record the ask."
       ]
     },
     "feeds": [
@@ -181,7 +156,7 @@
       ],
       "conditions": [
         "Attribute WHO. Do not imply WHO endorsement.",
-        "NON-COMMERCIAL ONLY. Rests on the deployment being personal and non-commercial (user ruling, 2026-09-04); re-make before any commercial or public launch.",
+        "NON-COMMERCIAL ONLY. Rests on the deployment being personal and non-commercial; re-make before any commercial or public launch.",
         "ShareAlike: a summary published from WHO text carries CC BY-NC-SA 3.0 IGO or compatible."
       ]
     },
@@ -210,7 +185,9 @@
       ],
       "conditions": [
         "The NASA insignia and logotype are protected and are not covered by this.",
-        "Third-party material NASA republishes (e.g. partner-agency images) may be copyrighted; text is the target here."
+        "Third-party and contractor-authored material NASA republishes (e.g. JPL/Caltech) is not a US Government work and may be copyrighted; NASA-authored text is the target here.",
+        "AI outputs: the same page states 'attribution of the information directly to NASA is not permitted' for content incorporated into a language model, and 'All outputs from the AI model should be attributed to the AI product itself, not NASA. References like \"according to NASA\" or similar are prohibited in AI products.' A generated summary must not be presented as NASA's words; the source row may say the material came from NASA.",
+        "17 U.S.C. §105 places US Government works in the public domain IN THE UNITED STATES; this deployment is not in the US (Legal A-L3), and the wider reuse rests on NASA's stated permission for informational use rather than on §105 alone."
       ]
     },
     "feeds": [
@@ -258,83 +235,88 @@
     "rate_limit_per_min": 10,
     "determination": {
       "read_on": "2026-09-04",
-      "basis": "Terms of Use, Content Feeds clause: 'NPR may provide content feeds … consisting of a selection of headlines, summaries or text blurbs, and links to full stories … You may display, excerpt from, and link to the Content Feeds on your personal site or application … you must provide attribution to NPR.' Body use is excluded separately: 'you shall not modify, copy, translate, create a derivative work of … any content' and 'You may not use … any content … to build or train large language models, machine learning tools, or artificial intelligence (AI) systems.' A generated summary is a derivative work, so the feed is permitted and the body is not.",
+      "basis": "Terms of Use, Content Feeds clause: 'NPR may provide content feeds … consisting of a selection of headlines, summaries or text blurbs, and links to full stories … You may display, excerpt from, and link to the Content Feeds on your personal site or application … you must provide attribution to NPR or the relevant Content Provider adjacent to the Content Feed.' Body use is excluded separately: 'you shall not modify, copy, translate, create a derivative work of … any content' and 'You may not use … any content … to build or train large language models, machine learning tools, or artificial intelligence (AI) systems.' A generated summary is a derivative work, so the feed is permitted and the body is not.",
       "sources": [
         "https://www.npr.org/about-npr/179876898/terms-of-use",
         "https://www.npr.org/robots.txt"
       ],
       "conditions": [
         "Display 'NPR' or 'NPR News Headlines' adjacent to the feed content.",
-        "PERSONAL / NON-COMMERCIAL ONLY. Rests on the deployment being personal and non-commercial (user ruling, 2026-09-04)."
+        "PERSONAL / NON-COMMERCIAL ONLY. Rests on the deployment being personal and non-commercial."
       ]
     },
     "feeds": [
-      {"name": "News", "url": "https://feeds.npr.org/1001/rss.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "World", "url": "https://feeds.npr.org/1004/rss.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Politics", "url": "https://feeds.npr.org/1014/rss.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Business", "url": "https://feeds.npr.org/1006/rss.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Science", "url": "https://feeds.npr.org/1007/rss.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Health", "url": "https://feeds.npr.org/1128/rss.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Technology", "url": "https://feeds.npr.org/1019/rss.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"}
+      {
+        "name": "News",
+        "url": "https://feeds.npr.org/1001/rss.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction"
+      },
+      {
+        "name": "World",
+        "url": "https://feeds.npr.org/1004/rss.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction"
+      },
+      {
+        "name": "Politics",
+        "url": "https://feeds.npr.org/1014/rss.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction"
+      },
+      {
+        "name": "Business",
+        "url": "https://feeds.npr.org/1006/rss.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction"
+      },
+      {
+        "name": "Science",
+        "url": "https://feeds.npr.org/1007/rss.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction"
+      },
+      {
+        "name": "Health",
+        "url": "https://feeds.npr.org/1128/rss.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction"
+      },
+      {
+        "name": "Technology",
+        "url": "https://feeds.npr.org/1019/rss.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction"
+      }
     ]
   },
   {
-    "name": "Sky News",
-    "home_url": "https://news.sky.com",
+    "name": "Inter Press Service",
+    "home_url": "https://www.ipsnews.net",
     "permitted_to_ingest": true,
     "rights_level": "headline_only",
-    "jurisdiction": "GB",
-    "rate_limit_per_min": 10,
+    "jurisdiction": "IT",
+    "rate_limit_per_min": 5,
     "determination": {
-      "read_on": "2026-09-04",
-      "basis": "robots.txt states the position for our category directly: '# Disallow news aggregators except on RSS.' — named aggregators (NewsNow, news-please) get 'Disallow: /' with 'Allow: /info/rss'. AI model-training crawlers are blocked; user-initiated AI agents are allowed. Read as: aggregators may take the feed, not the article pages. The terms-of-use page is client-side rendered and could not be read by an automated fetch; robots.txt is the cited basis.",
+      "read_on": "2026-09-15",
+      "basis": "CORRECTED 15 Sep 2026 — an earlier reading recorded CC BY-SA 3.0 from a licence URL found in the feed; that was an image credit inside one article, not the publisher's licence, and the live feed carries no licence element. The terms: 'Copyright © 2026 IPS-Inter Press Service. All rights reserved.' Reprint policy: 'Republication or any other distribution of IPS materials is encouraged, but is only possible after written agreement of IPS … Users can choose to pay either a subscription fee … or to pay a republication fee per article. Different rates and conditions apply for commercial and non-profit users. In some cases, reproduction rights can be granted for free.' Body use is therefore refused without agreement. Feed display is not addressed — IPS publishes RSS feeds for readers — so this is headline_only ON SILENCE, a weaker basis than NPR's express permission. The feed ships full text; the tier is set to extraction so no body is stored.",
       "sources": [
-        "https://news.sky.com/robots.txt",
-        "https://news.sky.com/info/policies-and-standards"
+        "https://www.ipsnews.net/reprinting-articles/",
+        "https://www.ipsnews.net/feed/"
       ],
       "conditions": [
-        "Feed only; never fetch article pages (the edge also returns 403 to non-browser clients — observed 19 Aug 2026).",
-        "Attribute Sky News."
+        "Never store or summarize the body — all rights reserved.",
+        "A free non-profit reproduction licence is available on request ('In some cases, reproduction rights can be granted for free'); that is the route to body_text, not a re-reading."
       ]
     },
     "feeds": [
-      {"name": "Home", "url": "https://feeds.skynews.com/feeds/rss/home.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "World", "url": "https://feeds.skynews.com/feeds/rss/world.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "UK", "url": "https://feeds.skynews.com/feeds/rss/uk.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Business", "url": "https://feeds.skynews.com/feeds/rss/business.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Politics", "url": "https://feeds.skynews.com/feeds/rss/politics.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Technology", "url": "https://feeds.skynews.com/feeds/rss/technology.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Entertainment", "url": "https://feeds.skynews.com/feeds/rss/entertainment.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"}
-    ]
-  },
-  {
-    "name": "CBC News",
-    "home_url": "https://www.cbc.ca",
-    "permitted_to_ingest": true,
-    "rights_level": "headline_only",
-    "jurisdiction": "CA",
-    "rate_limit_per_min": 10,
-    "determination": {
-      "read_on": "2026-09-04",
-      "basis": "robots.txt permits news article paths under 'User-agent: *' and blocks every named AI/LLM agent including user-initiated ones (GPTBot, ChatGPT-User, OAI-SearchBot, PerplexityBot, CCBot, Anthropic-ai, cohere-ai, DeepSeek, Claude-Web). The terms-of-use page (cbc.radio-canada.ca) is client-side rendered and could not be read. Determination is CONSERVATIVE and rests on robots.txt only: headline and link from the published feed; no body.",
-      "sources": [
-        "https://www.cbc.ca/robots.txt",
-        "https://cbc.radio-canada.ca/en/vision/governance/terms-of-use-digital-services"
-      ],
-      "conditions": [
-        "Terms could not be read by an automated fetch — WEAKER basis than NPR or Sky News. Re-check by hand before relying on it.",
-        "The feed host is rss.cbc.ca; the path published on cbc.ca 404s (observed 19 Aug 2026)."
-      ]
-    },
-    "feeds": [
-      {"name": "Top stories", "url": "https://rss.cbc.ca/lineup/topstories.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "World", "url": "https://rss.cbc.ca/lineup/world.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Politics", "url": "https://rss.cbc.ca/lineup/politics.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Business", "url": "https://rss.cbc.ca/lineup/business.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Health", "url": "https://rss.cbc.ca/lineup/health.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Technology", "url": "https://rss.cbc.ca/lineup/technology.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Sports", "url": "https://rss.cbc.ca/lineup/sports.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"},
-      {"name": "Arts", "url": "https://rss.cbc.ca/lineup/arts.xml", "discovery_method": "rss", "acquisition_tier": "3_extraction"}
+      {
+        "name": "All",
+        "url": "https://www.ipsnews.net/feed/",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Ships full text; tier deliberately 3_extraction — see the determination."
+      }
     ]
   },
   {
@@ -592,7 +574,7 @@
     "rate_limit_per_min": 10,
     "determination": {
       "read_on": "2026-09-04",
-      "basis": "REFUSED by the publisher's terms, stated in the robots.txt header: 'DW content is made available for your personal, non-commercial use. Use of any device, tool, or process designed to data mine or scrape the content using automated means is prohibited'. Same form as Al Jazeera's. rights_level is a placeholder; never polled.",
+      "basis": "REFUSED by the publisher's terms, stated in the robots.txt header: 'DW content is made available for your personal, non-commercial use. Use of any device, tool, or process designed to data mine or scrape the content using automated means is prohibited without prior written permission from DW'. Same form as Al Jazeera's. rights_level is a placeholder; never polled.",
       "sources": [
         "https://www.dw.com/robots.txt"
       ],
@@ -604,6 +586,154 @@
       {
         "name": "All (English)",
         "url": "https://rss.dw.com/rdf/rss-en-all",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      }
+    ]
+  },
+  {
+    "name": "Sky News",
+    "home_url": "https://news.sky.com",
+    "permitted_to_ingest": false,
+    "rights_level": "headline_only",
+    "jurisdiction": "GB",
+    "rate_limit_per_min": 10,
+    "determination": {
+      "read_on": "2026-09-15",
+      "basis": "CORRECTED 15 Sep 2026 — an earlier reading recorded the terms as unreadable; they are readable once the script-embedded page text is extracted. Sky.com Terms and Conditions apply to 'Sky's websites, platforms, services, products and apps including sky.com'. Clause 2.8: 'You will not access, search and/or collect data from … any Sky Service … by any means (whether automated or manual) unless Sky has given its express written authorisation to do so. This means that, among other things, (a) you may not use any robots, bots, spiders, crawlers, devices, scripts or other data gathering or extraction software and/or tools, whether automated or manual, to access, acquire, copy, monitor, scrape, data mine, or aggregate any Content or any portion of the Sky Service for any purpose, and (b) you may not use any Content for the purpose of directly or indirectly training, developing or improving a software tool or service, including any artificial intelligence tool, model, system or platform.' The same shape as AP's clause. robots.txt on news.sky.com says '# Disallow news aggregators except on RSS.', which reads as Sky contemplating aggregators on the feed — but a robots.txt comment is not the 'express written authorisation' clause 2.8 requires, and this file does not assume it is. REFUSED unless that reading is ruled otherwise.",
+      "sources": [
+        "https://www.sky.com/help/articles/skycom-terms-and-conditions",
+        "https://news.sky.com/robots.txt"
+      ],
+      "conditions": [
+        "Do not enable. Reopening this requires a ruling that the robots.txt aggregator comment constitutes Sky's written authorisation for RSS use under clause 2.8."
+      ]
+    },
+    "feeds": [
+      {
+        "name": "Home",
+        "url": "https://feeds.skynews.com/feeds/rss/home.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "World",
+        "url": "https://feeds.skynews.com/feeds/rss/world.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "UK",
+        "url": "https://feeds.skynews.com/feeds/rss/uk.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Business",
+        "url": "https://feeds.skynews.com/feeds/rss/business.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Politics",
+        "url": "https://feeds.skynews.com/feeds/rss/politics.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Technology",
+        "url": "https://feeds.skynews.com/feeds/rss/technology.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Entertainment",
+        "url": "https://feeds.skynews.com/feeds/rss/entertainment.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      }
+    ]
+  },
+  {
+    "name": "CBC News",
+    "home_url": "https://www.cbc.ca",
+    "permitted_to_ingest": false,
+    "rights_level": "headline_only",
+    "jurisdiction": "CA",
+    "rate_limit_per_min": 10,
+    "determination": {
+      "read_on": "2026-09-15",
+      "basis": "UNDETERMINED, therefore off. The terms of use (cbc.radio-canada.ca, an Angular application whose content API returns 500 without a browser session) could not be read by an automated fetch on 4 or 15 Sep. robots.txt permits article paths under 'User-agent: *' and blocks every named AI/LLM agent including user-initiated ones. An earlier reading filed this as headline_only on robots.txt alone; that treated unread terms as silent terms, which they are not. permitted_to_ingest is false until a person reads the terms and records what they say — this is not a refusal, it is the absence of a determination, and the column must not default to yes.",
+      "sources": [
+        "https://cbc.radio-canada.ca/en/vision/governance/terms-of-use-digital-services",
+        "https://www.cbc.ca/robots.txt"
+      ],
+      "conditions": [
+        "Read the terms by hand in a browser and re-determine. Until then: do not enable.",
+        "The feed host is rss.cbc.ca; the path published on cbc.ca 404s (observed 19 Aug 2026)."
+      ]
+    },
+    "feeds": [
+      {
+        "name": "Top stories",
+        "url": "https://rss.cbc.ca/lineup/topstories.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "World",
+        "url": "https://rss.cbc.ca/lineup/world.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Politics",
+        "url": "https://rss.cbc.ca/lineup/politics.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Business",
+        "url": "https://rss.cbc.ca/lineup/business.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Health",
+        "url": "https://rss.cbc.ca/lineup/health.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Technology",
+        "url": "https://rss.cbc.ca/lineup/technology.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Sports",
+        "url": "https://rss.cbc.ca/lineup/sports.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "Arts",
+        "url": "https://rss.cbc.ca/lineup/arts.xml",
         "discovery_method": "rss",
         "acquisition_tier": "3_extraction",
         "note": "Recorded for the record; unreachable while permitted_to_ingest is false."

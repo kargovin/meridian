@@ -6,14 +6,17 @@ canonical record and never the feed, so this is the last point at which the feed
 spelling of things matters.
 
 ⚠️ **``content_hash`` and ``simhash`` are deliberately left NULL here.** Both are specified
-over the article *body* (2.1.2 §3.2), and no source on the v1 roster ships a body in its feed
-— PRD §5.1 tier 1 has no members, so ``body_text`` is empty system-wide until tier-3
-extraction lands. Computing them over the headline instead was measured and rejected: over
-~10 tokens SimHash recognises about 6% of genuine near-duplicates against 100% over a full
-article, and a SHA-256 of a headline declares two different articles byte-identical, which
-collapses a real article into an ``AlternateCopy`` and inflates the distinct-source count that
-FR-S6 gates summarization on. A NULL column is visibly empty; a populated one that is wrong
-per-publisher is not. They are filled by the stage that obtains a body.
+over the article *body* (2.1.2 §3.2). Computing them over the headline instead was measured
+and rejected: over ~10 tokens SimHash recognises about 6% of genuine near-duplicates against
+100% over a full article, and a SHA-256 of a headline declares two different articles
+byte-identical, which collapses a real article into an ``AlternateCopy`` and inflates the
+distinct-source count that FR-S6 gates summarization on. A NULL column is visibly empty; a
+populated one that is wrong per-publisher is not. ⚠️ Four v1-roster feeds ship the full body
+and discovery stores it, so ``body_text`` is populated for those records while their hashes
+stay NULL — the RFC §5.1 invariant ``content_hash IS NOT NULL ⟺ body_text IS NOT NULL`` does
+not hold for them until dedup's backfill (``body_text IS NOT NULL AND content_hash IS NULL``)
+computes the hashes. No CHECK enforces the invariant, so nothing fails; the predicate is what
+finds them.
 
 Retry and backoff are not here. A raising article keeps its claimed row with ``attempts``
 already incremented, and is picked up again once the lease expires.

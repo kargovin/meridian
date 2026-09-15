@@ -12,10 +12,11 @@ has no usable feed at all and is discovered by news sitemap instead.
 
 ## The files
 
-- **`v1.json`** — the v1 roster. Twenty-two publishers: nine whose licence permits storing and
-  summarizing the article body (`body_text`), seven whose terms permit showing the feed but not
-  using the body (`headline_only`), and six whose terms refuse ingestion outright
-  (`permitted_to_ingest: false`). Every one carries a `determination` naming the clause it
+- **`v1.json`** — the v1 roster. Twenty-two publishers: eight whose licence permits storing and
+  summarizing the article body (`body_text`), six whose terms permit showing the feed but not
+  using the body (`headline_only`), and eight with `permitted_to_ingest: false` — seven whose
+  terms refuse ingestion outright, and one whose terms could not be read, which is recorded as
+  *undetermined* rather than assumed. Every one carries a `determination` naming the clause it
   rests on, where it was read and when.
 - **`sources.example.json`** — the shape, on reserved example domains. Not a roster.
 
@@ -62,9 +63,12 @@ terms; one permits the paths and forbids the use. The terms decide.
 ## Acquisition tier vs rights
 
 `acquisition_tier` says *how* a body would be obtained; `rights_level` says *whether* it may be.
-They are set independently. A headline-only publisher whose feed happens to ship full text is
-given `3_extraction`, not `1_full_feed`, so that no body is written to disk for a publisher we
-may not use one from.
+They are set independently, and **the code does not cross-check them**: discovery stores the
+body of any `1_full_feed` feed without consulting rights. So a headline-only publisher whose feed
+happens to ship full text is given `3_extraction` here, not `1_full_feed`, and a test over this
+file holds that rule. It is a rule about the file's contents, not a guard in the system — an
+operator can still set a headline-only publisher's feed to `1_full_feed` through the admin
+surface, and the next poll would store bodies. The code guard is an open architecture item.
 
 ## Operational notes
 

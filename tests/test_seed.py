@@ -46,7 +46,7 @@ def test_the_shipped_example_parses(app_session: Session) -> None:
     assert skipped == []
     # The nested feeds are loaded with their publisher, not silently dropped: a roster that
     # parsed and seeded but created no feeds would leave a registry that polls nothing.
-    assert sum(feeds.counts_by_source(app_session).values()) == 3
+    assert sum(feeds.counts_by_source(app_session).values()) == 4
 
 
 def test_seeding_twice_inserts_nothing_the_second_time(app_session: Session) -> None:
@@ -173,7 +173,6 @@ V1 = Path("seeds/v1.json")
 # someone updates both.
 V1_BODY_TEXT = {
     "Global Voices",
-    "Inter Press Service",
     "Waging Nonviolence",
     "Africa Is a Country",
     "openDemocracy",
@@ -184,14 +183,24 @@ V1_BODY_TEXT = {
 }
 V1_HEADLINE_ONLY = {
     "NPR",
-    "Sky News",
-    "CBC News",
+    "Inter Press Service",
     "The Conversation",
     "ProPublica",
     "Common Dreams",
     "KFF Health News",
 }
-V1_REFUSED = {"BBC", "The Guardian", "Associated Press", "Al Jazeera", "Reuters", "Deutsche Welle"}
+# Refused by their terms, plus CBC — whose terms could not be read, which is not the same as
+# silence, so it is off until a person reads them.
+V1_NOT_PERMITTED = {
+    "BBC",
+    "The Guardian",
+    "Associated Press",
+    "Al Jazeera",
+    "Reuters",
+    "Deutsche Welle",
+    "Sky News",
+    "CBC News",
+}
 
 
 def test_the_v1_roster_seeds_to_exactly_the_intended_poll_set(app_session: Session) -> None:
@@ -204,19 +213,37 @@ def test_the_v1_roster_seeds_to_exactly_the_intended_poll_set(app_session: Sessi
     entries = seeder.parse(json.loads(V1.read_text()))
     inserted, skipped = seeder.seed(app_session, entries)
     assert skipped == []
-    assert set(inserted) == V1_BODY_TEXT | V1_HEADLINE_ONLY | V1_REFUSED
+    assert set(inserted) == V1_BODY_TEXT | V1_HEADLINE_ONLY | V1_NOT_PERMITTED
 
     polled_publishers = {source.name for _feed, source in feeds.pollable(app_session)}
     assert polled_publishers == V1_BODY_TEXT | V1_HEADLINE_ONLY
-    assert polled_publishers.isdisjoint(V1_REFUSED)
+    assert polled_publishers.isdisjoint(V1_NOT_PERMITTED)
     assert {s.name for s in sources.enabled(app_session)} == V1_BODY_TEXT | V1_HEADLINE_ONLY
 
     # Present, not deleted: the roster can say "we looked, and the answer was no".
     by_name = {s.name: s for s in sources.list_all(app_session)}
-    assert set(by_name) >= V1_REFUSED
-    assert all(by_name[n].permitted_to_ingest is False for n in V1_REFUSED)
+    assert set(by_name) >= V1_NOT_PERMITTED
+    assert all(by_name[n].permitted_to_ingest is False for n in V1_NOT_PERMITTED)
     assert all(by_name[n].rights_level == RightsLevel.BODY_TEXT for n in V1_BODY_TEXT)
     assert all(by_name[n].rights_level == RightsLevel.HEADLINE_ONLY for n in V1_HEADLINE_ONLY)
+
+
+def test_the_shipped_example_seeds_to_its_intended_poll_set(app_session: Session) -> None:
+    """The example carries the two stops the v1 roster does not exercise together.
+
+    Example Wire is permitted but switched off (``enabled: false``); Example Herald is not
+    permitted at all. Only Example Times may be polled. Without this, a poll query that
+    dropped the ``enabled`` gate would pass the v1 test, because nothing in v1 is disabled.
+    """
+    seeder.seed(app_session, seeder.parse(json.loads(EXAMPLE.read_text())))
+
+    polled = {(source.name, feed.name) for feed, source in feeds.pollable(app_session)}
+    assert polled == {("Example Times", "World"), ("Example Times", "UK")}
+    assert {s.name for s in sources.list_all(app_session)} == {
+        "Example Times",
+        "Example Wire",
+        "Example Herald",
+    }
 
 
 def test_a_headline_only_publisher_never_has_a_full_feed_tier() -> None:
@@ -329,3 +356,96 @@ def test_a_determination_must_cite_what_it_rests_on(
 def test_permitted_to_ingest_must_be_a_boolean() -> None:
     with pytest.raises(ValueError, match=r"true or false"):
         seeder.parse([_publisher(permitted_to_ingest="no")])
+
+
+@pytest.mark.parametrize("value", ["false", 0, None, "no"])
+def test_enabled_must_be_a_boolean_on_a_publisher(value: object) -> None:
+    """``bool("false")`` is True. A stop spelled as a string would switch the publisher on."""
+    with pytest.raises(ValueError, match=r"entry 0: enabled must be true or false"):
+        seeder.parse([_publisher(enabled=value)])
+
+
+def test_enabled_must_be_a_boolean_on_a_feed() -> None:
+    feed = {
+        "name": "World",
+        "url": "https://feeds.times.example/world.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "enabled": "false",
+    }
+    with pytest.raises(ValueError, match=r"entry 0 feed 0: enabled must be true or false"):
+        seeder.parse([_publisher(feeds=[feed])])
+
+
+def test_a_feed_note_must_be_a_string() -> None:
+    feed = {
+        "name": "World",
+        "url": "https://feeds.times.example/world.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+        "note": 7,
+    }
+    with pytest.raises(ValueError, match=r"entry 0 feed 0: note must be a string"):
+        seeder.parse([_publisher(feeds=[feed])])
+
+
+@pytest.mark.parametrize("conditions", ["attribute", [1], [None]])
+def test_determination_conditions_must_be_a_list_of_strings(conditions: object) -> None:
+    det: dict[str, object] = {
+        "read_on": "2026-09-04",
+        "basis": "b",
+        "sources": ["https://x.test/t"],
+    }
+    det["conditions"] = conditions
+    with pytest.raises(ValueError, match=r"conditions must be a list of strings"):
+        seeder.parse([_publisher(determination=det)])
+
+
+def test_a_determination_must_be_an_object() -> None:
+    """A list here used to escape as a TypeError from indexing, naming no entry."""
+    with pytest.raises(ValueError, match=r"entry 0: determination is not an object"):
+        seeder.parse([_publisher(determination=[])])
+
+
+@pytest.mark.parametrize(
+    "read_on", ["20260904", "2026-9-4", "2026-W36", 20260904, "2026-09-04T00:00"]
+)
+def test_read_on_is_a_plain_iso_date(read_on: object) -> None:
+    det = {"read_on": read_on, "basis": "b", "sources": ["https://x.test/t"]}
+    with pytest.raises(ValueError, match=r"read_on must be a YYYY-MM-DD date"):
+        seeder.parse([_publisher(determination=det)])
+
+
+def test_a_source_url_needs_a_host() -> None:
+    det = {"read_on": "2026-09-04", "basis": "b", "sources": ["https://"]}
+    with pytest.raises(ValueError, match=r"http\(s\) URLs"):
+        seeder.parse([_publisher(determination=det)])
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("name", ""), ("name", None), ("home_url", ""), ("home_url", "times.example")],
+)
+def test_name_and_home_url_are_real(key: str, value: object) -> None:
+    with pytest.raises(ValueError, match=rf"entry 0: {key}"):
+        seeder.parse([_publisher(**{key: value})])
+
+
+@pytest.mark.parametrize("rate", [0, -1, True, "5"])
+def test_rate_limit_is_a_positive_integer_before_anything_is_written(rate: object) -> None:
+    """The database CHECK would refuse it at flush, with an error naming no entry."""
+    with pytest.raises(ValueError, match=r"entry 0: rate_limit_per_min must be a positive integer"):
+        seeder.parse([_publisher(rate_limit_per_min=rate)])
+
+
+def test_a_feed_url_may_appear_once_in_a_roster() -> None:
+    """Two feeds with one URL die at insert on the unique index, half-loaded, naming nothing."""
+    feed = {
+        "name": "World",
+        "url": "https://feeds.times.example/world.xml",
+        "discovery_method": "rss",
+        "acquisition_tier": "3_extraction",
+    }
+    other = _publisher(name="Example Herald", home_url="https://herald.example", feeds=[feed])
+    with pytest.raises(ValueError, match=r"entry 1: feed url .* appears twice"):
+        seeder.parse([_publisher(feeds=[feed]), other])
