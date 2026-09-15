@@ -396,8 +396,9 @@ def test_a_tier_three_feed_shipping_content_encoded_still_stores_no_body(
 def test_a_tier_one_feed_stores_the_content_element_as_the_body(
     app_session: Session,
 ) -> None:
-    """The branch exists so that ``1_full_feed`` is a value the registry can act on. No
-    publisher on the v1 roster ships one, which is why the tier is a human determination.
+    """The branch exists so that ``1_full_feed`` is a value the registry can act on. Four
+    v1-roster feeds carry the body; no mainstream publisher does, which is why the tier is a
+    human determination and not an inference from the feed.
     """
     feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.FULL_FEED)
     raw = (

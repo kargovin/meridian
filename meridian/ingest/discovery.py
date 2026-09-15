@@ -71,14 +71,16 @@ def _body_text(feed: Feed, item: FeedItem) -> str | None:
 
     Gated on the registered tier rather than on the content merely being present, because the
     tier is a human determination about what this feed ships and the presence of a ``<content>``
-    element is not. On the v1 roster this returns None every time — no mainstream publisher puts
-    article text in its feed, so tier 1 has no members and extraction is the default path. The
-    branch exists so that ``1_full_feed`` is a value the registry can act on rather than one an
-    operator can set to no effect.
+    element is not. No mainstream publisher puts article text in its feed; the v1 roster's
+    ``1_full_feed`` members are openly licensed nonprofit and institutional sources, and for
+    them this is the only place a body is ever obtained.
 
     Rights are deliberately not consulted. What we may publish is read at the point of use from
     the registry (RFC §5.2, rev 20); a copy taken here would answer for the rights held at
-    acquisition and keep answering after a downgrade.
+    acquisition and keep answering after a downgrade. ⚠️ The corollary: nothing here stops a
+    ``headline_only`` publisher's feed being registered ``1_full_feed`` and its bodies stored.
+    Today that is prevented only by the roster file's rule and a test over the file; the code
+    guard is an open RFC §11 item.
     """
     if feed.acquisition_tier is not AcquisitionTier.FULL_FEED:
         return None
