@@ -29,7 +29,11 @@ class AcquisitionTier(StrEnum):
 
 
 class RightsLevel(StrEnum):
-    """What we may publish from a source. Gates FR-S5."""
+    """What we may hold from a source, and therefore publish. Gates FR-S5.
+
+    ``headline_only`` means the body is never stored, whatever the feed ships and whether or
+    not the page could be fetched — not merely that it is excluded from summarization.
+    """
 
     BODY_TEXT = "body_text"
     HEADLINE_ONLY = "headline_only"

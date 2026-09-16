@@ -40,6 +40,8 @@ class Source(Base):
     #: and only the first is machine-readable, so this is a human determination.
     permitted_to_ingest: Mapped[bool] = mapped_column(sa.Boolean, server_default=sa.true())
 
+    #: May we hold the body. Read wherever a body would be written and again at the point of
+    #: use; never copied onto a record, so a change applies to articles already on file.
     rights_level: Mapped[RightsLevel] = mapped_column(StrEnumType(RightsLevel))
 
     jurisdiction: Mapped[str] = mapped_column(sa.Text)

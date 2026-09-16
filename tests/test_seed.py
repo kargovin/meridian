@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session
 
 from meridian.db import feeds, sources
 from meridian.db import seed as seeder
+from meridian.db.models import CanonicalRecord
+from meridian.ingest.discovery import run_cycle
 from tests.factories import make_source
+from tests.test_discovery import FakeFetcher, content_xml
 
 EXAMPLE = Path("seeds/sources.example.json")
 
@@ -245,17 +248,50 @@ def test_the_shipped_example_seeds_to_its_intended_poll_set(app_session: Session
     }
 
 
-def test_a_headline_only_publisher_never_has_a_full_feed_tier() -> None:
-    """A feed that ships full text is not a licence to store it.
+# Headline-only publishers whose feed ships the whole article. Registered ``1_full_feed``
+# because that is what the feed does; the rights level is what keeps the body out.
+V1_HEADLINE_ONLY_FULL_FEEDS = {
+    "Inter Press Service",
+    "The Conversation",
+    "ProPublica",
+    "KFF Health News",
+}
 
-    ``1_full_feed`` writes the body from the feed at discovery. For a publisher whose terms
-    forbid using the body, that stores what may not be held — so the tier must be extraction
-    even where the feed carries the text, and the rights gate then never asks for it.
+
+def test_no_headline_only_v1_publisher_stores_a_body_whatever_its_feed_ships(
+    app_session: Session,
+) -> None:
+    """A feed that ships full text is not a licence to hold it — on the real roster.
+
+    Every headline-only feed is answered with an article carrying ``<content:encoded>``, which
+    four of them really do ship. The body-text publishers are polled with the same article so
+    the run proves the gate discriminates on rights rather than storing nothing at all.
     """
-    for entry in seeder.parse(json.loads(V1.read_text())):
-        if entry.rights_level is RightsLevel.HEADLINE_ONLY:
-            tiers = {f.acquisition_tier for f in entry.feeds}
-            assert AcquisitionTier.FULL_FEED not in tiers, entry.name
+    seeder.seed(app_session, seeder.parse(json.loads(V1.read_text())))
+    polled = list(feeds.pollable(app_session))
+    assert {s.name for _f, s in polled if _f.acquisition_tier is AcquisitionTier.FULL_FEED} >= (
+        V1_HEADLINE_ONLY_FULL_FEEDS
+    )
+
+    # One distinct article per feed: the same link on every feed would collapse to one row
+    # under UNIQUE(url_canonical), and the test would be measuring that constraint instead.
+    run_cycle(
+        app_session,
+        FakeFetcher({f.url: content_xml((f"f{f.feed_id}", "One")) for f, _s in polled}),
+        sleep=lambda _: None,
+    )
+
+    by_source = {s.source_id: s.name for s in sources.list_all(app_session)}
+    rows = app_session.query(CanonicalRecord).all()
+    with_body = {by_source[a.source_id] for a in rows if a.body_text}
+    without = {by_source[a.source_id] for a in rows if not a.body_text}
+    assert with_body.isdisjoint(V1_HEADLINE_ONLY)
+    assert without >= V1_HEADLINE_ONLY
+    assert (
+        with_body
+        == {s.name for f, s in polled if f.acquisition_tier is AcquisitionTier.FULL_FEED}
+        - V1_HEADLINE_ONLY
+    )
 
 
 def test_every_v1_publisher_states_permitted_to_ingest_explicitly() -> None:

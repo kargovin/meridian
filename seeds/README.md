@@ -61,13 +61,13 @@ terms; one permits the paths and forbids the use. The terms decide.
 
 ## Acquisition tier vs rights
 
-`acquisition_tier` says *how* a body would be obtained; `rights_level` says *whether* it may be.
-They are set independently, and **the code does not cross-check them**: discovery stores the
-body of any `1_full_feed` feed without consulting rights. So a headline-only publisher whose feed
-happens to ship full text is given `3_extraction` here, not `1_full_feed`, and a test over this
-file holds that rule. It is a rule about the file's contents, not a guard in the system — an
-operator can still set a headline-only publisher's feed to `1_full_feed` through the admin
-surface, and the next poll would store bodies. The code guard is an open architecture item.
+`acquisition_tier` says *how* a body would be obtained; `rights_level` says *whether* it may be
+held. The two are independent facts and the file records each as it is: a headline-only
+publisher whose feed ships the whole article is `1_full_feed`, because that is what the feed
+does. Discovery reads the rights before the tier and stores nothing for a `headline_only`
+publisher whatever its feed carries, so the combination is honest and harmless; setting such a
+feed to `1_full_feed` on the admin surface changes nothing. Four v1 publishers are registered
+this way (IPS, The Conversation, ProPublica, KFF Health News).
 
 ## Operational notes
 
