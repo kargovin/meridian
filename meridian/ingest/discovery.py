@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from meridian.db import feeds as feeds_repo
 from meridian.db import poll_state
+from meridian.db import sources as sources_repo
 from meridian.db.models import CanonicalRecord, Feed, PipelineWork, Source
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher
 from meridian.ingest.parse import FeedItem, FeedUnreadable, parse
@@ -66,28 +67,28 @@ class CycleReport:
         )
 
 
-def _body_text(feed: Feed, item: FeedItem) -> str | None:
-    """The article body, when the feed genuinely carries one.
+def _body_text(source: Source, feed: Feed, item: FeedItem) -> str | None:
+    """The article body, when we may hold one and the feed genuinely carries one.
 
-    Gated on the registered tier rather than on the content merely being present, because the
-    tier is a human determination about what this feed ships and the presence of a ``<content>``
-    element is not. No mainstream publisher puts article text in its feed; the v1 roster's
-    ``1_full_feed`` members are openly licensed nonprofit and institutional sources, and for
-    them this is the only place a body is ever obtained.
+    Two questions, in this order. May this publisher's text be held at all — the rights, a
+    human determination about the outlet. And does this feed ship it — the tier, a human
+    determination about the feed rather than an inference from a ``<content>`` element being
+    present. Four v1-roster publishers ship the full article in a feed their terms forbid us
+    to use, so the two answers disagree on a live roster, and the tier alone stored the body.
 
-    Rights are deliberately not consulted. What we may publish is read at the point of use from
-    the registry (RFC §5.2, rev 20); a copy taken here would answer for the rights held at
-    acquisition and keep answering after a downgrade. ⚠️ The corollary: nothing here stops a
-    ``headline_only`` publisher's feed being registered ``1_full_feed`` and its bodies stored.
-    Today that is prevented only by the roster file's rule and a test over the file; the code
-    guard is an open RFC §11 item.
+    Rights are read here, not copied (RFC §5.2, rev 20): the record gets a body or nothing,
+    never a note of what the rights were. See ``sources.holds_body_rights`` for what a
+    downgrade or an upgrade does to records already on file. ``pollable()`` reads the registry
+    once per cycle, so a change lands on the next cycle, as ``enabled`` does.
     """
+    if not sources_repo.holds_body_rights(source):
+        return None
     if feed.acquisition_tier is not AcquisitionTier.FULL_FEED:
         return None
     return item.content
 
 
-def _insert(session: Session, feed: Feed, item: FeedItem) -> bool:
+def _insert(session: Session, source: Source, feed: Feed, item: FeedItem) -> bool:
     """Create the record and its work row, or do nothing. True if it was new.
 
     Idempotency is the schema's, not this function's: ``UNIQUE(source_id, guid)`` and
@@ -100,7 +101,7 @@ def _insert(session: Session, feed: Feed, item: FeedItem) -> bool:
     is canonical at insert, and a later stage rewriting the column would run after the second
     row already exists.
     """
-    body_text = _body_text(feed, item)
+    body_text = _body_text(source, feed, item)
     article_id = session.scalar(
         insert(CanonicalRecord)
         .values(
@@ -175,7 +176,7 @@ def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) ->
         log.warning("feed %d (%s) is unreadable: %s", feed.feed_id, feed.url, exc)
         return CycleReport(polled=1, failed=1)
 
-    discovered = sum(_insert(session, feed, item) for item in parsed.items)
+    discovered = sum(_insert(session, source, feed, item) for item in parsed.items)
     poll_state.record(
         session,
         feed.feed_id,

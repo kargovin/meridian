@@ -11,12 +11,12 @@ and rejected: over ~10 tokens SimHash recognises about 6% of genuine near-duplic
 100% over a full article, and a SHA-256 of a headline declares two different articles
 byte-identical, which collapses a real article into an ``AlternateCopy`` and inflates the
 distinct-source count that FR-S6 gates summarization on. A NULL column is visibly empty; a
-populated one that is wrong per-publisher is not. ⚠️ Four v1-roster feeds ship the full body
-and discovery stores it, so ``body_text`` is populated for those records while their hashes
-stay NULL — the RFC §5.1 invariant ``content_hash IS NOT NULL ⟺ body_text IS NOT NULL`` does
-not hold for them until dedup's backfill (``body_text IS NOT NULL AND content_hash IS NULL``)
-computes the hashes. No CHECK enforces the invariant, so nothing fails; the predicate is what
-finds them.
+populated one that is wrong per-publisher is not. ⚠️ Four v1-roster publishers ship the full
+body under rights that let discovery store it, so ``body_text`` is populated for those records
+while their hashes stay NULL — the RFC §5.1 invariant
+``content_hash IS NOT NULL ⟺ body_text IS NOT NULL`` does not hold for them until dedup's
+backfill (``body_text IS NOT NULL AND content_hash IS NULL``) computes the hashes. No CHECK
+enforces the invariant, so nothing fails; the predicate is what finds them.
 
 Retry and backoff are not here. A raising article keeps its claimed row with ``attempts``
 already incremented, and is picked up again once the lease expires.

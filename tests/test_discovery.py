@@ -13,11 +13,12 @@ from meridian_contract import (
     BodyProvenance,
     DiscoveryMethod,
     PipelineState,
+    RightsLevel,
     Stage,
 )
 from sqlalchemy.orm import Session
 
-from meridian.db import poll_state
+from meridian.db import poll_state, sources
 from meridian.db.models import CanonicalRecord, Feed, PipelineWork
 from meridian.ingest.discovery import run_cycle
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, FetchResult
@@ -396,9 +397,10 @@ def test_a_tier_three_feed_shipping_content_encoded_still_stores_no_body(
 def test_a_tier_one_feed_stores_the_content_element_as_the_body(
     app_session: Session,
 ) -> None:
-    """The branch exists so that ``1_full_feed`` is a value the registry can act on. Four
-    v1-roster feeds carry the body; no mainstream publisher does, which is why the tier is a
-    human determination and not an inference from the feed.
+    """The branch exists so that ``1_full_feed`` is a value the registry can act on. Eight
+    v1-roster feeds carry the body and four of those publishers grant the rights to hold it;
+    no mainstream publisher does either, which is why the tier is a human determination and
+    not an inference from the feed.
     """
     feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.FULL_FEED)
     raw = (
@@ -420,6 +422,91 @@ def test_a_tier_one_feed_stores_the_content_element_as_the_body(
     # here rather than by a later stage because a body stored with NULL provenance is
     # indistinguishable downstream from one nobody obtained (RFC §5.1).
     assert article.body_provenance is BodyProvenance.TIER1_FEED
+
+
+def content_xml(*items: tuple[str, str]) -> bytes:
+    """A feed whose items carry the whole article in ``<content:encoded>``."""
+    entries = "".join(
+        f"<item><title>{title}</title><link>https://x.example/{guid}</link>"
+        f"<guid>{guid}</guid><description>A teaser.</description>"
+        f"<content:encoded><![CDATA[THE WHOLE ARTICLE {guid}]]></content:encoded></item>"
+        for guid, title in items
+    )
+    return (
+        '<?xml version="1.0"?>'
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        f"<channel><title>Ex</title>{entries}</channel></rss>"
+    ).encode()
+
+
+CONTENT_ITEM = content_xml(("g1", "One"))
+
+
+def test_a_headline_only_publisher_gets_no_body_even_from_a_full_feed(
+    app_session: Session,
+) -> None:
+    """A feed that ships the article is not a licence to hold it.
+
+    Four v1-roster publishers ship full text in a feed their terms forbid us to use. The tier
+    describes the feed; the rights say whether the body may be held; and this is the one cell
+    of that table where the two disagree. Before this gate the file kept the two from meeting
+    by mis-registering those feeds as ``3_extraction``, and one admin edit undid it.
+    """
+    feed = _feed_with_source(
+        app_session,
+        acquisition_tier=AcquisitionTier.FULL_FEED,
+        source={"rights_level": RightsLevel.HEADLINE_ONLY},
+    )
+
+    run_cycle(app_session, FakeFetcher({feed.url: CONTENT_ITEM}), sleep=lambda _: None)
+
+    article = articles(app_session)[0]
+    assert article.body_text is None
+    assert article.body_provenance is None
+    # The record itself is still made: headline-only publishers feed classification and
+    # clustering (FR-S5). What is withheld is the body, not the article.
+    assert article.title == "One"
+    assert article.lede == "A teaser."
+
+
+def test_revoking_rights_stops_new_bodies_and_keeps_the_ones_held(
+    app_session: Session,
+) -> None:
+    """A downgrade takes effect on the next poll with no tier edit and no cascade.
+
+    Both halves are the point. New bodies stop — the gate reads the registry, not a copy taken
+    when the feed was registered. And the body already held stays: stopping collection and
+    unpublishing are different acts (Legal A-L5), and the second is a workflow of its own.
+    A gate that deleted on downgrade would be doing the second act by accident.
+    """
+    feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.FULL_FEED)
+    run_cycle(
+        app_session, FakeFetcher({feed.url: content_xml(("g1", "One"))}), sleep=lambda _: None
+    )
+    assert articles(app_session)[0].body_text == "THE WHOLE ARTICLE g1"
+
+    source = sources.get(app_session, feed.source_id)
+    assert source is not None
+    assert (
+        sources.set_rights_level(
+            app_session,
+            source.source_id,
+            level=RightsLevel.HEADLINE_ONLY,
+            expected_updated_at=source.updated_at,
+        )
+        is not None
+    )
+    app_session.commit()
+
+    run_cycle(
+        app_session,
+        FakeFetcher({feed.url: content_xml(("g1", "One"), ("g2", "Two"))}),
+        sleep=lambda _: None,
+    )
+
+    first, second = articles(app_session)
+    assert (first.guid, first.body_text) == ("g1", "THE WHOLE ARTICLE g1")
+    assert (second.guid, second.body_text, second.body_provenance) == ("g2", None, None)
 
 
 def test_a_record_with_no_body_has_no_provenance(app_session: Session) -> None:

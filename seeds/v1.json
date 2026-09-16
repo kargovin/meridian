@@ -299,7 +299,7 @@
     "rate_limit_per_min": 5,
     "determination": {
       "read_on": "2026-09-15",
-      "basis": "CORRECTED 15 Sep 2026 — an earlier reading recorded CC BY-SA 3.0 from a licence URL found in the feed; that was an image credit inside one article, not the publisher's licence, and the live feed carries no licence element. The terms: 'Copyright © 2026 IPS-Inter Press Service. All rights reserved.' Reprint policy: 'Republication or any other distribution of IPS materials is encouraged, but is only possible after written agreement of IPS … Users can choose to pay either a subscription fee … or to pay a republication fee per article. Different rates and conditions apply for commercial and non-profit users. In some cases, reproduction rights can be granted for free.' Body use is therefore refused without agreement. Feed display is not addressed — IPS publishes RSS feeds for readers — so this is headline_only ON SILENCE, a weaker basis than NPR's express permission. The feed ships full text; the tier is set to extraction so no body is stored.",
+      "basis": "CORRECTED 15 Sep 2026 — an earlier reading recorded CC BY-SA 3.0 from a licence URL found in the feed; that was an image credit inside one article, not the publisher's licence, and the live feed carries no licence element. The terms: 'Copyright © 2026 IPS-Inter Press Service. All rights reserved.' Reprint policy: 'Republication or any other distribution of IPS materials is encouraged, but is only possible after written agreement of IPS … Users can choose to pay either a subscription fee … or to pay a republication fee per article. Different rates and conditions apply for commercial and non-profit users. In some cases, reproduction rights can be granted for free.' Body use is therefore refused without agreement. Feed display is not addressed — IPS publishes RSS feeds for readers — so this is headline_only ON SILENCE, a weaker basis than NPR's express permission. The feed ships full text; the rights level is what keeps it from being stored.",
       "sources": [
         "https://www.ipsnews.net/reprinting-articles/",
         "https://www.ipsnews.net/feed/"
@@ -314,8 +314,7 @@
         "name": "All",
         "url": "https://www.ipsnews.net/feed/",
         "discovery_method": "rss",
-        "acquisition_tier": "3_extraction",
-        "note": "Ships full text; tier deliberately 3_extraction — see the determination."
+        "acquisition_tier": "1_full_feed"
       }
     ]
   },
@@ -328,7 +327,7 @@
     "rate_limit_per_min": 10,
     "determination": {
       "read_on": "2026-09-04",
-      "basis": "CC BY-ND 4.0 (NoDerivatives). Republishing guidelines: 'The text of our articles … is published under a Creative Commons Attribution-No Derivatives licence' … 'You can't systematically republish all of our articles' … 'You cannot use our articles for training artificial intelligence or machine learning models. The No Derivatives restriction in our Creative Commons licence prohibits using our content as training data for AI systems.' Extracts are expressly permitted: 'you can run the first few lines or paragraphs of the article'. A generated summary is a derivative, so: headline and extract only. The feed ships full text (6,279–16,477 chars) — the tier is set to extraction so no body is stored from it.",
+      "basis": "CC BY-ND 4.0 (NoDerivatives). Republishing guidelines: 'The text of our articles … is published under a Creative Commons Attribution-No Derivatives licence' … 'You can't systematically republish all of our articles' … 'You cannot use our articles for training artificial intelligence or machine learning models. The No Derivatives restriction in our Creative Commons licence prohibits using our content as training data for AI systems.' Extracts are expressly permitted: 'you can run the first few lines or paragraphs of the article'. A generated summary is a derivative, so: headline and extract only. The feed ships full text (6,279–16,477 chars); the rights level is what keeps it from being stored.",
       "sources": [
         "https://theconversation.com/uk/republishing-guidelines",
         "https://creativecommons.org/licenses/by-nd/4.0/"
@@ -343,8 +342,8 @@
         "name": "All articles",
         "url": "https://theconversation.com/articles.atom",
         "discovery_method": "rss",
-        "acquisition_tier": "3_extraction",
-        "note": "Atom feed. Ships full text; tier is deliberately not 1_full_feed so the body is never written for a headline-only publisher."
+        "acquisition_tier": "1_full_feed",
+        "note": "Atom feed."
       }
     ]
   },
@@ -357,7 +356,7 @@
     "rate_limit_per_min": 10,
     "determination": {
       "read_on": "2026-09-04",
-      "basis": "CC BY-NC-ND 3.0 US (link on the 'Steal Our Stories' page). Republication is free with credit; NoDerivatives forbids altered versions, and a generated summary is a derivative. Headline, blurb and link only. The feed ships full text (~16,453 chars measured); tier is set to extraction so no body is stored.",
+      "basis": "CC BY-NC-ND 3.0 US (link on the 'Steal Our Stories' page). Republication is free with credit; NoDerivatives forbids altered versions, and a generated summary is a derivative. Headline, blurb and link only. The feed ships full text (~16,453 chars measured); the rights level is what keeps it from being stored.",
       "sources": [
         "https://www.propublica.org/steal-our-stories",
         "http://creativecommons.org/licenses/by-nc-nd/3.0/us/"
@@ -372,8 +371,7 @@
         "name": "Main",
         "url": "https://feeds.propublica.org/propublica/main",
         "discovery_method": "rss",
-        "acquisition_tier": "3_extraction",
-        "note": "Ships full text; tier deliberately 3_extraction — see the determination."
+        "acquisition_tier": "1_full_feed"
       }
     ]
   },
@@ -414,7 +412,7 @@
     "rate_limit_per_min": 5,
     "determination": {
       "read_on": "2026-09-15",
-      "basis": "CC BY-NC-ND 4.0, declared inside the publisher's own feed. NoDerivatives forbids a generated summary. Headline and link only. The feed ships full text (~9,566 chars measured); tier is set to extraction so no body is stored.",
+      "basis": "CC BY-NC-ND 4.0, declared inside the publisher's own feed. NoDerivatives forbids a generated summary. Headline and link only. The feed ships full text (~9,566 chars measured); the rights level is what keeps it from being stored.",
       "sources": [
         "https://kffhealthnews.org/feed/",
         "https://creativecommons.org/licenses/by-nc-nd/4.0/"
@@ -429,8 +427,7 @@
         "name": "All",
         "url": "https://kffhealthnews.org/feed/",
         "discovery_method": "rss",
-        "acquisition_tier": "3_extraction",
-        "note": "Ships full text; tier deliberately 3_extraction — see the determination."
+        "acquisition_tier": "1_full_feed"
       }
     ]
   },

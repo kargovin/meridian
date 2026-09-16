@@ -194,6 +194,25 @@ def set_permitted_to_ingest(
     return source
 
 
+def holds_body_rights(source: Source) -> bool:
+    """May we hold this publisher's article text at all.
+
+    ``rights_level`` governs *holding* a body, not only publishing one: a publisher whose terms
+    forbid the use forbids the copy, so the gate sits at every point a body is written. Today
+    that is discovery, for a feed that ships the article; anything that later obtains a body
+    another way calls this first rather than comparing the enum itself, so the rule has one
+    home.
+
+    Reading the rights here is not the copy RFC §5.2 (rev 20) removed. Nothing about the
+    rights is written to the record; what is written is the body or nothing, and the
+    summarizer still asks the registry at its own point of use. A downgrade therefore stops
+    new bodies from the next poll and leaves the bodies already held — stopping collection and
+    unpublishing are different acts (Legal A-L5). An upgrade is forward-looking only: an
+    article seen while headline-only is already on file without a body and is not re-inserted.
+    """
+    return source.rights_level is RightsLevel.BODY_TEXT
+
+
 def _article_ids_by_rights(level: RightsLevel) -> sa.Select[tuple[int]]:
     return (
         sa.select(CanonicalRecord.article_id)
