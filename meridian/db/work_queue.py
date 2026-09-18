@@ -79,7 +79,11 @@ def claim(
                 attempts=PipelineWork.attempts + 1,
             )
             .returning(PipelineWork),
-            execution_options={"synchronize_session": False},
+            # ⚠️ populate_existing, or a row the session already holds comes back with its
+            # pre-claim attributes: RETURNING does not overwrite loaded state on an identity-map
+            # instance by default, so ``attempts`` reads one too low and ``claimed_by`` reads the
+            # previous holder. Invisible to a caller that meets the row here for the first time.
+            execution_options={"synchronize_session": False, "populate_existing": True},
         )
         .scalars()
         .all()
@@ -268,3 +272,107 @@ def terminate(session: Session, work: PipelineWork, reason: TerminalReason) -> N
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
     article.terminal_reason = reason
     _discharge(session, work)
+
+
+def heartbeat(
+    session: Session,
+    work_ids: Sequence[int],
+    *,
+    worker: str,
+    now: dt.datetime | None = None,
+) -> set[int]:
+    """Restamp the rows this worker still holds, and say which those are. Commits.
+
+    A claim's stamp is a promise to finish within the lease; a stage that waits on the network
+    cannot keep it for a whole batch (50 rows paced at 12 s is 600 s under a 300 s lease), so
+    the promise is renewed after each row and the lease bounds one row's work rather than the
+    batch's. A worker that dies stops renewing, and its rows become reclaimable one lease after
+    its last heartbeat — the same recovery as before, measured from a different moment.
+
+    ⚠️ Never routes through ``claim()``'s update: that increments ``attempts``, and a heartbeat
+    is not an attempt. Fifty rows in a batch would otherwise count as fifty attempts on every
+    row and dead-letter all of them.
+
+    ``WHERE claimed_by = worker`` is what makes the return value an ownership check: a row
+    another worker reclaimed keeps that worker's stamp and is absent from the result, so the
+    caller drops it before doing work that ``advance()`` would then refuse as ``StaleWork``.
+    """
+    if not work_ids:
+        return set()
+    now = now or dt.datetime.now(dt.UTC)
+    kept = session.scalars(
+        sa.update(PipelineWork)
+        .where(PipelineWork.work_id.in_(list(work_ids)), PipelineWork.claimed_by == worker)
+        .values(claimed_at=now)
+        .returning(PipelineWork.work_id),
+        execution_options={"synchronize_session": False},
+    ).all()
+    session.commit()
+    return set(kept)
+
+
+#: Backoff after a transient failure: 1, 2, 4, 8, 16 minutes, then the cap. Constants rather
+#: than knobs for now; with the lease they are one retry policy and belong in one place.
+RETRY_BASE = dt.timedelta(minutes=1)
+RETRY_CAP = dt.timedelta(hours=1)
+#: The attempt on which a row is dead-lettered instead of released.
+MAX_ATTEMPTS = 5
+
+
+def backoff_after(attempts: int) -> dt.timedelta:
+    """How long a row waits before its next attempt, given how many it has had."""
+    wait: dt.timedelta = RETRY_BASE * (2 ** max(attempts - 1, 0))
+    return min(wait, RETRY_CAP)
+
+
+def release(
+    session: Session,
+    work: PipelineWork,
+    *,
+    retry_at: dt.datetime,
+    error: str | None,
+) -> None:
+    """Give the row back unfinished: clear the claim, set when it is next due, record why.
+
+    For the failure a later attempt may not see — a publisher's 503, a timeout, a pacing wait
+    longer than the lease. The row keeps its ``attempts`` (the claim already counted this one),
+    so repeated releases walk up the backoff and reach ``dead_letter``.
+
+    Does not commit. The caller's rollback has already discarded the stage's partial output;
+    this is written on the clean session and committed by the caller.
+    """
+    row = session.get(PipelineWork, work.work_id)
+    if row is None:
+        raise StaleWork(f"work {work.work_id} is gone; another worker completed it")
+    row.claimed_at = None
+    row.claimed_by = None
+    row.next_attempt_at = retry_at
+    row.last_error = error[:2000] if error else None
+
+
+def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> None:
+    """Stop retrying: keep the row as the trace, and mark the article terminal.
+
+    ⚠️ Both writes, or the reconciler resurrects its own dead letters. ``open_article_work``
+    excludes dead-lettered rows and ``expected_article_work`` only excludes articles carrying a
+    ``terminal_reason`` — so a dead-lettered row alone reads as work owed forever, and the
+    re-enqueue succeeds because the open-row index also ignores dead-lettered rows. This spans
+    two tables and no CHECK can state it.
+
+    Does not commit.
+    """
+    row = session.get(PipelineWork, work.work_id)
+    if row is None:
+        raise StaleWork(f"work {work.work_id} is gone; another worker completed it")
+    if row.article_id is None:
+        raise ValueError(
+            f"work {row.work_id} has a cluster subject; terminal_reason lives on an article"
+        )
+    article = session.get(CanonicalRecord, row.article_id)
+    if article is None:
+        raise ValueError(f"work {row.work_id} names article {row.article_id}, which is gone")
+    row.dead_lettered_at = dt.datetime.now(dt.UTC)
+    row.claimed_at = None
+    row.claimed_by = None
+    row.last_error = error[:2000] if error else None
+    article.terminal_reason = TerminalReason.FAILED

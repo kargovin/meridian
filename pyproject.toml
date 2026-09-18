@@ -20,6 +20,11 @@ dependencies = [
     "feedparser>=6.0.11",
     "apscheduler>=3.10,<4",
     "lingua-language-detector>=2.2",
+    # Tier-3 acquisition. trafilatura with favor_precision=True was scored against seven
+    # alternatives on this roster's own pages; protego because the stdlib robotparser matches by
+    # path prefix only and reads a wildcard rule as matching nothing.
+    "trafilatura>=2.2.0",
+    "protego>=0.6.2",
 ]
 
 [dependency-groups]
