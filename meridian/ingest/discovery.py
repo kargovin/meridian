@@ -31,6 +31,7 @@ from meridian.db import poll_state
 from meridian.db import sources as sources_repo
 from meridian.db.models import CanonicalRecord, Feed, PipelineWork, Source
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher
+from meridian.ingest.pacing import Pacer
 from meridian.ingest.parse import FeedItem, FeedUnreadable, parse
 
 log = logging.getLogger(__name__)
@@ -215,34 +216,11 @@ def _interleave(
     return ordered
 
 
-def _pace(
-    source: Source,
-    last_request_at: dict[int, float],
-    sleep: Callable[[float], None],
-    clock: Callable[[], float],
-) -> None:
-    """Hold off long enough that a publisher's feeds share one politeness budget (FR-I3).
-
-    ``rate_limit_per_min`` is a promise about one host, and it lives on the publisher rather
-    than the feed precisely because N feeds each honouring it independently would exceed it
-    N-fold. Spacing here is the whole of that promise for discovery; the general per-domain
-    limiter arrives with tier-3 acquisition, which is the path with the volume.
-    """
-    previous = last_request_at.get(source.source_id)
-    now = clock()
-    if previous is not None:
-        gap = 60.0 / source.rate_limit_per_min
-        remaining = gap - (now - previous)
-        if remaining > 0:
-            sleep(remaining)
-            now = clock()
-    last_request_at[source.source_id] = now
-
-
 def run_cycle(
     session: Session,
     fetcher: Fetcher,
     *,
+    pacer: Pacer | None = None,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> CycleReport:
@@ -267,7 +245,10 @@ def run_cycle(
     if not due:
         return report
 
-    last_request_at: dict[int, float] = {}
+    # A pacer of this cycle's own only when none is shared in: the production caller passes
+    # the process-wide one, so a request here counts against the same budget as a fetch in
+    # the acquire stage.
+    pacer = pacer or Pacer(sleep=sleep, clock=clock)
     started = clock()
 
     # The publisher arrives with its feed. Reading it separately made two statements out of one,
@@ -276,7 +257,7 @@ def run_cycle(
     # remaining roster with it.
     for feed, source in _interleave(due):
         try:
-            _pace(source, last_request_at, sleep, clock)
+            pacer.acquire(source)
             report += _poll_one(session, feed, source, fetcher)
         except Exception as exc:
             session.rollback()
