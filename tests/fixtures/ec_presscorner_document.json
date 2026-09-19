@@ -1,0 +1,35 @@
+{
+ "ky": 212739,
+ "docuLanguageResource": {
+  "ky": 703324,
+  "title": "Commission disburses €3.3 billion in defence funding to Ukraine",
+  "subtitle": "Commission disburses €3.3 billion in defence funding to Ukraine",
+  "htmlContent": "<p>The European Commission will today disburse <strong>&euro;3.3 billion</strong> to <strong>Ukraine for defence procurement</strong> under the <a href=\"https://defence-industry-space.ec.europa.eu/eu-defence-industry/ukraine-support-loan_en\">&euro;90 billion Ukraine Support Loan</a>. The payment covers <strong>drones </strong>and<strong> missiles</strong> and will help Ukraine defend its territory and skies against Russia's ongoing aggression.</p><p>Ursula <strong>von der Leyen</strong>, President of the Commission: <em>&ldquo;Today, we will disburse &euro;3.3 billion to help </em><em>procure drones and missiles under the Ukraine Support Loan. Europe will continue to deliver the support Ukraine needs to defend its people and its territory.''&nbsp; </em></p>",
+  "pdfContent": null,
+  "hasPdf": true,
+  "pdfContentSize": 88560,
+  "language": "EN",
+  "dolaAvResources": [],
+  "dolaQuoteResources": [],
+  "attachmentResources": [],
+  "linkResources": [],
+  "dolaRLinkResources": [],
+  "etranslated": false,
+  "original": true
+ },
+ "refCd": "IP/26/1900",
+ "isSpeechWarning": false,
+ "eventDate": "2026-09-18",
+ "publishDate": "2026-09-18T09:47:46.000+02:00",
+ "isPriority": false,
+ "isEmbargo": false,
+ "isNoAlert": true,
+ "originalLanguage": "EN",
+ "estimatedTimeReading": 3,
+ "globalImg": null,
+ "_captured": {
+  "from": "https://ec.europa.eu/commission/presscorner/api/documents?reference=IP/26/1900&language=en",
+  "on": "2026-09-19",
+  "note": "htmlContent cut to its first two paragraphs; list-valued keys emptied"
+ }
+}
