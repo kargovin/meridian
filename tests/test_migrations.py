@@ -4,8 +4,11 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from meridian_contract import AcquisitionTier
+from sqlalchemy.orm import Session
 
 from meridian.db.models import Base
+from tests.factories import make_feed, make_source
 
 pytestmark = pytest.mark.postgres
 
@@ -36,6 +39,32 @@ def test_downgrade_leaves_no_residue(app_migrated: sa.Engine, app_alembic_config
                 ).scalars()
             )
             assert remaining <= {"alembic_version"}
+        finally:
+            command.upgrade(app_alembic_config, "head")
+
+
+def test_downgrading_past_tier_0_rewrites_rather_than_refuses(
+    app_session: Session, app_migrated: sa.Engine, app_alembic_config: Config
+) -> None:
+    """Revision c3e1fa9f2e61 down: a feed at ``0_unavailable`` becomes ``3_extraction``.
+
+    ADD CONSTRAINT validates existing rows, so without the rewrite the downgrade refuses on
+    any database holding a tier-0 feed — and ``app_migrated`` runs ``downgrade base`` on
+    whatever the previous test run left behind, which would strand the test database.
+    """
+    source = make_source(app_session)
+    feed = make_feed(app_session, source, acquisition_tier=AcquisitionTier.UNAVAILABLE)
+    app_session.commit()
+
+    with app_migrated.begin() as conn:
+        app_alembic_config.attributes["connection"] = conn
+        try:
+            command.downgrade(app_alembic_config, "-1")
+            tier = conn.execute(
+                sa.text("SELECT acquisition_tier FROM feed WHERE feed_id = :id"),
+                {"id": feed.feed_id},
+            ).scalar_one()
+            assert tier == AcquisitionTier.EXTRACTION.value
         finally:
             command.upgrade(app_alembic_config, "head")
 

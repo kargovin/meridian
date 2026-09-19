@@ -21,8 +21,15 @@ class DiscoveryMethod(StrEnum):
 
 
 class AcquisitionTier(StrEnum):
-    """How a source's article bodies are obtained."""
+    """How a feed's article bodies are obtained.
 
+    ``0_unavailable`` means no body is obtainable from this feed by any route we run — the
+    article page is gated behind a login, say — so its records carry a headline and lede only.
+    It is a fact about the feed, not a rights determination: the publisher may well permit body
+    use, and ``RightsLevel`` stays whatever the terms say.
+    """
+
+    UNAVAILABLE = "0_unavailable"
     FULL_FEED = "1_full_feed"
     PUBLISHER_API = "2_publisher_api"
     EXTRACTION = "3_extraction"
