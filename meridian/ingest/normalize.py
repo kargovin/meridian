@@ -8,6 +8,7 @@ Discovery stores the teaser exactly as the publisher wrote it, markup included, 
 ``parse`` records and does not judge. This is where it is judged.
 """
 
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -280,3 +281,23 @@ def language_input(title: str, lede: str | None) -> str:
     count, which is most of the accuracy at these lengths.
     """
     return f"{title} {lede}".strip() if lede else title.strip()
+
+
+def content_hash(body: str) -> str:
+    """The exact-duplicate fingerprint of a body (2.1.2 §3.1): SHA-256 over the body lowercased,
+    with punctuation removed and whitespace collapsed to single spaces.
+
+    The three normalizations are what let two hostings of one wire story hash alike — a house
+    style's curly quotes, a dateline's trailing full stop, a different line-wrapping. Anything
+    beyond that is a near-duplicate and is SimHash's job (§3.2), not this function's.
+
+    "Punctuation" is Unicode's: every character whose general category starts with ``P``.
+    Symbols (``S*``, so currency signs and ``+``) stay, because they carry meaning in a figure.
+    Stated here because the definition *is* the column: two implementations that disagree on
+    one character class produce two hashes for one article, and the invariant that every
+    body has exactly one hash is what dedup joins on.
+    """
+    lowered = body.lower()
+    unpunctuated = "".join(c for c in lowered if not unicodedata.category(c).startswith("P"))
+    collapsed = " ".join(unpunctuated.split())
+    return hashlib.sha256(collapsed.encode()).hexdigest()

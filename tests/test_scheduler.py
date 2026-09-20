@@ -16,9 +16,11 @@ from meridian.db import runtime_config
 from meridian.db.models import RuntimeConfig
 from meridian.db.runtime_config import ACQUIRE_INTERVAL_SECONDS, POLL_INTERVAL_SECONDS
 from meridian.db.session import session_factory
-from meridian.ingest.acquire import AcquireReport
+from meridian.ingest.acquire import AcquireReport, Network
 from meridian.ingest.discovery import CycleReport
 from meridian.ingest.fetch import Fetcher, FetchResult
+from meridian.ingest.pacing import Pacer
+from meridian.ingest.robots import RobotsCache
 from meridian.ingest.scheduler import (
     ACQUIRE_JOB_ID,
     JOB_ID,
@@ -235,9 +237,18 @@ def _set_knob(sessions: sessionmaker[Session], knob: runtime_config.IntKnob, val
         session.commit()
 
 
+def _network() -> Network:
+    def unreachable(url: str, *, user_agent: str, headers: object) -> FetchResult:
+        raise AssertionError("the scheduler tests stub the batch; nothing should fetch")
+
+    pacer = Pacer(sleep=lambda _: None)
+    return Network(fetcher=unreachable, robots=RobotsCache(unreachable, pacer), pacer=pacer)
+
+
 def _acquire(sessions: sessionmaker[Session], stub: StubScheduler, **kw: Any) -> AcquireScheduler:
     return AcquireScheduler(
         sessions,
+        _network(),
         lease=dt.timedelta(minutes=5),
         scheduler=stub,
         run=kw.pop("run", lambda session, **_: AcquireReport()),

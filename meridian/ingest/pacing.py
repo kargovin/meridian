@@ -13,7 +13,8 @@ does (T10, a single replica). If that changes, the reservation below moves into 
 
 import threading
 import time
-from collections.abc import Callable
+from collections import defaultdict
+from collections.abc import Callable, Hashable, Iterable
 
 from meridian.db.models import Source
 
@@ -64,8 +65,54 @@ class Pacer:
             self._sleep(wait)
         return wait
 
+    def try_acquire(
+        self, source: Source, *, max_wait: float, floor: float | None = None
+    ) -> float | None:
+        """Take the next slot if it opens within ``max_wait`` seconds; otherwise reserve nothing.
+
+        Returns the time waited, or None when the slot was too far off. One lock for the
+        decision and the reservation together: ``wait_for`` followed by ``acquire`` leaves a
+        gap in which another job can take the slot, and the caller then sleeps past the bound
+        it just checked against — a lease-holding stage would overstay its lease by exactly
+        the amount it asked about.
+        """
+        with self._lock:
+            wait = self._wait(source, floor)
+            if wait > max_wait:
+                return None
+            self._slot[source.source_id] = self._clock() + wait
+        if wait > 0:
+            self._sleep(wait)
+        return wait
+
     def _wait(self, source: Source, floor: float | None) -> float:
         previous = self._slot.get(source.source_id)
         if previous is None:
             return 0.0
         return max(previous + self.gap(source, floor=floor) - self._clock(), 0.0)
+
+
+def round_robin[T](items: Iterable[T], *, key: Callable[[T], Hashable]) -> list[T]:
+    """Order items so consecutive ones have different keys, keeping each key's own order.
+
+    For a batch of requests grouped by publisher. Politeness is per publisher, so issuing one
+    publisher's requests back to back means waiting out the full gap before each — the worst
+    possible order, and the one a database's natural order tends to produce. Round-robin
+    instead: by the time the batch returns to a publisher it has spent the other publishers'
+    requests, and that time counts towards the gap.
+
+    Measured on discovery, 8 publishers x 3 feeds at 5 requests/min: 194 s in feed order, 26 s
+    interleaved. Identical politeness — every publisher still sees the same minimum spacing —
+    for a seventh of the wall time.
+    """
+    queues: dict[Hashable, list[T]] = defaultdict(list)
+    for item in items:
+        queues[key(item)].append(item)
+
+    ordered: list[T] = []
+    pending = list(queues.values())
+    while pending:
+        for queue in pending:
+            ordered.append(queue.pop(0))
+        pending = [queue for queue in pending if queue]
+    return ordered

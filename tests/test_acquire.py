@@ -5,6 +5,7 @@ are both load-bearing here and neither exists on SQLite.
 """
 
 import datetime as dt
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -13,12 +14,32 @@ from sqlalchemy.orm import Session
 
 from meridian.db import work_queue
 from meridian.db.models import CanonicalRecord, PipelineWork
-from meridian.ingest.acquire import handle, run_batch
+from meridian.ingest.acquire import AcquireReport, Network, run_batch
+from meridian.ingest.acquire import handle as _handle
+from meridian.ingest.fetch import FetchResult
+from meridian.ingest.pacing import Pacer
+from meridian.ingest.robots import RobotsCache
 from tests.factories import make_article, make_cluster, make_member, make_source, make_work
 
 pytestmark = pytest.mark.postgres
 
 LEASE = dt.timedelta(minutes=5)
+
+
+def _no_network(url: str, *, user_agent: str, headers: object) -> FetchResult:
+    """Every article in this file has no feed, so no rung of the ladder may reach the network."""
+    raise AssertionError(f"the network was reached for {url}")
+
+
+_pacer = Pacer(sleep=lambda _: None)
+NETWORK = Network(fetcher=_no_network, robots=RobotsCache(_no_network, _pacer), pacer=_pacer)
+
+
+def handle(session: Session, work: PipelineWork) -> bool:
+    """The MER-17 shape: True when the article continued, False when FR-I7 dropped it."""
+    report = _handle(session, work, network=NETWORK, lease=LEASE)
+    assert report.acquired + report.dropped == 1, report
+    return report.acquired == 1
 
 
 def _queued(session: Session, article_id: int) -> list[PipelineWork]:
@@ -188,8 +209,8 @@ def test_a_second_batch_does_not_re_examine_a_dropped_article(app_session: Sessi
     make_work(app_session, stage=Stage.ACQUIRE, article=article)
     app_session.commit()
 
-    first = run_batch(app_session, lease=LEASE)
-    second = run_batch(app_session, lease=LEASE)
+    first = run_batch(app_session, network=NETWORK, lease=LEASE)
+    second = run_batch(app_session, network=NETWORK, lease=LEASE)
 
     assert (first.claimed, first.dropped) == (1, 1)
     assert second.claimed == 0
@@ -219,7 +240,7 @@ def test_one_bad_article_does_not_stop_the_batch(app_session: Session) -> None:
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("meridian.ingest.acquire.work_queue.advance", explode_for_bad)
-        report = run_batch(app_session, lease=LEASE)
+        report = run_batch(app_session, network=NETWORK, lease=LEASE)
 
     assert (report.claimed, report.acquired, report.failed) == (2, 1, 1)
     app_session.expire_all()
@@ -244,7 +265,7 @@ def test_a_failure_records_what_it_failed_on(app_session: Session) -> None:
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("meridian.ingest.acquire.work_queue.advance", explode)
-        run_batch(app_session, lease=LEASE)
+        run_batch(app_session, network=NETWORK, lease=LEASE)
 
     app_session.expire_all()
     (row,) = _queued(app_session, article.article_id)
@@ -260,7 +281,7 @@ def test_the_batch_respects_its_limit(app_session: Session) -> None:
         make_work(app_session, stage=Stage.ACQUIRE, article=article)
     app_session.commit()
 
-    report = run_batch(app_session, lease=LEASE, limit=2)
+    report = run_batch(app_session, network=NETWORK, lease=LEASE, limit=2)
 
     assert report.claimed == 2
 
@@ -274,7 +295,7 @@ def test_the_batch_claims_only_its_own_stage(app_session: Session) -> None:
     make_work(app_session, stage=Stage.CLASSIFY, article=article)
     app_session.commit()
 
-    assert run_batch(app_session, lease=LEASE).claimed == 0
+    assert run_batch(app_session, network=NETWORK, lease=LEASE).claimed == 0
 
 
 # --------------------------------------------------------------------------- the lost lease
@@ -363,17 +384,15 @@ def test_a_stolen_row_does_not_take_down_the_rest_of_the_batch(app_session: Sess
         make_work(app_session, stage=Stage.ACQUIRE, article=article)
     app_session.commit()
 
-    real_handle = handle
-
-    def steal_then_handle(session: Session, work: PipelineWork) -> bool:
+    def steal_then_handle(session: Session, work: PipelineWork, **kw: Any) -> AcquireReport:
         if work.article_id == stolen.article_id:
             session.execute(sa.delete(PipelineWork).where(PipelineWork.work_id == work.work_id))
             session.commit()
-        return real_handle(session, work)
+        return _handle(session, work, **kw)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("meridian.ingest.acquire.handle", steal_then_handle)
-        report = run_batch(app_session, lease=LEASE, limit=10)
+        report = run_batch(app_session, network=NETWORK, lease=LEASE, limit=10)
 
     assert (report.claimed, report.acquired, report.stale, report.failed) == (3, 2, 1, 0)
 
@@ -422,20 +441,18 @@ def test_an_article_deleted_mid_batch_does_not_take_down_the_rest(app_session: S
         make_work(app_session, stage=Stage.ACQUIRE, article=article)
     app_session.commit()
 
-    real_handle = handle
-
-    def delete_then_handle(session: Session, work: PipelineWork) -> bool:
+    def delete_then_handle(session: Session, work: PipelineWork, **kw: Any) -> AcquireReport:
         if work.article_id == doomed.article_id:
             session.execute(
                 sa.delete(CanonicalRecord).where(CanonicalRecord.article_id == doomed.article_id)
             )
             session.commit()
             session.expire_all()
-        return real_handle(session, work)
+        return _handle(session, work, **kw)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("meridian.ingest.acquire.handle", delete_then_handle)
-        report = run_batch(app_session, lease=LEASE, limit=10)
+        report = run_batch(app_session, network=NETWORK, lease=LEASE, limit=10)
 
     assert (report.claimed, report.acquired, report.failed) == (3, 2, 1)
 

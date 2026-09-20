@@ -12,8 +12,7 @@ work row is an article that has stopped moving with no error, no retry and no de
 
 import logging
 import time
-from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from meridian_contract import (
@@ -31,7 +30,7 @@ from meridian.db import poll_state
 from meridian.db import sources as sources_repo
 from meridian.db.models import CanonicalRecord, Feed, PipelineWork, Source
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher
-from meridian.ingest.pacing import Pacer
+from meridian.ingest.pacing import Pacer, round_robin
 from meridian.ingest.parse import FeedItem, FeedUnreadable, parse
 
 log = logging.getLogger(__name__)
@@ -189,33 +188,6 @@ def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) ->
     return CycleReport(polled=1, discovered=discovered, skipped_items=parsed.skipped)
 
 
-def _interleave(
-    due: Sequence[tuple[Feed, Source]],
-) -> list[tuple[Feed, Source]]:
-    """Order feeds so consecutive requests go to different publishers.
-
-    Politeness is per publisher, so polling one publisher's feeds back to back means waiting out
-    the full gap between each — the worst possible order, and the one feed id order produces.
-    Round-robin instead: by the time the cycle returns to a publisher it has already spent the
-    other publishers' requests, and that time counts towards the gap.
-
-    Measured, 8 publishers x 3 feeds at 5 requests/min: 194 s in feed order, 26 s interleaved.
-    Identical politeness — every publisher still sees the same minimum spacing — for a seventh
-    of the wall time, which is a seventh of this term of the freshness budget (RFC §7.1).
-    """
-    by_source: dict[int, list[tuple[Feed, Source]]] = defaultdict(list)
-    for pair in due:
-        by_source[pair[0].source_id].append(pair)
-
-    ordered: list[tuple[Feed, Source]] = []
-    queues = list(by_source.values())
-    while queues:
-        for queue in queues:
-            ordered.append(queue.pop(0))
-        queues = [queue for queue in queues if queue]
-    return ordered
-
-
 def run_cycle(
     session: Session,
     fetcher: Fetcher,
@@ -255,7 +227,7 @@ def run_cycle(
     # and under READ COMMITTED they can disagree — a publisher deleted between them is missing
     # from the second, and the lookup raised *outside* the per-feed guard below, taking the whole
     # remaining roster with it.
-    for feed, source in _interleave(due):
+    for feed, source in round_robin(due, key=lambda pair: pair[0].source_id):
         try:
             pacer.acquire(source)
             report += _poll_one(session, feed, source, fetcher)

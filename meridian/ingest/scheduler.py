@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from meridian.db import runtime_config
 from meridian.db.runtime_config import IntKnob
-from meridian.ingest.acquire import AcquireReport, run_batch
+from meridian.ingest.acquire import AcquireReport, Network, run_batch
 from meridian.ingest.discovery import CycleReport, run_cycle
 from meridian.ingest.fetch import Fetcher
 
@@ -35,6 +35,7 @@ class AcquireRun(Protocol):
         self,
         session: Session,
         *,
+        network: Network,
         lease: dt.timedelta,
         limit: int = ...,
         worker: str | None = ...,
@@ -201,6 +202,7 @@ class AcquireScheduler(_CadencedJob[AcquireReport]):
     def __init__(
         self,
         sessions: sessionmaker[Session],
+        network: Network,
         *,
         lease: dt.timedelta,
         limit: int = 50,
@@ -212,20 +214,31 @@ class AcquireScheduler(_CadencedJob[AcquireReport]):
         run: AcquireRun = run_batch,
     ) -> None:
         super().__init__(sessions, scheduler=scheduler)
+        self._network = network
         self._lease = lease
         self._limit = limit
         self._run = run
 
     def _run_once(self, session: Session) -> AcquireReport:
-        report = self._run(session, lease=self._lease, limit=self._limit)
+        report = self._run(session, network=self._network, lease=self._lease, limit=self._limit)
         # Logged only when there was something to do: this runs every 30 s against a roster
         # that is usually quiet, and a line per empty batch buries the ones that matter.
         if report.claimed:
             log.info(
-                "acquire batch: claimed=%d acquired=%d dropped=%d failed=%d",
+                "acquire batch: claimed=%d acquired=%d dropped=%d failed=%d stale=%d "
+                "fetched=%d robots_blocked=%d refused=%d deferred=%d dead_lettered=%d "
+                "extract_empty=%d adapter_missing=%d",
                 report.claimed,
                 report.acquired,
                 report.dropped,
                 report.failed,
+                report.stale,
+                report.fetched,
+                report.robots_blocked,
+                report.fetch_refused,
+                report.fetch_deferred,
+                report.dead_lettered,
+                report.extract_empty,
+                report.adapter_missing,
             )
         return report

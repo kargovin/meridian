@@ -7,7 +7,7 @@ import time
 from meridian_contract import RightsLevel
 
 from meridian.db.models import Source
-from meridian.ingest.pacing import Pacer
+from meridian.ingest.pacing import Pacer, round_robin
 
 
 def _source(source_id: int, rate: int) -> Source:
@@ -85,6 +85,42 @@ def test_wait_for_reports_without_reserving() -> None:
     # Asking twice reserved nothing: the real acquire still waits the same 12 s.
     assert pacer.acquire(source) == 12.0
     assert clock.slept == [12.0]
+
+
+def test_try_acquire_takes_a_slot_within_the_bound() -> None:
+    clock = Clock()
+    pacer = Pacer(sleep=clock.sleep, clock=clock)
+    source = _source(1, 5)
+    pacer.acquire(source)
+    assert pacer.try_acquire(source, max_wait=12.0) == 12.0
+    assert clock.slept == [12.0]
+    # It reserved: the next request waits the full gap again.
+    assert pacer.wait_for(source) == 12.0
+
+
+def test_try_acquire_past_the_bound_reserves_nothing_and_sleeps_nothing() -> None:
+    clock = Clock()
+    pacer = Pacer(sleep=clock.sleep, clock=clock)
+    source = _source(1, 5)
+    pacer.acquire(source)
+    assert pacer.try_acquire(source, max_wait=11.9) is None
+    assert clock.slept == []
+    # Nothing was reserved: the slot is still 12 s away, not 24.
+    assert pacer.wait_for(source) == 12.0
+    assert pacer.try_acquire(source, max_wait=30.0, floor=20.0) == 20.0
+
+
+def test_round_robin_alternates_keys_and_keeps_each_keys_order() -> None:
+    items = [("a", 1), ("a", 2), ("a", 3), ("b", 1), ("b", 2), ("c", 1)]
+    assert round_robin(items, key=lambda item: item[0]) == [
+        ("a", 1),
+        ("b", 1),
+        ("c", 1),
+        ("a", 2),
+        ("b", 2),
+        ("a", 3),
+    ]
+    assert round_robin([], key=lambda item: item) == []
 
 
 def test_two_jobs_sharing_one_pacer_keep_one_budget_between_them() -> None:
