@@ -976,34 +976,75 @@ def test_a_dropped_tier1_article_keeps_the_hash_invariant(app_session: Session) 
 # --------------------------------------------- a robots.txt outage is an outage, not an answer
 
 
-def test_an_unreachable_robots_txt_defers_the_fetch_without_a_strike(app_session: Session) -> None:
+def test_an_unreachable_robots_txt_defers_the_fetch_and_the_schedule_ends_it(
+    app_session: Session,
+) -> None:
     """RFC 9309 closes a host whose robots.txt cannot be read and nothing earlier is held. For
-    this stage that must not mean the article continues without a body for good — the host
-    was down, not refusing — so the row goes back until the cache will ask again, and the
-    wait costs no attempt."""
+    this stage that must not mean the article continues without a body at once — the host was
+    down, not refusing — so the row goes back until the cache will ask again. But the host
+    answered 5xx to a request we made, which is what a page 503 is, so it is a strike: an
+    outage that outlasts the schedule ends as a fetch given up, and the article continues,
+    rather than every article of the publisher being held in this stage for as long as the
+    outage lasts, owed and unreadable and invisible to the reconciler."""
     fetcher = Fetcher(
         {
             ROBOTS: FetchResult(status=503, error="Service Unavailable"),
             f"{HOST}/news/one": FetchResult(status=200, body=_page()),
         }
     )
-    network, _ = _network(fetcher)
+    network, clock = _network(fetcher)
     _, _, article, _ = _article(app_session)
-    before = dt.datetime.now(dt.UTC)
+
+    for attempt in range(1, work_queue.MAX_ATTEMPTS):
+        before = dt.datetime.now(dt.UTC)
+        report = run_batch(app_session, network=network, lease=LEASE)
+        assert report == AcquireReport(claimed=1, fetch_deferred=1), attempt
+        (row,) = _work_rows(app_session)
+        assert row.attempts == attempt, "an outage the host answered with is a strike"
+        assert row.last_error is not None and "robots.txt" in row.last_error
+        # No sooner than the cache's own retry (10 min), which outlasts these backoffs.
+        assert before + dt.timedelta(minutes=9) <= row.next_attempt_at
+        assert row.next_attempt_at <= before + dt.timedelta(minutes=11)
+        clock.now += 601.0
+        app_session.execute(sa.update(PipelineWork).values(next_attempt_at=dt.datetime.now(dt.UTC)))
+        app_session.commit()
+    assert fetcher.articles == [], "closed: the page is never asked for"
+    assert fetcher.calls.count(ROBOTS) == work_queue.MAX_ATTEMPTS - 1
 
     report = run_batch(app_session, network=network, lease=LEASE)
 
-    assert fetcher.articles == [], "closed: the page is not asked for"
-    assert report == AcquireReport(claimed=1, fetch_deferred=1)
-    (row,) = _work_rows(app_session)
-    assert row.attempts == 0
-    assert row.claimed_at is None
-    assert row.last_error is not None and "robots.txt" in row.last_error
-    assert (
-        before + dt.timedelta(minutes=9) <= row.next_attempt_at <= before + dt.timedelta(minutes=11)
-    )
+    assert report == AcquireReport(claimed=1, acquired=1, fetch_abandoned=1)
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
     app_session.refresh(article)
-    assert article.pipeline_state is PipelineState.DISCOVERED and article.body_text is None
+    assert article.pipeline_state is PipelineState.ACQUIRED and article.body_text is None
+
+
+def test_a_robots_outage_is_read_once_per_rung(app_session: Session) -> None:
+    """Whether we may ask, why not, and the site's spacing come from one read of the cache. Two
+    reads can straddle the entry's expiry: the second fetches again through the pacer, taking
+    a slot, and may answer for a different file than the first — a host back up between the
+    two reads would be counted as a rule against us, for good. Under a clock that ticks past
+    the outage TTL on every read, a rung still fetches robots.txt exactly once."""
+
+    class Ticking(Clock):
+        def __call__(self) -> float:
+            self.now += 1.0
+            return self.now
+
+    fetcher = Fetcher({ROBOTS: FetchResult(status=503, error="Service Unavailable")})
+    clock = Ticking()
+    pacer = Pacer(sleep=clock.sleep, clock=clock)
+    network = Network(
+        fetcher=fetcher,
+        robots=RobotsCache(fetcher, pacer, clock=clock, failure_ttl=0.5),
+        pacer=pacer,
+    )
+    _article(app_session)
+
+    report = run_batch(app_session, network=network, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, fetch_deferred=1)
+    assert fetcher.calls.count(ROBOTS) == 1
 
 
 # ---------------------------------------------------- a body over the cap is refused, not retried
@@ -1059,3 +1100,85 @@ def test_a_cached_robots_rule_outlives_an_outage_and_is_still_a_rule(app_session
     assert fetcher.calls.count(ROBOTS) == 2, "the refresh was attempted"
     assert fetcher.articles == []
     assert report == AcquireReport(claimed=1, acquired=1, robots_blocked=1)
+
+
+# ------------------------------------ the re-read waits for an operator's uncommitted downgrade
+
+
+def test_the_re_read_waits_for_an_operators_uncommitted_downgrade_and_sees_it(
+    app_session: Session,
+) -> None:
+    """The operator's transaction holds ``FOR UPDATE`` on the publisher — the downgrade flushed,
+    not yet committed — when our write transaction re-reads the gates. A plain refresh would
+    not wait: under MVCC it reads the last committed row, still ``body_text``, and the body is
+    stored a millisecond before the downgrade lands. ``FOR SHARE`` waits for their commit and
+    sees ``headline_only``. ``lock_timeout`` on our side turns a deadlock into an error rather
+    than a hang; there is none, because the operator touches only ``source``."""
+    import threading
+    import time
+
+    from meridian.db import sources as sources_repo
+
+    fetcher = Fetcher({f"{HOST}/news/one": FetchResult(status=200, body=_page())})
+    network, _ = _network(fetcher)
+    source, _, article, _ = _article(app_session)
+    source_id = source.source_id
+    engine = app_session.get_bind()
+    assert isinstance(engine, sa.Engine)
+    operator = Session(engine, expire_on_commit=False)
+    timing: dict[str, float] = {}
+    threads: list[threading.Thread] = []
+
+    def take_the_lock_then_commit_later() -> None:
+        src = operator.get(Source, source_id)
+        assert src is not None
+        sources_repo.set_rights_level(
+            operator, source_id, level=RightsLevel.HEADLINE_ONLY, expected_updated_at=src.updated_at
+        )  # FOR UPDATE held, flushed, not committed
+
+        def commit_later() -> None:
+            time.sleep(0.4)
+            # Stamped before the call: our FOR SHARE can return the instant the commit lands,
+            # which is before this thread gets control back from commit().
+            timing["commit_started"] = time.monotonic()
+            operator.commit()
+
+        thread = threading.Thread(target=commit_later)
+        threads.append(thread)
+        thread.start()
+
+    fetcher.on_call[f"{HOST}/news/one"] = take_the_lock_then_commit_later
+
+    def before(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        if "FOR SHARE" in statement:
+            timing["share_started"] = time.monotonic()
+
+    def after(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        if "FOR SHARE" in statement:
+            timing["share_returned"] = time.monotonic()
+
+    sa.event.listen(engine, "before_cursor_execute", before)
+    sa.event.listen(engine, "after_cursor_execute", after)
+    app_session.execute(sa.text("SET lock_timeout = '5s'"))
+    app_session.commit()
+    try:
+        report = run_batch(app_session, network=network, lease=LEASE)
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", before)
+        sa.event.remove(engine, "after_cursor_execute", after)
+        for thread in threads:
+            thread.join(timeout=5)
+        operator.close()
+
+    assert "share_started" in timing, "the re-read is FOR SHARE"
+    assert timing["share_returned"] >= timing["commit_started"], "it waited for their commit"
+    assert report == AcquireReport(claimed=1, acquired=1, withheld=1)
+    with _watcher(app_session) as db:
+        assert (
+            db.scalar(
+                sa.select(CanonicalRecord.body_text).where(
+                    CanonicalRecord.article_id == article.article_id
+                )
+            )
+            is None
+        )

@@ -129,11 +129,16 @@ class _Deferred:
     """The ladder's answer for an article that must not continue in this batch."""
 
     error: str
-    #: When the row is next due. None for a failed fetch — the caller sets it from the backoff
-    #: schedule, or on the last attempt gives the fetch up — and a time for a wait that is not
-    #: the row's fault (a pacing slot past the lease, a robots.txt outage), which is not a
-    #: failure and must never use up an attempt however often it recurs.
-    retry_at: dt.datetime | None = None
+    #: Whether this counts against the row's schedule. A failure the host answered with — a
+    #: 5xx, no answer, a robots.txt that could not be read — is a strike, and the schedule
+    #: ends it: on the attempt ``MAX_ATTEMPTS`` names the fetch is given up. A wait in which
+    #: nothing was asked of the host (a pacing slot past the lease) is not, however often it
+    #: recurs, or a row paced out often enough would meet its first real failure with no
+    #: schedule left.
+    strike: bool
+    #: The earliest the row may be tried again, when the wait has a clock of its own — the
+    #: pacing slot, the robots cache's next retry. A strike waits at least its backoff as well.
+    not_before: dt.datetime | None = None
 
 
 _NO_FETCH = _Obtained()
@@ -153,7 +158,13 @@ def _may_hold_body(session: Session, source: Source) -> bool:
     ``FOR SHARE`` on the publisher's row: the admin surface's governing writes take
     ``FOR UPDATE`` on it, so either their change committed before this read and is seen, or it
     waits for this transaction to commit — a body is written under the rights in force at the
-    write, never under rights already withdrawn. Held for the write transaction only.
+    write, never under rights already withdrawn. A plain refresh would not wait: under MVCC it
+    reads the last *committed* row and misses a downgrade flushed but not yet committed. Held
+    for the write transaction only.
+
+    The feed's tier is deliberately not re-read. The tier says where the words are; the gates
+    say whether we may hold them. A tier moved mid-fetch changes the route for the next article,
+    not the standing of a body already obtained.
     """
     session.refresh(source, with_for_update={"read": True})
     return _gates_open(source)
@@ -222,27 +233,33 @@ def _obtain_body(
     # to answer. Nothing has been written yet, so this ends the transaction and moves nothing.
     session.commit()
 
-    if not network.robots.allowed(request_url, source):
-        retry = network.robots.closed_by_outage(request_url, source)
-        if retry is not None:
+    # One read of the robots cache for the whole rung: whether we may ask, why not, and the
+    # site's own spacing. Two reads can straddle the entry's expiry and answer for two files.
+    robots = network.robots.check(request_url, source)
+    if not robots.allowed:
+        if robots.outage_retry_in is not None:
             # The host could not even say whether we may ask, and nothing earlier is held.
-            # That is an outage, not an answer: come back when the cache will, and do not
-            # spend the row's schedule on it — the page was never requested.
+            # An outage, not an answer — but one the host gave to a request we made, so it is
+            # a strike like a page 503: come back no sooner than the cache will, and let the
+            # schedule end it, or a robots.txt that 5xxs for a week holds every article of
+            # the publisher in this stage for the week, owed and unreadable.
             return _Deferred(
                 error=f"robots.txt for {request_url} unreachable; closed until retried",
-                retry_at=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=retry),
+                strike=True,
+                not_before=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=robots.outage_retry_in),
             )
         log.info("article %d: robots.txt disallows %s", article.article_id, request_url)
         return _Obtained(counted=AcquireReport(robots_blocked=1))
 
-    floor = network.robots.crawl_delay(request_url, source)
+    floor = robots.crawl_delay
     waited = network.pacer.try_acquire(source, max_wait=lease.total_seconds(), floor=floor)
     if waited is None:
         wait = network.pacer.wait_for(source, floor=floor)
         return _Deferred(
             error=f"pacing: publisher {source.source_id}'s next slot is {wait:.0f}s away, "
             "past the lease",
-            retry_at=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=wait),
+            strike=False,
+            not_before=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=wait),
         )
 
     result = network.fetcher(
@@ -251,7 +268,9 @@ def _obtain_body(
     if (result.status is None and result.retryable) or (
         result.status is not None and result.status >= 500
     ):
-        return _Deferred(error=f"fetch {request_url}: status={result.status} {result.error}")
+        return _Deferred(
+            error=f"fetch {request_url}: status={result.status} {result.error}", strike=True
+        )
     if result.status != 200 or result.body is None:
         log.warning(
             "article %d: %s answered %s %s; continuing without a body",
@@ -331,7 +350,7 @@ def handle(
 
     outcome = _obtain_body(session, article, source, feed, network=network, lease=lease)
     if isinstance(outcome, _Deferred):
-        if outcome.retry_at is not None or work.attempts < work_queue.MAX_ATTEMPTS:
+        if not outcome.strike or work.attempts < work_queue.MAX_ATTEMPTS:
             return _defer(session, work, outcome)
         # The page has failed on every attempt the schedule allows. What is given up is the
         # fetch, not the article: its headline and lede are real, so it continues without a
@@ -372,22 +391,18 @@ def handle(
 def _defer(session: Session, work: PipelineWork, deferred: _Deferred) -> AcquireReport:
     """Give the row back for a later batch. Commits.
 
-    A pacing wait carries its own retry time and is never a strike against the row. A failed
-    fetch walks up the backoff schedule; the caller stops sending it here on the attempt
-    ``MAX_ATTEMPTS`` names.
+    A strike waits out its backoff, or longer if the wait has a clock of its own (the robots
+    cache's retry); the caller stops sending a strike here on the attempt ``MAX_ATTEMPTS``
+    names. A non-strike wait is due when its own clock says, and the claim's attempt is given
+    back with the row.
     """
     work_id = work.work_id
-    retry_at = deferred.retry_at or dt.datetime.now(dt.UTC) + work_queue.backoff_after(
-        work.attempts
-    )
+    now = dt.datetime.now(dt.UTC)
+    retry_at = now + work_queue.backoff_after(work.attempts) if deferred.strike else now
+    if deferred.not_before is not None and deferred.not_before > retry_at:
+        retry_at = deferred.not_before
     work_queue.release(
-        session,
-        work,
-        retry_at=retry_at,
-        error=deferred.error,
-        # The claim counted an attempt; a pacing wait gives it back, or a row paced out often
-        # enough would meet its first real failure with no schedule left.
-        strike=deferred.retry_at is None,
+        session, work, retry_at=retry_at, error=deferred.error, strike=deferred.strike
     )
     session.commit()
     log.info("work %d released until %s: %s", work_id, retry_at.isoformat(), deferred.error)

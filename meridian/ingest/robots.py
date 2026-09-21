@@ -39,6 +39,27 @@ DEFAULT_FAILURE_TTL = 10 * 60.0
 
 
 @dataclass(frozen=True)
+class RobotsVerdict:
+    """One answer for one URL, from one read of the cache.
+
+    ``allowed`` is what the rules say — or False when the file could not be read and nothing
+    earlier is held (RFC 9309 closes the host). ``outage_retry_in`` is set only in that second
+    case: the seconds until the cache asks again, so a caller can record an outage as one and
+    come back when the cache will, rather than treating a host that was down for ten minutes
+    as a publisher that said no. ``crawl_delay`` is the site's own minimum spacing for our
+    User-Agent, if the file states one.
+
+    One read, one verdict: asking ``allowed`` and then ``outage`` as two calls can straddle the
+    entry's expiry, and the second call fetches again — through the pacer, taking a slot — and
+    may answer for a different file than the first.
+    """
+
+    allowed: bool
+    outage_retry_in: float | None
+    crawl_delay: float | None
+
+
+@dataclass(frozen=True)
 class _Entry:
     #: The parsed file; None when the site is open (4xx) or has never been read.
     rules: Protego | None
@@ -68,34 +89,30 @@ class RobotsCache:
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
-    def allowed(self, url: str, source: Source) -> bool:
-        """May this URL be fetched on behalf of this publisher's User-Agent."""
+    def check(self, url: str, source: Source) -> RobotsVerdict:
+        """May this URL be fetched on behalf of this publisher's User-Agent — and if not, is
+        that a rule or an outage. One cache read."""
         entry = self._entry(url, source)
         if entry.rules is None:
-            return not entry.unreachable
-        return bool(entry.rules.can_fetch(url, _agent(source)))
+            if entry.unreachable:
+                retry_in = max(entry.expires_at - self._clock(), 0.0)
+                return RobotsVerdict(allowed=False, outage_retry_in=retry_in, crawl_delay=None)
+            return RobotsVerdict(allowed=True, outage_retry_in=None, crawl_delay=None)
+        agent = _agent(source)
+        delay = entry.rules.crawl_delay(agent)
+        return RobotsVerdict(
+            allowed=bool(entry.rules.can_fetch(url, agent)),
+            outage_retry_in=None,
+            crawl_delay=float(delay) if delay is not None else None,
+        )
 
-    def closed_by_outage(self, url: str, source: Source) -> float | None:
-        """Seconds until this origin's ``robots.txt`` is asked for again, when it could not be
-        read and no earlier copy is held — the case ``allowed`` answers False for without any
-        rule having been written. None when a rule (or the absence of one) is what answers.
-
-        A caller can then tell an outage from a refusal: record it as one, and come back when
-        the cache will, rather than treating a host that was down for ten minutes as a
-        publisher that said no.
-        """
-        entry = self._entry(url, source)
-        if entry.rules is not None or not entry.unreachable:
-            return None
-        return max(entry.expires_at - self._clock(), 0.0)
+    def allowed(self, url: str, source: Source) -> bool:
+        """``check(...).allowed``. A caller that also needs to know *why* uses ``check``."""
+        return self.check(url, source).allowed
 
     def crawl_delay(self, url: str, source: Source) -> float | None:
-        """The site's own minimum spacing for our User-Agent, if it states one."""
-        entry = self._entry(url, source)
-        if entry.rules is None:
-            return None
-        delay = entry.rules.crawl_delay(_agent(source))
-        return float(delay) if delay is not None else None
+        """``check(...).crawl_delay``."""
+        return self.check(url, source).crawl_delay
 
     def _entry(self, url: str, source: Source) -> _Entry:
         origin = _origin(url)

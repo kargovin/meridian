@@ -265,3 +265,31 @@ def test_dead_letter_keeps_the_row_and_marks_the_article_terminal(app_session: S
     # think the article still owes acquire.
     assert work_queue.claim(app_session, stage=Stage.ACQUIRE, worker="w2", lease=LEASE) == []
     assert (article.article_id, Stage.ACQUIRE) not in work_queue.expected_article_work(app_session)
+
+
+@pytest.mark.parametrize("primitive", ["release", "dead_letter"])
+def test_a_row_that_was_never_claimed_cannot_be_given_back(
+    app_session: Session, primitive: str
+) -> None:
+    """``claimed_by == None`` compiles to ``IS NULL``, which matches every unclaimed row by id —
+    the opposite of an ownership test. A caller that loaded a row rather than claiming it is
+    refused before any write: the row keeps ``attempts = 0`` and the article is not touched."""
+    source = make_source(app_session)
+    article = make_article(app_session, source, guid="a")
+    work = make_work(app_session, stage=Stage.ACQUIRE, article=article)
+    app_session.commit()
+    assert work.claimed_by is None
+
+    with pytest.raises(ValueError, match="no claim"):
+        if primitive == "release":
+            work_queue.release(
+                app_session, work, retry_at=dt.datetime.now(dt.UTC), error="x", strike=False
+            )
+        else:
+            work_queue.dead_letter(app_session, work, error="x")
+    app_session.rollback()
+    app_session.expire_all()
+    row = app_session.get(PipelineWork, work.work_id)
+    assert row is not None and row.attempts == 0 and row.dead_lettered_at is None
+    record = app_session.get(CanonicalRecord, article.article_id)
+    assert record is not None and record.terminal_reason is None

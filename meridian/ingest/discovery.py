@@ -242,14 +242,15 @@ def run_cycle(
         # clause that exists to contain failures, and the rest of the roster is not polled.
         feed_id, feed_url = feed.feed_id, feed.url
         try:
-            if not network.robots.allowed(feed_url, source):
+            robots = network.robots.check(feed_url, source)
+            if not robots.allowed:
                 # Recorded as a failed poll, not skipped in silence: ``consecutive_failures``
                 # is what the admin surface shows, and a feed that stopped arriving because of a
                 # robots rule must read differently from one nobody registered. One roster
                 # publisher writes exactly this rule against its own feeds (``Disallow: /*.rss``).
                 # An unreachable robots.txt is also a closed door (RFC 9309), and is recorded as
                 # the outage it is rather than as a rule the publisher never wrote.
-                retry = network.robots.closed_by_outage(feed_url, source)
+                retry = robots.outage_retry_in
                 error = (
                     "robots: disallowed"
                     if retry is None

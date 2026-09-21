@@ -349,9 +349,15 @@ def release(
     write through it would then clear *their* claim, or raise ``StaleDataError`` at flush for a
     row that is gone. No match means the row was never ours to give back.
 
+    ⚠️ Refuses an instance with no claim on it. ``claimed_by == None`` compiles to ``IS NULL``,
+    which matches every *unclaimed* row by id — the opposite of ownership — and the caller
+    that loaded a row rather than claiming it would hand it back with ``attempts`` walked
+    below zero. A row must come from ``claim()``.
+
     Does not commit. The caller's rollback has already discarded the stage's partial output;
     this is written on the clean session and committed by the caller.
     """
+    _require_claim(work)
     released = session.scalar(
         sa.update(PipelineWork)
         .where(PipelineWork.work_id == work.work_id, PipelineWork.claimed_by == work.claimed_by)
@@ -369,6 +375,13 @@ def release(
     session.expunge(work)
 
 
+def _require_claim(work: PipelineWork) -> None:
+    if work.claimed_by is None:
+        raise ValueError(
+            f"work {work.work_id} carries no claim; only a row from claim() can be given back"
+        )
+
+
 def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> None:
     """Stop retrying: keep the row as the trace, and mark the article terminal.
 
@@ -378,9 +391,10 @@ def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> N
     re-enqueue succeeds because the open-row index also ignores dead-lettered rows. This spans
     two tables and no CHECK can state it.
 
-    The row is written by a conditional UPDATE on our own claim, for the reason ``release``
-    gives. Does not commit.
+    The row is written by a conditional UPDATE on our own claim, and refuses an unclaimed
+    instance, for the reasons ``release`` gives. Does not commit.
     """
+    _require_claim(work)
     if work.article_id is None:
         raise ValueError(
             f"work {work.work_id} has a cluster subject; terminal_reason lives on an article"
