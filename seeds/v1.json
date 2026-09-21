@@ -90,7 +90,7 @@
     "rate_limit_per_min": 5,
     "determination": {
       "read_on": "2026-09-04",
-      "basis": "CC BY-NC 4.0, stated at the foot of each article: 'This article is published under a Creative Commons Attribution-NonCommercial 4.0 International licence.' Verified on five articles. The syndication page says 'we publish most of our content under Creative Commons' and 'Always check the licensing note at the bottom of each article page' — a per-article exception is possible. NonCommercial, no NoDerivatives — derivatives permitted for non-commercial use. The feed carries a ~900-char teaser only and no licence element; the body must be fetched, and the licence note read per article.",
+      "basis": "CC BY-NC 4.0, stated at the foot of each article: 'This article is published under a Creative Commons Attribution-NonCommercial 4.0 International licence.' Verified on five articles. The syndication page says 'we publish most of our content under Creative Commons' and 'Always check the licensing note at the bottom of each article page' — a per-article exception is possible. NonCommercial, no NoDerivatives — derivatives permitted for non-commercial use. The feed carries a ~900-char teaser only and no licence element; the body must be fetched, and the licence note read per article. Fetched 2026-09-18: the page serves a login-gated preview (see the feed note), so the body cannot be obtained by any route we run; rights stay body_text — the licence permits it, the site does not deliver it.",
       "sources": [
         "https://www.opendemocracy.net/syndication/",
         "https://www.opendemocracy.net/podcasts/the-climate-wars-how-superpowers-are-carving-up-the-earth/",
@@ -108,7 +108,8 @@
         "name": "All (English)",
         "url": "https://www.opendemocracy.net/en/feed/",
         "discovery_method": "rss",
-        "acquisition_tier": "3_extraction"
+        "acquisition_tier": "0_unavailable",
+        "note": "No body obtainable: the article page is a server-side members gate. Fetched 2026-09-18 (Meridian/0.1): 11/11 articles return ~1,200 chars — four paragraphs, then 'Continue reading with a free account' — and a browser render returns the same four. Only a login gets past it, which is a terms question, not a fetch route. Records carry headline and lede only."
       }
     ]
   },
@@ -121,7 +122,7 @@
     "rate_limit_per_min": 10,
     "determination": {
       "read_on": "2026-09-04",
-      "basis": "CC BY 4.0. Legal notice: '[content] by the EU on this website is licensed under the Creative Commons Attribution 4.0 International (CC BY 4.0) licence. This means that reuse is allowed, provided appropriate credit is given and changes are indicated.' Press-corner feed carries links only; bodies must be fetched.",
+      "basis": "CC BY 4.0. Legal notice: '[content] by the EU on this website is licensed under the Creative Commons Attribution 4.0 International (CC BY 4.0) licence. This means that reuse is allowed, provided appropriate credit is given and changes are indicated.' Press-corner feed carries links only; bodies must be fetched. Fetched 2026-09-18: the article page renders client-side and yields no text to extraction; bodies come from the press corner's document API (see the feed note), which serves the same content under the same legal notice.",
       "sources": [
         "https://commission.europa.eu/legal-notice_en",
         "https://creativecommons.org/licenses/by/4.0/"
@@ -136,7 +137,8 @@
         "name": "Press corner (English)",
         "url": "https://ec.europa.eu/commission/presscorner/api/rss?language=en",
         "discovery_method": "rss",
-        "acquisition_tier": "3_extraction"
+        "acquisition_tier": "2_publisher_api",
+        "note": "The article page is a JavaScript app (fetched 2026-09-18: 40 chars of visible text and a loader). The site's own document API answers a plain GET — /commission/presscorner/api/documents?reference=<TYPE>/<yy>/<n>&language=<lang>, the reference being the article path's type_yy_n upper-cased with slashes — and returns the article HTML in docuLanguageResource.htmlContent (6,432 chars on the sample). robots.txt permits the API path, no Crawl-delay."
       }
     ]
   },

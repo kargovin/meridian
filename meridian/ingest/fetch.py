@@ -1,11 +1,12 @@
-"""Fetching one feed over HTTP (FR-I1, FR-I3).
+"""Fetching one URL over HTTP (FR-I1, FR-I3): a feed, an article page, an API document or a
+publisher's ``robots.txt``.
 
-The only part of discovery that touches the network, which is what makes it the only part a
+The only part of ingestion that touches the network, which is what makes it the only part a
 test has to replace. Everything above it takes a ``Fetcher`` as an argument.
 
-Failures are returned, not raised. A feed that times out is an ordinary event on a roster of
-real publishers, and the caller's requirement is to record it and poll the next feed — an
-exception per dead feed would make the ordinary path the exceptional one.
+Failures are returned, not raised. A host that times out is an ordinary event on a roster of
+real publishers, and the caller's requirement is to record it and move to the next URL — an
+exception per dead host would make the ordinary path the exceptional one.
 """
 
 import datetime as dt
@@ -27,9 +28,9 @@ log = logging.getLogger(__name__)
 #: registry, because the value that works is found by being burned.
 DEFAULT_USER_AGENT = "Meridian/0.1"
 
-#: A feed is tens to hundreds of kilobytes. This is not a tuning knob, it is a refusal to read
-#: an unbounded body from a host we do not control into a process that holds a database
-#: connection.
+#: A feed or an article page is tens to hundreds of kilobytes. This is not a tuning knob, it is
+#: a refusal to read an unbounded body from a host we do not control into a process that holds
+#: a database connection.
 MAX_BYTES = 5 * 1024 * 1024
 
 DEFAULT_TIMEOUT = dt.timedelta(seconds=15)
@@ -71,7 +72,7 @@ class Streamable(Protocol):
 
 
 class Fetcher(Protocol):
-    """What discovery needs from the network. Implemented for real by ``HttpFetcher``."""
+    """What ingestion needs from the network. Implemented for real by ``HttpFetcher``."""
 
     def __call__(self, url: str, *, user_agent: str, headers: Mapping[str, str]) -> FetchResult: ...
 
@@ -87,8 +88,8 @@ class TooSlow(Exception):
 class HttpFetcher:
     """A real HTTP client, reused across a cycle so connections are pooled.
 
-    ``follow_redirects`` is on: feed URLs move, and a publisher answering 301 to its own new
-    path is the ordinary case rather than a misconfiguration.
+    ``follow_redirects`` is on: feed and article URLs move, and a publisher answering 301 to
+    its own new path is the ordinary case rather than a misconfiguration.
     """
 
     def __init__(
@@ -116,10 +117,10 @@ class HttpFetcher:
                     return FetchResult(status=304)
                 body = self._read(response, deadline)
         except TooLarge:
-            log.warning("feed at %s exceeded %d bytes; not read", url, self._max_bytes)
+            log.warning("%s exceeded %d bytes; not read", url, self._max_bytes)
             return FetchResult(status=None, error=f"body exceeded {self._max_bytes} bytes")
         except TooSlow:
-            log.warning("feed at %s exceeded %.0f s; abandoned", url, self._max_duration)
+            log.warning("%s exceeded %.0f s; abandoned", url, self._max_duration)
             return FetchResult(status=None, error=f"exceeded {self._max_duration:.0f}s")
         except httpx2.HTTPError as exc:
             # Includes timeouts, connection failures and protocol errors. The class name is
