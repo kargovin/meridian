@@ -23,9 +23,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from meridian.db import runtime_config
 from meridian.db.runtime_config import IntKnob
-from meridian.ingest.acquire import AcquireReport, Network, run_batch
+from meridian.ingest.acquire import AcquireReport, run_batch
 from meridian.ingest.discovery import CycleReport, run_cycle
-from meridian.ingest.fetch import Fetcher
+from meridian.ingest.network import Network
 
 
 class AcquireRun(Protocol):
@@ -142,24 +142,26 @@ class DiscoveryScheduler(_CadencedJob[CycleReport]):
     def __init__(
         self,
         sessions: sessionmaker[Session],
-        fetcher: Fetcher,
+        network: Network,
         *,
         scheduler: BackgroundScheduler | None = None,
-        run: Callable[[Session, Fetcher], CycleReport] = run_cycle,
+        run: Callable[[Session, Network], CycleReport] = run_cycle,
     ) -> None:
         super().__init__(sessions, scheduler=scheduler)
-        self._fetcher = fetcher
+        self._network = network
         self._run = run
 
     def _run_once(self, session: Session) -> CycleReport:
-        report = self._run(session, self._fetcher)
+        report = self._run(session, self._network)
         log.info(
-            "discovery cycle: polled=%d unchanged=%d failed=%d discovered=%d skipped=%d in %.1fs",
+            "discovery cycle: polled=%d unchanged=%d failed=%d discovered=%d skipped=%d "
+            "robots_blocked=%d in %.1fs",
             report.polled,
             report.not_modified,
             report.failed,
             report.discovered,
             report.skipped_feeds,
+            report.robots_blocked,
             report.duration_seconds,
         )
         self._warn_if_overrunning(report)

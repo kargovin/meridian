@@ -20,8 +20,11 @@ from sqlalchemy.orm import Session
 
 from meridian.db import poll_state, sources
 from meridian.db.models import CanonicalRecord, Feed, PipelineWork
-from meridian.ingest.discovery import run_cycle
-from meridian.ingest.fetch import DEFAULT_USER_AGENT, FetchResult
+from meridian.ingest.discovery import CycleReport, run_cycle
+from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher, FetchResult
+from meridian.ingest.network import Network
+from meridian.ingest.pacing import Pacer
+from meridian.ingest.robots import RobotsCache
 from tests.factories import make_feed, make_source
 
 pytestmark = pytest.mark.postgres
@@ -78,6 +81,44 @@ class FakeFetcher:
             return FetchResult(status=304)
         return FetchResult(status=200, body=answer, etag=self._etag)
 
+    @property
+    def feeds(self) -> list[tuple[str, str, Mapping[str, str]]]:
+        """The feed requests alone. A cycle's first request to a host is its ``robots.txt``,
+        which for an unknown URL this fake answers 404 — open, per RFC 9309."""
+        return [call for call in self.calls if not call[0].endswith("/robots.txt")]
+
+
+class SimClock:
+    """A clock that moves only when work happens, never merely by being read.
+
+    Reading a clock must be free, or the number of times the code under test happens to call it
+    becomes part of the measurement — which makes the test assert the implementation rather than
+    the behaviour.
+    """
+
+    def __init__(self, fetch_cost: float = 0.5) -> None:
+        self.now = 0.0
+        self.fetch_cost = fetch_cost
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+    def spend_on_fetch(self) -> None:
+        self.now += self.fetch_cost
+
+
+def _cycle(session: Session, fetcher: Fetcher, *, clock: SimClock | None = None) -> CycleReport:
+    """One cycle over a fresh process-wide ``Network`` — the shape ``__main__`` builds."""
+    clock = clock or SimClock(fetch_cost=0.0)
+    pacer = Pacer(sleep=clock.sleep, clock=clock)
+    network = Network(fetcher=fetcher, robots=RobotsCache(fetcher, pacer, clock=clock), pacer=pacer)
+    return run_cycle(session, network, clock=clock)
+
 
 def _feed_with_source(
     session: Session, *, url: str = "https://feeds.example/a.xml", **kw: Any
@@ -110,11 +151,11 @@ def test_repolling_the_same_feed_creates_each_item_once(app_session: Session) ->
     feed = _feed_with_source(app_session)
     fetcher = FakeFetcher({feed.url: THREE_ITEMS})
 
-    first = run_cycle(app_session, fetcher, sleep=lambda _: None)
+    first = _cycle(app_session, fetcher)
     assert (first.discovered, first.failed) == (3, 0)
 
     for _ in range(19):
-        again = run_cycle(app_session, fetcher, sleep=lambda _: None)
+        again = _cycle(app_session, fetcher)
         assert (again.discovered, again.failed) == (0, 0)
 
     assert len(articles(app_session)) == 3
@@ -130,7 +171,7 @@ def test_an_item_is_enqueued_exactly_once_however_often_it_is_seen(
     fetcher = FakeFetcher({feed.url: ONE_ITEM})
 
     for _ in range(5):
-        report = run_cycle(app_session, fetcher, sleep=lambda _: None)
+        report = _cycle(app_session, fetcher)
         assert report.failed == 0
 
     work = app_session.query(PipelineWork).all()
@@ -141,10 +182,10 @@ def test_an_item_is_enqueued_exactly_once_however_often_it_is_seen(
 def test_a_new_item_appearing_later_is_the_only_one_stored(app_session: Session) -> None:
     feed = _feed_with_source(app_session)
     fetcher = FakeFetcher({feed.url: ONE_ITEM})
-    run_cycle(app_session, fetcher, sleep=lambda _: None)
+    _cycle(app_session, fetcher)
 
     fetcher = FakeFetcher({feed.url: THREE_ITEMS})
-    report = run_cycle(app_session, fetcher, sleep=lambda _: None)
+    report = _cycle(app_session, fetcher)
 
     assert report.discovered == 2
     assert len(articles(app_session)) == 3
@@ -152,7 +193,7 @@ def test_a_new_item_appearing_later_is_the_only_one_stored(app_session: Session)
 
 def test_a_discovered_record_carries_what_the_feed_said(app_session: Session) -> None:
     feed = _feed_with_source(app_session)
-    run_cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}), sleep=lambda _: None)
+    _cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}))
 
     article = articles(app_session)[0]
     assert article.guid == "g1"
@@ -175,10 +216,9 @@ def test_one_feed_raising_does_not_stop_the_others(app_session: Session) -> None
     )
     app_session.commit()
 
-    report = run_cycle(
+    report = _cycle(
         app_session,
         FakeFetcher({bad.url: RuntimeError("boom"), good.url: ONE_ITEM}),
-        sleep=lambda _: None,
     )
 
     assert report.failed == 1
@@ -193,7 +233,7 @@ def test_one_feed_timing_out_does_not_stop_the_others(app_session: Session) -> N
     )
     app_session.commit()
 
-    report = run_cycle(
+    report = _cycle(
         app_session,
         FakeFetcher(
             {
@@ -201,7 +241,6 @@ def test_one_feed_timing_out_does_not_stop_the_others(app_session: Session) -> N
                 good.url: ONE_ITEM,
             }
         ),
-        sleep=lambda _: None,
     )
 
     assert (report.failed, report.discovered) == (1, 1)
@@ -218,10 +257,9 @@ def test_malformed_xml_does_not_stop_the_others(app_session: Session) -> None:
     )
     app_session.commit()
 
-    report = run_cycle(
+    report = _cycle(
         app_session,
         FakeFetcher({bad.url: b"<html>404 Not Found</html>", good.url: ONE_ITEM}),
-        sleep=lambda _: None,
     )
 
     assert (report.failed, report.discovered) == (1, 1)
@@ -234,13 +272,12 @@ def test_a_feed_that_raises_is_recorded_as_a_failure(app_session: Session) -> No
     ``last_status=200, consecutive_failures=0`` on the admin surface — reported as healthy.
     """
     feed = _feed_with_source(app_session)
-    run_cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}), sleep=lambda _: None)
+    _cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}))
 
     for _ in range(3):
-        run_cycle(
+        _cycle(
             app_session,
             FakeFetcher({feed.url: RuntimeError("boom")}),
-            sleep=lambda _: None,
         )
 
     app_session.expire_all()
@@ -259,10 +296,9 @@ def test_a_crashing_feed_does_not_lose_another_feeds_work(app_session: Session) 
     )
     app_session.commit()
 
-    run_cycle(
+    _cycle(
         app_session,
         FakeFetcher({bad.url: RuntimeError("boom"), good.url: ONE_ITEM}),
-        sleep=lambda _: None,
     )
 
     assert len(articles(app_session)) == 1
@@ -278,7 +314,7 @@ def test_a_feed_we_cannot_read_yet_is_counted_not_dropped(app_session: Session) 
     feed = _feed_with_source(app_session, discovery_method=DiscoveryMethod.SITEMAP)
     fetcher = FakeFetcher({feed.url: ONE_ITEM})
 
-    report = run_cycle(app_session, fetcher, sleep=lambda _: None)
+    report = _cycle(app_session, fetcher)
 
     assert fetcher.calls == []
     assert report.skipped_feeds == 1
@@ -291,12 +327,12 @@ def test_consecutive_failures_climb_and_reset(app_session: Session) -> None:
     failing = FakeFetcher({})  # unknown URL -> 404
 
     for _ in range(3):
-        run_cycle(app_session, failing, sleep=lambda _: None)
+        _cycle(app_session, failing)
     state = poll_state.get(app_session, feed.feed_id)
     assert state is not None
     assert (state.consecutive_failures, state.last_status) == (3, 404)
 
-    run_cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}), sleep=lambda _: None)
+    _cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}))
     app_session.expire_all()
     state = poll_state.get(app_session, feed.feed_id)
     assert state is not None
@@ -324,7 +360,7 @@ def test_a_gated_feed_is_not_polled(
     feed = _feed_with_source(app_session, source=source_kw, **feed_kw)
     fetcher = FakeFetcher({feed.url: ONE_ITEM})
 
-    report = run_cycle(app_session, fetcher, sleep=lambda _: None)
+    report = _cycle(app_session, fetcher)
 
     assert fetcher.calls == []
     assert report.polled == 0
@@ -336,7 +372,7 @@ def test_a_non_rss_feed_is_not_polled(app_session: Session) -> None:
     feed = _feed_with_source(app_session, discovery_method=DiscoveryMethod.SITEMAP)
     fetcher = FakeFetcher({feed.url: ONE_ITEM})
 
-    run_cycle(app_session, fetcher, sleep=lambda _: None)
+    _cycle(app_session, fetcher)
 
     assert fetcher.calls == []
 
@@ -356,7 +392,7 @@ def test_a_tier_three_feed_never_stores_a_body_however_fat_the_teaser(
     feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.EXTRACTION)
     fat = feed_xml(("g1", "One"), description="x" * 4000)
 
-    run_cycle(app_session, FakeFetcher({feed.url: fat}), sleep=lambda _: None)
+    _cycle(app_session, FakeFetcher({feed.url: fat}))
 
     article = articles(app_session)[0]
     assert article.body_text is None
@@ -387,7 +423,7 @@ def test_a_tier_three_feed_shipping_content_encoded_still_stores_no_body(
         b"</item></channel></rss>"
     )
 
-    run_cycle(app_session, FakeFetcher({feed.url: raw}), sleep=lambda _: None)
+    _cycle(app_session, FakeFetcher({feed.url: raw}))
 
     article = articles(app_session)[0]
     assert article.body_text is None
@@ -413,7 +449,7 @@ def test_a_tier_one_feed_stores_the_content_element_as_the_body(
         b"</item></channel></rss>"
     )
 
-    run_cycle(app_session, FakeFetcher({feed.url: raw}), sleep=lambda _: None)
+    _cycle(app_session, FakeFetcher({feed.url: raw}))
 
     article = articles(app_session)[0]
     assert article.body_text == "THE WHOLE ARTICLE"
@@ -458,7 +494,7 @@ def test_a_headline_only_publisher_gets_no_body_even_from_a_full_feed(
         source={"rights_level": RightsLevel.HEADLINE_ONLY},
     )
 
-    run_cycle(app_session, FakeFetcher({feed.url: CONTENT_ITEM}), sleep=lambda _: None)
+    _cycle(app_session, FakeFetcher({feed.url: CONTENT_ITEM}))
 
     article = articles(app_session)[0]
     assert article.body_text is None
@@ -480,9 +516,7 @@ def test_revoking_rights_stops_new_bodies_and_keeps_the_ones_held(
     A gate that deleted on downgrade would be doing the second act by accident.
     """
     feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.FULL_FEED)
-    run_cycle(
-        app_session, FakeFetcher({feed.url: content_xml(("g1", "One"))}), sleep=lambda _: None
-    )
+    _cycle(app_session, FakeFetcher({feed.url: content_xml(("g1", "One"))}))
     assert articles(app_session)[0].body_text == "THE WHOLE ARTICLE g1"
 
     source = sources.get(app_session, feed.source_id)
@@ -498,10 +532,9 @@ def test_revoking_rights_stops_new_bodies_and_keeps_the_ones_held(
     )
     app_session.commit()
 
-    run_cycle(
+    _cycle(
         app_session,
         FakeFetcher({feed.url: content_xml(("g1", "One"), ("g2", "Two"))}),
-        sleep=lambda _: None,
     )
 
     first, second = articles(app_session)
@@ -515,11 +548,72 @@ def test_a_record_with_no_body_has_no_provenance(app_session: Session) -> None:
     """
     feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.EXTRACTION)
 
-    run_cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}), sleep=lambda _: None)
+    _cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}))
 
     article = articles(app_session)[0]
     assert article.body_text is None
     assert article.body_provenance is None
+
+
+# --------------------------------------------------------------------------- robots.txt
+
+FEEDS_ROBOTS = "https://feeds.example/robots.txt"
+
+
+def test_a_feed_robots_disallows_is_not_polled_and_the_poll_state_says_why(
+    app_session: Session,
+) -> None:
+    """MER-23 AC8. The roster case is AP: ``Disallow: /*.rss`` while articles stay allowed. The
+    feed is recorded as failed with the reason — not skipped in silence, which on the admin
+    surface would look exactly like a feed nobody added."""
+    feed = _feed_with_source(app_session, url="https://feeds.example/feeds/a.xml")
+    fetcher = FakeFetcher(
+        {
+            FEEDS_ROBOTS: FetchResult(status=200, body=b"User-agent: *\nDisallow: /feeds/\n"),
+            feed.url: ONE_ITEM,
+        }
+    )
+
+    report = _cycle(app_session, fetcher)
+
+    assert fetcher.feeds == []
+    assert (report.robots_blocked, report.polled, report.failed) == (1, 0, 0)
+    assert articles(app_session) == []
+    app_session.expire_all()
+    state = poll_state.get(app_session, feed.feed_id)
+    assert state is not None
+    assert state.consecutive_failures == 1
+    assert state.last_status is None
+    assert state.last_error is not None and "robots" in state.last_error
+
+
+def test_robots_is_read_once_per_host_not_once_per_feed(app_session: Session) -> None:
+    source = make_source(app_session)
+    for name in ("a", "b", "c"):
+        make_feed(app_session, source, url=f"https://feeds.example/{name}.xml")
+    app_session.commit()
+    fetcher = FakeFetcher(
+        {FEEDS_ROBOTS: FetchResult(status=200, body=b"User-agent: *\nAllow: /\n")}
+    )
+
+    _cycle(app_session, fetcher)
+
+    assert [url for url, _, _ in fetcher.calls].count(FEEDS_ROBOTS) == 1
+    assert len(fetcher.feeds) == 3
+
+
+def test_an_unreachable_robots_txt_closes_the_host_for_this_cycle(app_session: Session) -> None:
+    """RFC 9309: a 5xx on robots.txt with no cached copy means fetch nothing. Failing open on an
+    outage is the mistake the spike found in the scraper we chose not to use."""
+    feed = _feed_with_source(app_session)
+    fetcher = FakeFetcher(
+        {FEEDS_ROBOTS: FetchResult(status=503, error="Service Unavailable"), feed.url: ONE_ITEM}
+    )
+
+    report = _cycle(app_session, fetcher)
+
+    assert fetcher.feeds == []
+    assert report.robots_blocked == 1
 
 
 # --------------------------------------------------------------------------- politeness
@@ -536,9 +630,9 @@ def test_a_publisher_may_override_the_user_agent(app_session: Session) -> None:
     feed = _feed_with_source(app_session, source={"user_agent": "Custom/9"})
     fetcher = FakeFetcher({feed.url: ONE_ITEM})
 
-    run_cycle(app_session, fetcher, sleep=lambda _: None)
+    _cycle(app_session, fetcher)
 
-    assert fetcher.calls[0][1] == "Custom/9"
+    assert fetcher.feeds[0][1] == "Custom/9"
 
 
 def test_feeds_of_one_publisher_share_a_single_rate_budget(app_session: Session) -> None:
@@ -550,15 +644,13 @@ def test_feeds_of_one_publisher_share_a_single_rate_budget(app_session: Session)
     b = make_feed(app_session, source, url="https://feeds.example/b.xml")
     app_session.commit()
 
-    slept: list[float] = []
-    run_cycle(
-        app_session,
-        FakeFetcher({a.url: ONE_ITEM, b.url: feed_xml(("g9", "Nine"))}),
-        sleep=slept.append,
-        clock=lambda: 0.0,
+    clock = SimClock(fetch_cost=0.0)
+    _cycle(
+        app_session, FakeFetcher({a.url: ONE_ITEM, b.url: feed_xml(("g9", "Nine"))}), clock=clock
     )
 
-    assert slept == [1.0]
+    # Three requests to one publisher — its robots.txt, then each feed — one gap apart.
+    assert clock.slept == [1.0, 1.0]
 
 
 def test_feeds_of_different_publishers_do_not_wait_on_each_other(
@@ -568,15 +660,15 @@ def test_feeds_of_different_publishers_do_not_wait_on_each_other(
     b = make_feed(app_session, make_source(app_session, "Other"), url="https://feeds.example/b.xml")
     app_session.commit()
 
-    slept: list[float] = []
-    run_cycle(
-        app_session,
-        FakeFetcher({a.url: ONE_ITEM, b.url: feed_xml(("g9", "Nine"))}),
-        sleep=slept.append,
-        clock=lambda: 0.0,
+    clock = SimClock(fetch_cost=0.0)
+    _cycle(
+        app_session, FakeFetcher({a.url: ONE_ITEM, b.url: feed_xml(("g9", "Nine"))}), clock=clock
     )
 
-    assert slept == []
+    # Both feeds share a host, so one robots.txt fetch serves both; it was the first
+    # publisher's request and only the first publisher waits out a gap after it. The second
+    # publisher's first request is its feed — a pacer keyed by host would make it wait too.
+    assert clock.slept == [2.0]
 
 
 # --------------------------------------------------------------------------- conditional GET
@@ -588,11 +680,11 @@ def test_the_second_poll_carries_the_validator_the_publisher_gave_us(
     feed = _feed_with_source(app_session)
     fetcher = FakeFetcher({feed.url: ONE_ITEM}, etag='W/"abc"')
 
-    run_cycle(app_session, fetcher, sleep=lambda _: None)
-    run_cycle(app_session, fetcher, sleep=lambda _: None)
+    _cycle(app_session, fetcher)
+    _cycle(app_session, fetcher)
 
-    assert fetcher.calls[0][2] == {}
-    assert fetcher.calls[1][2] == {"If-None-Match": 'W/"abc"'}
+    assert fetcher.feeds[0][2] == {}
+    assert fetcher.feeds[1][2] == {"If-None-Match": 'W/"abc"'}
 
 
 def test_a_not_modified_response_stores_nothing_and_is_not_a_failure(
@@ -601,8 +693,8 @@ def test_a_not_modified_response_stores_nothing_and_is_not_a_failure(
     feed = _feed_with_source(app_session)
     fetcher = FakeFetcher({feed.url: ONE_ITEM}, etag='W/"abc"')
 
-    run_cycle(app_session, fetcher, sleep=lambda _: None)
-    report = run_cycle(app_session, fetcher, sleep=lambda _: None)
+    _cycle(app_session, fetcher)
+    report = _cycle(app_session, fetcher)
 
     assert (report.not_modified, report.discovered, report.failed) == (1, 0, 0)
     assert len(articles(app_session)) == 1
@@ -619,13 +711,13 @@ def test_a_not_modified_response_does_not_clear_the_stored_validator(
     fetcher = FakeFetcher({feed.url: ONE_ITEM}, etag='W/"abc"')
 
     for _ in range(3):
-        run_cycle(app_session, fetcher, sleep=lambda _: None)
+        _cycle(app_session, fetcher)
 
     app_session.expire_all()
     state = poll_state.get(app_session, feed.feed_id)
     assert state is not None
     assert state.etag == 'W/"abc"'
-    assert fetcher.calls[-1][2] == {"If-None-Match": 'W/"abc"'}
+    assert fetcher.feeds[-1][2] == {"If-None-Match": 'W/"abc"'}
 
 
 # --------------------------------------------------------------- cycle cost (RFC §7.1)
@@ -645,34 +737,10 @@ def test_consecutive_requests_go_to_different_publishers(app_session: Session) -
     app_session.commit()
 
     fetcher = FakeFetcher(urls)
-    run_cycle(app_session, fetcher, sleep=lambda _: None)
+    _cycle(app_session, fetcher)
 
-    order = [url.rsplit("/", 1)[1][0] for url, _, _ in fetcher.calls]
+    order = [url.rsplit("/", 1)[1][0] for url, _, _ in fetcher.feeds]
     assert order in (["a", "b", "a", "b"], ["b", "a", "b", "a"]), order
-
-
-class SimClock:
-    """A clock that moves only when work happens, never merely by being read.
-
-    Reading a clock must be free, or the number of times the code under test happens to call it
-    becomes part of the measurement — which makes the test assert the implementation rather than
-    the behaviour.
-    """
-
-    def __init__(self, fetch_cost: float = 0.5) -> None:
-        self.now = 0.0
-        self.fetch_cost = fetch_cost
-        self.slept: list[float] = []
-
-    def __call__(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.slept.append(seconds)
-        self.now += seconds
-
-    def spend_on_fetch(self) -> None:
-        self.now += self.fetch_cost
 
 
 def test_interleaving_spends_less_of_the_freshness_budget_on_waiting(
@@ -700,14 +768,16 @@ def test_interleaving_spends_less_of_the_freshness_budget_on_waiting(
     clock = SimClock()
     fetcher = FakeFetcher(urls, on_call=clock.spend_on_fetch)
 
-    run_cycle(app_session, fetcher, sleep=clock.sleep, clock=clock)
+    _cycle(app_session, fetcher, clock=clock)
 
     # The property is the wall time, not the number of sleeps: feed id order costs two full
     # gaps here and interleaving costs one, and it is the total that lands in the budget.
-    assert clock.now < 120, f"cycle took {clock.now}s; feed id order would cost ~120s"
-    assert sum(clock.slept) < 60, clock.slept
+    # Plus one robots.txt fetch for the host, which takes the first publisher's first slot in
+    # either order: ~121 s interleaved against ~181 s in feed order.
+    assert clock.now < 180, f"cycle took {clock.now}s; feed id order would cost ~181s"
+    assert sum(clock.slept) < 120, clock.slept
     # Politeness is unchanged — each publisher was still polled at most once per gap.
-    assert len(fetcher.calls) == 4
+    assert len(fetcher.feeds) == 4
 
 
 def test_the_cycle_reports_how_long_it_took(app_session: Session) -> None:
@@ -717,14 +787,12 @@ def test_the_cycle_reports_how_long_it_took(app_session: Session) -> None:
     feed = _feed_with_source(app_session)
     clock = SimClock(fetch_cost=30.0)
 
-    report = run_cycle(
-        app_session,
-        FakeFetcher({feed.url: ONE_ITEM}, on_call=clock.spend_on_fetch),
-        sleep=clock.sleep,
-        clock=clock,
+    report = _cycle(
+        app_session, FakeFetcher({feed.url: ONE_ITEM}, on_call=clock.spend_on_fetch), clock=clock
     )
 
-    assert report.duration_seconds == 30.0
+    # Two requests on a cold cache: the host's robots.txt, then the feed.
+    assert report.duration_seconds == 60.0
 
 
 def test_no_transaction_is_held_open_across_the_fetch(app_session: Session) -> None:
@@ -739,9 +807,10 @@ def test_no_transaction_is_held_open_across_the_fetch(app_session: Session) -> N
         open_during_fetch.append(app_session.in_transaction())
         return FetchResult(status=200, body=ONE_ITEM)
 
-    run_cycle(app_session, watching_fetcher, sleep=lambda _: None)
+    _cycle(app_session, watching_fetcher)
 
-    assert open_during_fetch == [False]
+    # Both requests — robots.txt and the feed — happen with no transaction open.
+    assert open_during_fetch == [False, False]
 
 
 # --------------------------------------------------------------- url canonicalisation
@@ -773,7 +842,7 @@ def test_one_article_reached_by_two_feeds_is_stored_once(app_session: Session) -
     top = make_feed(app_session, source, url="https://feeds.example/top.xml")
     app_session.commit()
 
-    run_cycle(
+    _cycle(
         app_session,
         FakeFetcher(
             {
@@ -781,7 +850,6 @@ def test_one_article_reached_by_two_feeds_is_stored_once(app_session: Session) -
                 top.url: _item_without_guid("https://x.example/floods?traffic_source=top"),
             }
         ),
-        sleep=lambda _: None,
     )
 
     stored = articles(app_session)
@@ -793,6 +861,6 @@ def test_the_stored_url_is_canonical_not_what_the_feed_wrote(app_session: Sessio
     feed = _feed_with_source(app_session)
     raw = _item_without_guid("https://X.Example/floods?utm_source=rss&b=2&a=1#top")
 
-    run_cycle(app_session, FakeFetcher({feed.url: raw}), sleep=lambda _: None)
+    _cycle(app_session, FakeFetcher({feed.url: raw}))
 
     assert articles(app_session)[0].url_canonical == "https://x.example/floods?a=1&b=2"

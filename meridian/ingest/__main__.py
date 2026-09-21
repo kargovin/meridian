@@ -10,8 +10,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from meridian_config import load_app
 
 from meridian.db.session import create_engine, session_factory
-from meridian.ingest.acquire import Network
 from meridian.ingest.fetch import HttpFetcher
+from meridian.ingest.network import Network
 from meridian.ingest.pacing import Pacer
 from meridian.ingest.robots import RobotsCache
 from meridian.ingest.scheduler import AcquireScheduler, DiscoveryScheduler
@@ -31,7 +31,7 @@ def main() -> None:
     # One scheduler, two jobs. Separate schedulers would mean two thread pools in a process
     # whose whole workload is one HTTP call at a time.
     scheduler = BackgroundScheduler()
-    discovery = DiscoveryScheduler(sessions, fetcher, scheduler=scheduler)
+    discovery = DiscoveryScheduler(sessions, network, scheduler=scheduler)
     acquire = AcquireScheduler(
         sessions,
         network,

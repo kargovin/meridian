@@ -16,9 +16,10 @@ from meridian.db import runtime_config
 from meridian.db.models import RuntimeConfig
 from meridian.db.runtime_config import ACQUIRE_INTERVAL_SECONDS, POLL_INTERVAL_SECONDS
 from meridian.db.session import session_factory
-from meridian.ingest.acquire import AcquireReport, Network
+from meridian.ingest.acquire import AcquireReport
 from meridian.ingest.discovery import CycleReport
-from meridian.ingest.fetch import Fetcher, FetchResult
+from meridian.ingest.fetch import FetchResult
+from meridian.ingest.network import Network
 from meridian.ingest.pacing import Pacer
 from meridian.ingest.robots import RobotsCache
 from meridian.ingest.scheduler import (
@@ -89,19 +90,24 @@ def sessions(app_migrated: sa.Engine, app_session: Session) -> sessionmaker[Sess
 
 
 def _fetcher(url: str, *, user_agent: str, headers: Mapping[str, str]) -> FetchResult:
-    raise AssertionError("the cycle is stubbed; the fetcher must never be called")
+    raise AssertionError("every run here is stubbed; the fetcher must never be called")
+
+
+def _network() -> Network:
+    pacer = Pacer(sleep=lambda _: None)
+    return Network(fetcher=_fetcher, robots=RobotsCache(_fetcher, pacer), pacer=pacer)
 
 
 def _scheduler(
     sessions: sessionmaker[Session],
     stub: StubScheduler,
-    run: Callable[[Session, Fetcher], CycleReport] | None = None,
+    run: Callable[[Session, Network], CycleReport] | None = None,
 ) -> DiscoveryScheduler:
     return DiscoveryScheduler(
         sessions,
-        _fetcher,
+        _network(),
         scheduler=stub,
-        run=run or (lambda session, fetcher: CycleReport()),
+        run=run or (lambda session, network: CycleReport()),
     )
 
 
@@ -154,7 +160,7 @@ def test_a_cycle_that_raises_still_leaves_the_heartbeat_scheduled(
     silence — no error on any later tick, because there are no later ticks.
     """
 
-    def explode(session: Session, fetcher: Any) -> CycleReport:
+    def explode(session: Session, network: Any) -> CycleReport:
         raise RuntimeError("boom")
 
     stub = StubScheduler()
@@ -194,9 +200,9 @@ def test_a_cycle_that_outruns_its_interval_says_so(
     stub = StubScheduler()
     slow = DiscoveryScheduler(
         sessions,
-        _fetcher,
+        _network(),
         scheduler=stub,
-        run=lambda session, fetcher: CycleReport(polled=24, duration_seconds=400.0),
+        run=lambda session, network: CycleReport(polled=24, duration_seconds=400.0),
     )
     slow.start()
 
@@ -214,9 +220,9 @@ def test_a_cycle_inside_its_interval_is_not_reported(
     stub = StubScheduler()
     fast = DiscoveryScheduler(
         sessions,
-        _fetcher,
+        _network(),
         scheduler=stub,
-        run=lambda session, fetcher: CycleReport(polled=24, duration_seconds=30.0),
+        run=lambda session, network: CycleReport(polled=24, duration_seconds=30.0),
     )
     fast.start()
 
@@ -235,14 +241,6 @@ def _set_knob(sessions: sessionmaker[Session], knob: runtime_config.IntKnob, val
         assert row is not None
         runtime_config.set_int(session, knob, value=value, expected_updated_at=row.updated_at)
         session.commit()
-
-
-def _network() -> Network:
-    def unreachable(url: str, *, user_agent: str, headers: object) -> FetchResult:
-        raise AssertionError("the scheduler tests stub the batch; nothing should fetch")
-
-    pacer = Pacer(sleep=lambda _: None)
-    return Network(fetcher=unreachable, robots=RobotsCache(unreachable, pacer), pacer=pacer)
 
 
 def _acquire(sessions: sessionmaker[Session], stub: StubScheduler, **kw: Any) -> AcquireScheduler:

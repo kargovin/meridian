@@ -14,9 +14,10 @@ from sqlalchemy.orm import Session
 
 from meridian.db import work_queue
 from meridian.db.models import CanonicalRecord, PipelineWork
-from meridian.ingest.acquire import AcquireReport, Network, run_batch
+from meridian.ingest.acquire import AcquireReport, run_batch
 from meridian.ingest.acquire import handle as _handle
 from meridian.ingest.fetch import FetchResult
+from meridian.ingest.network import Network
 from meridian.ingest.pacing import Pacer
 from meridian.ingest.robots import RobotsCache
 from tests.factories import make_article, make_cluster, make_member, make_source, make_work

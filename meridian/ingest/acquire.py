@@ -43,10 +43,10 @@ from meridian.db import work_queue
 from meridian.db.models import CanonicalRecord, Feed, PipelineWork, Source
 from meridian.ingest.adapters import Adapter, adapter_for
 from meridian.ingest.extract import extract
-from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher
+from meridian.ingest.fetch import DEFAULT_USER_AGENT
+from meridian.ingest.network import Network
 from meridian.ingest.normalize import content_hash, detect_language, language_input, strip_html
-from meridian.ingest.pacing import Pacer, round_robin
-from meridian.ingest.robots import RobotsCache
+from meridian.ingest.pacing import round_robin
 
 log = logging.getLogger(__name__)
 
@@ -56,20 +56,6 @@ STAGE = Stage.ACQUIRE
 def worker_name() -> str:
     """Who claimed a row. Host and pid, so a stuck claim points at a process."""
     return f"acquire@{socket.gethostname()}:{os.getpid()}"
-
-
-@dataclass(frozen=True)
-class Network:
-    """Everything the stage needs to reach a publisher.
-
-    One of each per process, shared with discovery — the pacer's promise is per host and two
-    pacers keep it separately and break it together (``pacing.py``); the robots cache fetches
-    through the same pacer so that request counts against the same budget.
-    """
-
-    fetcher: Fetcher
-    robots: RobotsCache
-    pacer: Pacer
 
 
 @dataclass(frozen=True)

@@ -30,7 +30,8 @@ from meridian.db import poll_state
 from meridian.db import sources as sources_repo
 from meridian.db.models import CanonicalRecord, Feed, PipelineWork, Source
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher
-from meridian.ingest.pacing import Pacer, round_robin
+from meridian.ingest.network import Network
+from meridian.ingest.pacing import round_robin
 from meridian.ingest.parse import FeedItem, FeedUnreadable, parse
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,9 @@ class CycleReport:
     #: Feeds the registry permits but this cycle cannot read — a discovery method we do not
     #: implement yet. Not a failure and not a success; it must not read as either.
     skipped_feeds: int = 0
+    #: Feeds whose host's ``robots.txt`` disallows the feed URL for our User-Agent. Not polled,
+    #: and recorded in the feed's poll state so the admin surface says why it has stopped.
+    robots_blocked: int = 0
     #: Wall time of the cycle. Reported because it is a term in the freshness budget and not a
     #: constant: an article's real wait is the interval plus its feed's position in the cycle,
     #: and the cycle grows with the feed count and with how politely each publisher is polled.
@@ -63,6 +67,7 @@ class CycleReport:
             discovered=self.discovered + other.discovered,
             skipped_items=self.skipped_items + other.skipped_items,
             skipped_feeds=self.skipped_feeds + other.skipped_feeds,
+            robots_blocked=self.robots_blocked + other.robots_blocked,
             duration_seconds=self.duration_seconds + other.duration_seconds,
         )
 
@@ -190,21 +195,28 @@ def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) ->
 
 def run_cycle(
     session: Session,
-    fetcher: Fetcher,
+    network: Network,
     *,
-    pacer: Pacer | None = None,
-    sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> CycleReport:
-    """Poll every feed the registry permits, once.
+    """Poll every feed the registry permits and ``robots.txt`` allows, once.
 
     ⚠️ Every feed is polled inside its own try/except. One publisher timing out, answering with
     something that is not a feed, or provoking a bug in our own parsing must not stop the rest
     of the roster being polled in this cycle — a single flaky source freezing ingestion for
-    everyone is the failure this shape exists to prevent (§5.6: degrade predictably).
+    everyone is the failure this shape exists to prevent (§5.6: degrade predictably). The
+    robots lookup is inside the guard for the same reason: it is a fetch.
+
+    ``network`` is the process-wide one. Requests here and in the acquire stage draw on one
+    budget per publisher, which is the only way ``rate_limit_per_min`` is a promise about the
+    host rather than about each job separately.
     """
     pollable = feeds_repo.pollable(session)
     due = [pair for pair in pollable if pair[0].discovery_method is DiscoveryMethod.RSS]
+    # ⚠️ The read above opened a transaction; end it before the first request of the cycle.
+    # ``_poll_one`` commits before its own fetch for the same reason (VACUUM and the oldest
+    # xmin), but the robots lookup below comes first and would otherwise carry this one.
+    session.commit()
 
     # A feed the registry permits but this cycle cannot read. Counted rather than dropped
     # silently: a sitemap source is registered correctly and is simply not implemented yet, and
@@ -217,10 +229,6 @@ def run_cycle(
     if not due:
         return report
 
-    # A pacer of this cycle's own only when none is shared in: the production caller passes
-    # the process-wide one, so a request here counts against the same budget as a fetch in
-    # the acquire stage.
-    pacer = pacer or Pacer(sleep=sleep, clock=clock)
     started = clock()
 
     # The publisher arrives with its feed. Reading it separately made two statements out of one,
@@ -229,8 +237,20 @@ def run_cycle(
     # remaining roster with it.
     for feed, source in round_robin(due, key=lambda pair: pair[0].source_id):
         try:
-            pacer.acquire(source)
-            report += _poll_one(session, feed, source, fetcher)
+            if not network.robots.allowed(feed.url, source):
+                # Recorded as a failed poll, not skipped in silence: ``consecutive_failures``
+                # is what the admin surface shows, and a feed that stopped arriving because of a
+                # robots rule must read differently from one nobody registered. One roster
+                # publisher writes exactly this rule against its own feeds (``Disallow: /*.rss``).
+                poll_state.record(session, feed.feed_id, status=None, error="robots: disallowed")
+                session.commit()
+                log.warning(
+                    "feed %d (%s) is disallowed by robots.txt; not polled", feed.feed_id, feed.url
+                )
+                report += CycleReport(robots_blocked=1)
+                continue
+            network.pacer.acquire(source)
+            report += _poll_one(session, feed, source, network.fetcher)
         except Exception as exc:
             session.rollback()
             log.exception("feed %d (%s) raised during poll", feed.feed_id, feed.url)

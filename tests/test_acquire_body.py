@@ -25,9 +25,11 @@ from sqlalchemy.orm import Session
 
 from meridian.db import work_queue
 from meridian.db.models import CanonicalRecord, Feed, FeedPollState, PipelineWork, Source
-from meridian.ingest.acquire import AcquireReport, Network, handle, run_batch
+from meridian.ingest.acquire import AcquireReport, handle, run_batch
+from meridian.ingest.discovery import run_cycle
 from meridian.ingest.extract import extract
 from meridian.ingest.fetch import FetchResult
+from meridian.ingest.network import Network
 from meridian.ingest.normalize import content_hash
 from meridian.ingest.pacing import Pacer
 from meridian.ingest.robots import RobotsCache
@@ -550,6 +552,42 @@ def test_the_final_transient_failure_dead_letters_the_row(
         row.next_attempt_at = dt.datetime.now(dt.UTC) - dt.timedelta(hours=2)
         app_session.commit()
         assert run_batch(app_session, network=network, lease=LEASE).claimed == 0
+
+
+# ------------------------------------------------------------- AC3: one budget across both jobs
+
+FEED_URL = f"{HOST}/feed.xml"
+FEED_XML = (
+    '<?xml version="1.0"?><rss version="2.0"><channel><title>Ex</title>'
+    "<item><title>Council approves the plan after a three-hour debate</title>"
+    f"<link>{HOST}/news/one</link><guid>one</guid>"
+    "<description>Opponents asked for a review.</description></item></channel></rss>"
+).encode()
+
+
+def test_discovery_and_acquire_draw_on_one_budget_per_publisher(app_session: Session) -> None:
+    """AC3's "whichever job issues them". The feed poll and the article fetch that follows it
+    go to one host; through one ``Network`` the second waits out the gap the first started.
+    With a pacer per job each would see a first request and wait nothing — two requests to
+    the publisher inside one second, each job honest on its own."""
+    fetcher = Fetcher(
+        {
+            FEED_URL: FetchResult(status=200, body=FEED_XML),
+            f"{HOST}/news/one": FetchResult(status=200, body=_page()),
+        }
+    )
+    network, clock = _network(fetcher)
+    source = make_source(app_session, rate_limit_per_min=5)
+    make_feed(app_session, source, url=FEED_URL, acquisition_tier=AcquisitionTier.EXTRACTION)
+    app_session.commit()
+
+    cycle = run_cycle(app_session, network, clock=clock)
+    batch = run_batch(app_session, network=network, lease=LEASE)
+
+    assert (cycle.discovered, batch.fetched) == (1, 1)
+    assert fetcher.calls == [ROBOTS, FEED_URL, f"{HOST}/news/one"]
+    # robots.txt at t=0, the feed 12 s later, the article 12 s after that.
+    assert clock.slept == [12.0, 12.0]
 
 
 # ----------------------------------------------------------- AC5: the heartbeat, and AC7, AC9
