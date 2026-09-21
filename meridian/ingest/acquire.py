@@ -1,39 +1,52 @@
 """The acquire stage: a discovered record becomes a usable one (FR-I4, FR-I7).
 
-The first stage handler in the system, and the first code that consumes a work row rather
-than creating one. Discovery writes what the feed said; everything after this reads the
-canonical record and never the feed, so this is the last point at which the feed's own
-spelling of things matters.
+Discovery writes what the feed said; everything after this reads the canonical record and
+never the feed, so this is the last point at which the feed's own spelling of things matters.
+Two things happen here. The lede is cleaned and the language decided (FR-I7), as before. And
+the article's body is obtained where the registry says it can be — the only place in the
+system that fetches an article page.
 
-⚠️ **``content_hash`` and ``simhash`` are deliberately left NULL here.** Both are specified
-over the article *body* (2.1.2 §3.2). Computing them over the headline instead was measured
-and rejected: over ~10 tokens SimHash recognises about 6% of genuine near-duplicates against
-100% over a full article, and a SHA-256 of a headline declares two different articles
-byte-identical, which collapses a real article into an ``AlternateCopy`` and inflates the
-distinct-source count that FR-S6 gates summarization on. A NULL column is visibly empty; a
-populated one that is wrong per-publisher is not. ⚠️ Four v1-roster publishers ship the full
-body under rights that let discovery store it, so ``body_text`` is populated for those records
-while their hashes stay NULL — the RFC §5.1 invariant
-``content_hash IS NOT NULL ⟺ body_text IS NOT NULL`` does not hold for them until dedup's
-backfill (``body_text IS NOT NULL AND content_hash IS NULL``) computes the hashes. No CHECK
-enforces the invariant, so nothing fails; the predicate is what finds them.
+The body comes from a ladder of reasons *not* to fetch, cheapest first (``_obtain_body``):
+a body already on the record, a stopped publisher, no body rights, no route for the feed's
+tier, ``robots.txt``, a pacing wait longer than the lease. Nothing reaches the network before
+the rights rung. Every rung but the network failures ends the same way — the article continues
+headline-only. A body is an improvement to a record, not a precondition for one: a headline we
+could not fetch the page for is still a real headline that belongs in a cluster. Only a
+transient failure (a 5xx, no answer) puts the row back for later, because only there can a
+retry change the answer.
 
-Retry and backoff are not here. A raising article keeps its claimed row with ``attempts``
-already incremented, and is picked up again once the lease expires.
+``content_hash`` is computed for every body the stage ends holding — fetched here, or shipped
+in a tier-1 feed and stored by discovery — so RFC §5.1's invariant
+``content_hash IS NOT NULL ⟺ body_text IS NOT NULL`` holds from the moment a record leaves
+this stage. ``simhash`` stays NULL: it needs features and weights, which is dedup's design.
+
+⚠️ The fetched page is held in memory for the extraction call and nowhere else (Legal A-L1).
+No column, log line or file receives it.
+
+Retry policy beyond what a 503 needs is not here. A raising article keeps its claimed row with
+``attempts`` already incremented and is picked up again once the lease expires.
 """
 
 import datetime as dt
 import logging
 import os
 import socket
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, fields
 
-from meridian_contract import Stage, TerminalReason
+import sqlalchemy as sa
+from meridian_contract import AcquisitionTier, BodyProvenance, Stage, TerminalReason
 from sqlalchemy.orm import Session
 
+from meridian.db import sources as sources_repo
 from meridian.db import work_queue
-from meridian.db.models import CanonicalRecord, PipelineWork
-from meridian.ingest.normalize import detect_language, language_input, strip_html
+from meridian.db.models import CanonicalRecord, Feed, PipelineWork, Source
+from meridian.ingest.adapters import Adapter, adapter_for
+from meridian.ingest.extract import extract
+from meridian.ingest.fetch import DEFAULT_USER_AGENT
+from meridian.ingest.network import Network
+from meridian.ingest.normalize import content_hash, detect_language, language_input, strip_html
+from meridian.ingest.pacing import round_robin
 
 log = logging.getLogger(__name__)
 
@@ -47,91 +60,388 @@ def worker_name() -> str:
 
 @dataclass(frozen=True)
 class AcquireReport:
-    """What one batch did. Every field is a count a human would ask for during an incident."""
+    """What one batch did. Every field is a count a human would ask for during an incident.
+
+    The outcomes are disjoint: each claimed row lands in exactly one of ``acquired``,
+    ``dropped``, ``failed``, ``stale`` or ``fetch_deferred``; each network route an acquired
+    article took lands in exactly one of ``fetched``, ``robots_blocked``, ``fetch_refused``,
+    ``fetch_abandoned``, ``extract_empty``, ``adapter_missing`` or ``withheld``. Articles with
+    nothing to fetch — a tier-1 body already present, no rights, a tier-0 feed — are in
+    ``acquired`` alone, since that is their expected state and a count of it would only ever
+    say how big the roster is.
+    """
 
     claimed: int = 0
-    #: Articles normalized and handed to the next stage.
+    #: Articles handed to the next stage, with a body or without one.
     acquired: int = 0
     #: Articles stopped by FR-I7. Steady state is small and non-zero; a spike means either a
     #: publisher changed language or the detector is being fed something it should not be.
     dropped: int = 0
+    #: Articles that raised. The row keeps its claim and is retried after the lease.
     failed: int = 0
-    #: Rows another worker had already completed — an expired lease, not a fault. Counted
-    #: separately because a batch reporting these as failures sends someone hunting a bug in a
-    #: record that was processed correctly.
+    #: Rows another worker had already completed or reclaimed — an expired lease, not a
+    #: fault. Counted separately because a batch reporting these as failures sends someone
+    #: hunting a bug in a record that was processed correctly.
     stale: int = 0
+    #: Bodies obtained over the network and stored. Tier-1 bodies arrive with discovery and
+    #: are not counted here.
+    fetched: int = 0
+    #: Pages ``robots.txt`` disallows for the publisher's User-Agent. Continue headline-only.
+    robots_blocked: int = 0
+    #: A 4xx from the page, or a body over the size cap. Not a robots block and not a failure:
+    #: a 403 at the edge is the publisher's decision about this request and the cap is ours,
+    #: and neither changes on a retry. Recorded as that.
+    fetch_refused: int = 0
+    #: Rows given back for a later batch — a 5xx, no answer, or a pacing wait past the lease.
+    fetch_deferred: int = 0
+    #: Pages that failed transiently on every attempt the schedule allows. The fetch is given
+    #: up and the article continues without a body, as from every other rung that yields none:
+    #: its headline and lede are real, and a cluster counts it (FR-S6) whether or not a body
+    #: was ever obtainable. Climbing steadily means a publisher's pages, not its feed, are down.
+    fetch_abandoned: int = 0
+    #: A 200 that extraction found no body in.
+    extract_empty: int = 0
+    #: Bodies obtained over the network and then not stored, because the publisher was stopped
+    #: or lost body rights between the request being decided and the body being written. The
+    #: request was polite when it was made; the hold is what the write has to justify.
+    withheld: int = 0
+    #: A tier-2 article with no adapter for its host, or a URL or response the adapter did
+    #: not recognise. Climbing while ``fetched`` is flat means the publisher changed its site.
+    adapter_missing: int = 0
 
     def __add__(self, other: "AcquireReport") -> "AcquireReport":
         return AcquireReport(
-            claimed=self.claimed + other.claimed,
-            acquired=self.acquired + other.acquired,
-            dropped=self.dropped + other.dropped,
-            failed=self.failed + other.failed,
-            stale=self.stale + other.stale,
+            **{f.name: getattr(self, f.name) + getattr(other, f.name) for f in fields(self)}
         )
 
 
-def normalize(session: Session, article: CanonicalRecord) -> bool:
-    """Fill in what the feed could not, and decide whether the article continues.
+@dataclass(frozen=True)
+class _Obtained:
+    """The ladder's answer for an article that continues: a body to write, or none."""
 
-    Returns True to continue, False if FR-I7 stops it. Writes to the session; commits nothing.
+    text: str | None = None
+    provenance: BodyProvenance | None = None
+    counted: AcquireReport = AcquireReport()
 
-    The lede is rewritten in place rather than kept alongside its markup. The published
-    original is the publisher's; what we store is what every later stage reads, and keeping
-    both would mean every reader choosing, which is how one of them chooses wrong.
+
+@dataclass(frozen=True)
+class _Deferred:
+    """The ladder's answer for an article that must not continue in this batch."""
+
+    error: str
+    #: Whether this counts against the row's schedule. A failure the host answered with — a
+    #: 5xx, no answer, a robots.txt that could not be read — is a strike, and the schedule
+    #: ends it: on the attempt ``MAX_ATTEMPTS`` names the fetch is given up. A wait in which
+    #: nothing was asked of the host (a pacing slot past the lease) is not, however often it
+    #: recurs, or a row paced out often enough would meet its first real failure with no
+    #: schedule left.
+    strike: bool
+    #: The earliest the row may be tried again, when the wait has a clock of its own — the
+    #: pacing slot, the robots cache's next retry. A strike waits at least its backoff as well.
+    not_before: dt.datetime | None = None
+
+
+_NO_FETCH = _Obtained()
+
+
+def _gates_open(source: Source) -> bool:
+    """May the publisher be asked for a body, and may one be held for it? The one rule, read
+    where the request is decided and again where the body is written."""
+    return bool(
+        source.enabled and source.permitted_to_ingest and sources_repo.holds_body_rights(source)
+    )
+
+
+def _may_hold_body(session: Session, source: Source) -> bool:
+    """The gates, read from the database now rather than from the instance.
+
+    ``FOR SHARE`` on the publisher's row: the admin surface's governing writes take
+    ``FOR UPDATE`` on it, so either their change committed before this read and is seen, or it
+    waits for this transaction to commit — a body is written under the rights in force at the
+    write, never under rights already withdrawn. A plain refresh would not wait: under MVCC it
+    reads the last *committed* row and misses a downgrade flushed but not yet committed. Held
+    for the write transaction only.
+
+    The feed's tier is deliberately not re-read. The tier says where the words are; the gates
+    say whether we may hold them. A tier moved mid-fetch changes the route for the next article,
+    not the standing of a body already obtained.
     """
-    article.lede = strip_html(article.lede)
-    verdict = detect_language(language_input(article.title, article.lede))
-    article.language = verdict.language
-    return not verdict.drop
+    session.refresh(source, with_for_update={"read": True})
+    return _gates_open(source)
 
 
-def handle(session: Session, work: PipelineWork) -> bool:
-    """Run the stage for one work row and move it on. Returns True if the article continues.
+def _obtain_body(
+    session: Session,
+    article: CanonicalRecord,
+    source: Source,
+    feed: Feed | None,
+    *,
+    network: Network,
+    lease: dt.timedelta,
+) -> _Obtained | _Deferred:
+    """The ladder. Every rung is a reason not to fetch; the network is reached only past all of
+    them, and the transaction is closed first.
 
-    Commits once, at the end. That single commit is what makes the stage output, the state
-    move, the dequeue and the successor enqueue one atomic step — split them and an article
-    can end up advanced with nothing owed, or owing a stage it has already had.
+    The route is the feed's declared tier, never an inspection of the page: tier 2 is the one
+    tier where the words live at a different URL from the article's, and the adapter is the
+    per-publisher translation of one into the other. ``robots.txt`` is then read for the URL
+    actually requested — for a tier-2 article that is the API's, not the page's.
+    """
+    if article.body_text is not None:
+        return _NO_FETCH
+    # A publisher stopped in the registry — disabled, or its permission to ingest withdrawn —
+    # gets no request of any kind, not only no poll. The article it already gave us continues
+    # at the level it was taken under (Legal A-L5); what stops is new collection.
+    if not _gates_open(source):
+        if not (source.enabled and source.permitted_to_ingest):
+            log.info(
+                "article %d: publisher %d is stopped; no request made",
+                article.article_id,
+                source.source_id,
+            )
+        return _NO_FETCH
+    if feed is None:
+        log.info("article %d has no feed, so no acquisition route", article.article_id)
+        return _NO_FETCH
+
+    tier = feed.acquisition_tier
+    if tier is AcquisitionTier.UNAVAILABLE:
+        return _NO_FETCH
+    if tier is AcquisitionTier.FULL_FEED:
+        log.info("article %d: tier-1 feed %d shipped no body", article.article_id, feed.feed_id)
+        return _NO_FETCH
+
+    adapter: Adapter | None = None
+    if tier is AcquisitionTier.PUBLISHER_API:
+        adapter = adapter_for(article.url_canonical)
+        request_url = adapter.request_url(article.url_canonical) if adapter is not None else None
+        if request_url is None:
+            log.warning(
+                "article %d: no publisher API is known for %s",
+                article.article_id,
+                article.url_canonical,
+            )
+            return _Obtained(counted=AcquireReport(adapter_missing=1))
+        provenance = BodyProvenance.TIER2_API
+    else:
+        request_url = article.url_canonical
+        provenance = BodyProvenance.TIER3_EXTRACTED
+
+    # ⚠️ Commit before going to the network — the robots lookup below may fetch. The reads
+    # above opened a transaction, and one held open across a fetch pins the database's oldest
+    # xmin, so VACUUM can reclaim nothing anywhere for as long as the slowest publisher takes
+    # to answer. Nothing has been written yet, so this ends the transaction and moves nothing.
+    session.commit()
+
+    # One read of the robots cache for the whole rung: whether we may ask, why not, and the
+    # site's own spacing. Two reads can straddle the entry's expiry and answer for two files.
+    robots = network.robots.check(request_url, source)
+    if not robots.allowed:
+        if robots.outage_retry_in is not None:
+            # The host could not even say whether we may ask, and nothing earlier is held.
+            # An outage, not an answer — but one the host gave to a request we made, so it is
+            # a strike like a page 503: come back no sooner than the cache will, and let the
+            # schedule end it, or a robots.txt that 5xxs for a week holds every article of
+            # the publisher in this stage for the week, owed and unreadable.
+            return _Deferred(
+                error=f"robots.txt for {request_url} unreachable; closed until retried",
+                strike=True,
+                not_before=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=robots.outage_retry_in),
+            )
+        log.info("article %d: robots.txt disallows %s", article.article_id, request_url)
+        return _Obtained(counted=AcquireReport(robots_blocked=1))
+
+    floor = robots.crawl_delay
+    waited = network.pacer.try_acquire(source, max_wait=lease.total_seconds(), floor=floor)
+    if waited is None:
+        wait = network.pacer.wait_for(source, floor=floor)
+        return _Deferred(
+            error=f"pacing: publisher {source.source_id}'s next slot is {wait:.0f}s away, "
+            "past the lease",
+            strike=False,
+            not_before=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=wait),
+        )
+
+    result = network.fetcher(
+        request_url, user_agent=source.user_agent or DEFAULT_USER_AGENT, headers={}
+    )
+    if (result.status is None and result.retryable) or (
+        result.status is not None and result.status >= 500
+    ):
+        return _Deferred(
+            error=f"fetch {request_url}: status={result.status} {result.error}", strike=True
+        )
+    if result.status != 200 or result.body is None:
+        log.warning(
+            "article %d: %s answered %s %s; continuing without a body",
+            article.article_id,
+            request_url,
+            result.status,
+            result.error,
+        )
+        return _Obtained(counted=AcquireReport(fetch_refused=1))
+
+    # ⚠️ Only a 200 body reaches extraction. An error page extracts to something — a 404 here
+    # came out as 5,300 characters of cookie policy — and no length rule can tell it from an
+    # article (``extract``'s docstring). The status code is the filter.
+    html = result.body
+    if adapter is not None:
+        unwrapped = adapter.html_from(result.body)
+        if unwrapped is None:
+            log.warning(
+                "article %d: %s answered 200 but not in the shape its API promised",
+                article.article_id,
+                request_url,
+            )
+            return _Obtained(counted=AcquireReport(adapter_missing=1))
+        html = unwrapped
+
+    text = extract(html, article.url_canonical)
+    if text is None:
+        log.info("article %d: nothing extractable at %s", article.article_id, request_url)
+        return _Obtained(counted=AcquireReport(extract_empty=1))
+    return _Obtained(text=text, provenance=provenance, counted=AcquireReport(fetched=1))
+
+
+def handle(
+    session: Session, work: PipelineWork, *, network: Network, lease: dt.timedelta
+) -> AcquireReport:
+    """Run the stage for one work row and move it on. Returns the row's outcome as a report.
+
+    FR-I7 is decided first, before any request: a dropped article costs the publisher nothing.
+    The decision is computed here and written only at the end, together with everything else,
+    because the fetch in between can end in the row being released — and a release must leave
+    the record exactly as it found it. ``strip_html`` is not a fixpoint, so a lede written
+    before a release would be stripped a second time on the retry.
+
+    Commits once for the article, at the end. That single commit is what makes the body, the
+    normalization, the state move, the dequeue and the successor enqueue one atomic step —
+    split them and an article can end up advanced with nothing owed, or owing a stage it has
+    already had.
     """
     article = session.get(CanonicalRecord, work.article_id)
     if article is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
+    source = session.get(Source, article.source_id)
+    if source is None:
+        raise ValueError(
+            f"article {article.article_id} names source {article.source_id}, which is gone"
+        )
+    feed = session.get(Feed, article.feed_id) if article.feed_id is not None else None
 
-    if normalize(session, article):
-        work_queue.advance(session, work)
+    lede = strip_html(article.lede)
+    verdict = detect_language(language_input(article.title, lede))
+    if verdict.drop:
+        article.lede = lede
+        article.language = verdict.language
+        if article.body_text is not None:
+            # A feed-shipped body is held even on a dropped record; RFC §5.1's invariant
+            # (``content_hash`` present exactly when ``body_text`` is) holds at rest, not only
+            # for records that continue.
+            article.content_hash = content_hash(article.body_text)
+        work_queue.terminate(session, work, TerminalReason.DROPPED_LANGUAGE)
         session.commit()
-        return True
+        log.info(
+            "article %d dropped: language=%s (FR-I7)",
+            article.article_id,
+            article.language or "undetermined",
+        )
+        return AcquireReport(dropped=1)
 
-    work_queue.terminate(session, work, TerminalReason.DROPPED_LANGUAGE)
+    outcome = _obtain_body(session, article, source, feed, network=network, lease=lease)
+    if isinstance(outcome, _Deferred):
+        if not outcome.strike or work.attempts < work_queue.MAX_ATTEMPTS:
+            return _defer(session, work, outcome)
+        # The page has failed on every attempt the schedule allows. What is given up is the
+        # fetch, not the article: its headline and lede are real, so it continues without a
+        # body exactly as it would from any other rung that yields none.
+        log.warning(
+            "article %d: fetch given up after %d attempts, continuing without a body: %s",
+            article.article_id,
+            work.attempts,
+            outcome.error,
+        )
+        outcome = _Obtained(counted=AcquireReport(fetch_abandoned=1))
+
+    if outcome.text is not None and not _may_hold_body(session, source):
+        # The gates were read before the network and the registry may have moved since — an
+        # operator's stop or downgrade during the robots lookup, the pacing wait or the fetch.
+        # Read again inside the transaction that writes (RFC §5.2: the rights predicate is
+        # read wherever a body is written), and if the answer changed, hold nothing.
+        log.info(
+            "article %d: publisher %d was stopped or lost body rights during the fetch; "
+            "body not held",
+            article.article_id,
+            source.source_id,
+        )
+        outcome = _Obtained(counted=AcquireReport(withheld=1))
+
+    article.lede = lede
+    article.language = verdict.language
+    if outcome.text is not None:
+        article.body_text = outcome.text
+        article.body_provenance = outcome.provenance
+    if article.body_text is not None:
+        article.content_hash = content_hash(article.body_text)
+    work_queue.advance(session, work)
     session.commit()
-    log.info(
-        "article %d dropped: language=%s (FR-I7)",
-        article.article_id,
-        article.language or "undetermined",
+    return AcquireReport(acquired=1) + outcome.counted
+
+
+def _defer(session: Session, work: PipelineWork, deferred: _Deferred) -> AcquireReport:
+    """Give the row back for a later batch. Commits.
+
+    A strike waits out its backoff, or longer if the wait has a clock of its own (the robots
+    cache's retry); the caller stops sending a strike here on the attempt ``MAX_ATTEMPTS``
+    names. A non-strike wait is due when its own clock says, and the claim's attempt is given
+    back with the row.
+    """
+    work_id = work.work_id
+    now = dt.datetime.now(dt.UTC)
+    retry_at = now + work_queue.backoff_after(work.attempts) if deferred.strike else now
+    if deferred.not_before is not None and deferred.not_before > retry_at:
+        retry_at = deferred.not_before
+    work_queue.release(
+        session, work, retry_at=retry_at, error=deferred.error, strike=deferred.strike
     )
-    return False
+    session.commit()
+    log.info("work %d released until %s: %s", work_id, retry_at.isoformat(), deferred.error)
+    return AcquireReport(fetch_deferred=1)
 
 
 def run_batch(
     session: Session,
     *,
+    network: Network,
     lease: dt.timedelta,
     limit: int = 50,
     worker: str | None = None,
 ) -> AcquireReport:
-    """Claim up to ``limit`` due articles and normalize each of them.
+    """Claim up to ``limit`` due articles and run the stage on each.
 
     ⚠️ Each article is handled inside its own try/except, for the reason discovery polls each
     feed inside one: a single record that provokes a bug must not stop the rest of the batch.
     Unlike discovery, the failure leaves a trace without any help — ``claim`` has already
     committed the row with ``attempts`` incremented — but the trace says only *how often*, so
     the message is written too.
+
+    After each article the rows still held are heartbeated. The claim promised to finish
+    within the lease; with a paced fetch per article a batch cannot keep that promise, so it
+    is renewed per row and the lease bounds one article's work. The heartbeat also says which
+    rows are still ours — one another worker reclaimed is dropped here rather than fetched and
+    then refused by ``advance()``.
+
+    One row's own work can still outlast its lease: the pacing bound is measured from when the
+    slot is asked for, not from the row's stamp, so robots, pacing and the fetch together can
+    exceed it. Under one replica (T10, ``max_instances=1``) nothing reclaims the row meanwhile;
+    with a second worker, ``advance()`` and ``release()`` refuse a row that is no longer ours.
     """
-    claimed = work_queue.claim(
-        session, stage=STAGE, worker=worker or worker_name(), lease=lease, limit=limit
-    )
+    worker = worker or worker_name()
+    claimed = work_queue.claim(session, stage=STAGE, worker=worker, lease=lease, limit=limit)
     report = AcquireReport(claimed=len(claimed))
-    for work in claimed:
+    pending = _by_publisher(session, claimed)
+    while pending:
+        work = pending.pop(0)
         # ⚠️ Read the identifiers before entering the try, and use the copies afterwards.
         # ``session.rollback()`` expires the instance, so touching an attribute re-queries the
         # row — and if the row is gone, that raises ``ObjectDeletedError`` *from inside the
@@ -139,9 +449,7 @@ def run_batch(
         # row being gone is not exotic: it is what a worker whose lease expired finds.
         work_id, article_id = work.work_id, work.article_id
         try:
-            report += (
-                AcquireReport(acquired=1) if handle(session, work) else AcquireReport(dropped=1)
-            )
+            report += handle(session, work, network=network, lease=lease)
         except work_queue.StaleWork:
             # Another worker finished this row while our claim was expired. Nothing is wrong
             # with the article, so this must not read as a failure — counting it as one sends
@@ -154,7 +462,33 @@ def run_batch(
             log.exception("article %s raised during acquire", article_id)
             _record_failure(session, work_id, exc)
             report += AcquireReport(failed=1)
+
+        if pending:
+            kept = work_queue.heartbeat(session, [row.work_id for row in pending], worker=worker)
+            stolen = len(pending) - len(kept)
+            if stolen:
+                log.info(
+                    "%d row(s) were reclaimed by another worker mid-batch; not fetched", stolen
+                )
+                report += AcquireReport(stale=stolen)
+            pending = [row for row in pending if row.work_id in kept]
     return report
+
+
+def _by_publisher(session: Session, claimed: Sequence[PipelineWork]) -> list[PipelineWork]:
+    """The batch in round-robin order over publishers, so one publisher's pacing gap is spent
+    on the others' requests rather than slept through (``pacing.round_robin``)."""
+    ids = [row.article_id for row in claimed if row.article_id is not None]
+    publisher_of: dict[int | None, int | None] = {
+        article_id: source_id
+        for article_id, source_id in session.execute(
+            sa.select(CanonicalRecord.article_id, CanonicalRecord.source_id).where(
+                CanonicalRecord.article_id.in_(ids)
+            )
+        )
+    }
+    session.commit()
+    return round_robin(claimed, key=lambda row: publisher_of.get(row.article_id))
 
 
 def _record_failure(session: Session, work_id: int, exc: Exception) -> None:

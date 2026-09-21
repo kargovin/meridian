@@ -25,7 +25,7 @@ from meridian.db import runtime_config
 from meridian.db.runtime_config import IntKnob
 from meridian.ingest.acquire import AcquireReport, run_batch
 from meridian.ingest.discovery import CycleReport, run_cycle
-from meridian.ingest.fetch import Fetcher
+from meridian.ingest.network import Network
 
 
 class AcquireRun(Protocol):
@@ -35,6 +35,7 @@ class AcquireRun(Protocol):
         self,
         session: Session,
         *,
+        network: Network,
         lease: dt.timedelta,
         limit: int = ...,
         worker: str | None = ...,
@@ -141,24 +142,26 @@ class DiscoveryScheduler(_CadencedJob[CycleReport]):
     def __init__(
         self,
         sessions: sessionmaker[Session],
-        fetcher: Fetcher,
+        network: Network,
         *,
         scheduler: BackgroundScheduler | None = None,
-        run: Callable[[Session, Fetcher], CycleReport] = run_cycle,
+        run: Callable[[Session, Network], CycleReport] = run_cycle,
     ) -> None:
         super().__init__(sessions, scheduler=scheduler)
-        self._fetcher = fetcher
+        self._network = network
         self._run = run
 
     def _run_once(self, session: Session) -> CycleReport:
-        report = self._run(session, self._fetcher)
+        report = self._run(session, self._network)
         log.info(
-            "discovery cycle: polled=%d unchanged=%d failed=%d discovered=%d skipped=%d in %.1fs",
+            "discovery cycle: polled=%d unchanged=%d failed=%d discovered=%d skipped=%d "
+            "robots_blocked=%d in %.1fs",
             report.polled,
             report.not_modified,
             report.failed,
             report.discovered,
             report.skipped_feeds,
+            report.robots_blocked,
             report.duration_seconds,
         )
         self._warn_if_overrunning(report)
@@ -201,6 +204,7 @@ class AcquireScheduler(_CadencedJob[AcquireReport]):
     def __init__(
         self,
         sessions: sessionmaker[Session],
+        network: Network,
         *,
         lease: dt.timedelta,
         limit: int = 50,
@@ -212,20 +216,32 @@ class AcquireScheduler(_CadencedJob[AcquireReport]):
         run: AcquireRun = run_batch,
     ) -> None:
         super().__init__(sessions, scheduler=scheduler)
+        self._network = network
         self._lease = lease
         self._limit = limit
         self._run = run
 
     def _run_once(self, session: Session) -> AcquireReport:
-        report = self._run(session, lease=self._lease, limit=self._limit)
+        report = self._run(session, network=self._network, lease=self._lease, limit=self._limit)
         # Logged only when there was something to do: this runs every 30 s against a roster
         # that is usually quiet, and a line per empty batch buries the ones that matter.
         if report.claimed:
             log.info(
-                "acquire batch: claimed=%d acquired=%d dropped=%d failed=%d",
+                "acquire batch: claimed=%d acquired=%d dropped=%d failed=%d stale=%d "
+                "fetched=%d robots_blocked=%d refused=%d deferred=%d abandoned=%d "
+                "extract_empty=%d adapter_missing=%d withheld=%d",
                 report.claimed,
                 report.acquired,
                 report.dropped,
                 report.failed,
+                report.stale,
+                report.fetched,
+                report.robots_blocked,
+                report.fetch_refused,
+                report.fetch_deferred,
+                report.fetch_abandoned,
+                report.extract_empty,
+                report.adapter_missing,
+                report.withheld,
             )
         return report

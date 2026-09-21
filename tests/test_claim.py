@@ -184,3 +184,22 @@ def test_a_live_claim_is_not_stolen(app_session: Session) -> None:
     app_session.commit()
 
     assert claim(app_session, stage=Stage.CLASSIFY, worker="w2", lease=LEASE) == []
+
+
+def test_claim_refreshes_a_row_the_session_already_holds(app_session: Session) -> None:
+    """A caller holding the instance must see the claim, not the state it loaded before it.
+
+    Without ``populate_existing`` the identity map wins and the returned row reads
+    ``attempts=0`` — the passing version of ``test_claim_marks_the_row`` only holds because it
+    keeps no reference and the instance is collected before the claim.
+    """
+    source = make_source(app_session)
+    article = make_article(app_session, source, guid="a")
+    work = make_work(app_session, stage=Stage.CLASSIFY, article=article)
+    app_session.commit()
+    assert work.attempts == 0  # loaded, and about to be stale
+
+    (claimed,) = claim(app_session, stage=Stage.CLASSIFY, worker="w1", lease=LEASE)
+    assert claimed is work
+    assert claimed.attempts == 1
+    assert claimed.claimed_by == "w1"

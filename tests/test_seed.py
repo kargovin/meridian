@@ -10,9 +10,8 @@ from sqlalchemy.orm import Session
 from meridian.db import feeds, sources
 from meridian.db import seed as seeder
 from meridian.db.models import CanonicalRecord
-from meridian.ingest.discovery import run_cycle
 from tests.factories import make_source
-from tests.test_discovery import FakeFetcher, content_xml
+from tests.test_discovery import FakeFetcher, _cycle, content_xml
 
 EXAMPLE = Path("seeds/sources.example.json")
 
@@ -275,10 +274,9 @@ def test_no_headline_only_v1_publisher_stores_a_body_whatever_its_feed_ships(
 
     # One distinct article per feed: the same link on every feed would collapse to one row
     # under UNIQUE(url_canonical), and the test would be measuring that constraint instead.
-    run_cycle(
+    _cycle(
         app_session,
         FakeFetcher({f.url: content_xml((f"f{f.feed_id}", "One")) for f, _s in polled}),
-        sleep=lambda _: None,
     )
 
     by_source = {s.source_id: s.name for s in sources.list_all(app_session)}

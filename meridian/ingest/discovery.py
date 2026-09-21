@@ -12,8 +12,7 @@ work row is an article that has stopped moving with no error, no retry and no de
 
 import logging
 import time
-from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from meridian_contract import (
@@ -31,6 +30,8 @@ from meridian.db import poll_state
 from meridian.db import sources as sources_repo
 from meridian.db.models import CanonicalRecord, Feed, PipelineWork, Source
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher
+from meridian.ingest.network import Network
+from meridian.ingest.pacing import round_robin
 from meridian.ingest.parse import FeedItem, FeedUnreadable, parse
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,9 @@ class CycleReport:
     #: Feeds the registry permits but this cycle cannot read — a discovery method we do not
     #: implement yet. Not a failure and not a success; it must not read as either.
     skipped_feeds: int = 0
+    #: Feeds whose host's ``robots.txt`` disallows the feed URL for our User-Agent. Not polled,
+    #: and recorded in the feed's poll state so the admin surface says why it has stopped.
+    robots_blocked: int = 0
     #: Wall time of the cycle. Reported because it is a term in the freshness budget and not a
     #: constant: an article's real wait is the interval plus its feed's position in the cycle,
     #: and the cycle grows with the feed count and with how politely each publisher is polled.
@@ -63,6 +67,7 @@ class CycleReport:
             discovered=self.discovered + other.discovered,
             skipped_items=self.skipped_items + other.skipped_items,
             skipped_feeds=self.skipped_feeds + other.skipped_feeds,
+            robots_blocked=self.robots_blocked + other.robots_blocked,
             duration_seconds=self.duration_seconds + other.duration_seconds,
         )
 
@@ -188,73 +193,30 @@ def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) ->
     return CycleReport(polled=1, discovered=discovered, skipped_items=parsed.skipped)
 
 
-def _interleave(
-    due: Sequence[tuple[Feed, Source]],
-) -> list[tuple[Feed, Source]]:
-    """Order feeds so consecutive requests go to different publishers.
-
-    Politeness is per publisher, so polling one publisher's feeds back to back means waiting out
-    the full gap between each — the worst possible order, and the one feed id order produces.
-    Round-robin instead: by the time the cycle returns to a publisher it has already spent the
-    other publishers' requests, and that time counts towards the gap.
-
-    Measured, 8 publishers x 3 feeds at 5 requests/min: 194 s in feed order, 26 s interleaved.
-    Identical politeness — every publisher still sees the same minimum spacing — for a seventh
-    of the wall time, which is a seventh of this term of the freshness budget (RFC §7.1).
-    """
-    by_source: dict[int, list[tuple[Feed, Source]]] = defaultdict(list)
-    for pair in due:
-        by_source[pair[0].source_id].append(pair)
-
-    ordered: list[tuple[Feed, Source]] = []
-    queues = list(by_source.values())
-    while queues:
-        for queue in queues:
-            ordered.append(queue.pop(0))
-        queues = [queue for queue in queues if queue]
-    return ordered
-
-
-def _pace(
-    source: Source,
-    last_request_at: dict[int, float],
-    sleep: Callable[[float], None],
-    clock: Callable[[], float],
-) -> None:
-    """Hold off long enough that a publisher's feeds share one politeness budget (FR-I3).
-
-    ``rate_limit_per_min`` is a promise about one host, and it lives on the publisher rather
-    than the feed precisely because N feeds each honouring it independently would exceed it
-    N-fold. Spacing here is the whole of that promise for discovery; the general per-domain
-    limiter arrives with tier-3 acquisition, which is the path with the volume.
-    """
-    previous = last_request_at.get(source.source_id)
-    now = clock()
-    if previous is not None:
-        gap = 60.0 / source.rate_limit_per_min
-        remaining = gap - (now - previous)
-        if remaining > 0:
-            sleep(remaining)
-            now = clock()
-    last_request_at[source.source_id] = now
-
-
 def run_cycle(
     session: Session,
-    fetcher: Fetcher,
+    network: Network,
     *,
-    sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> CycleReport:
-    """Poll every feed the registry permits, once.
+    """Poll every feed the registry permits and ``robots.txt`` allows, once.
 
     ⚠️ Every feed is polled inside its own try/except. One publisher timing out, answering with
     something that is not a feed, or provoking a bug in our own parsing must not stop the rest
     of the roster being polled in this cycle — a single flaky source freezing ingestion for
-    everyone is the failure this shape exists to prevent (§5.6: degrade predictably).
+    everyone is the failure this shape exists to prevent (§5.6: degrade predictably). The
+    robots lookup is inside the guard for the same reason: it is a fetch.
+
+    ``network`` is the process-wide one. Requests here and in the acquire stage draw on one
+    budget per publisher, which is the only way ``rate_limit_per_min`` is a promise about the
+    host rather than about each job separately.
     """
     pollable = feeds_repo.pollable(session)
     due = [pair for pair in pollable if pair[0].discovery_method is DiscoveryMethod.RSS]
+    # ⚠️ The read above opened a transaction; end it before the first request of the cycle.
+    # ``_poll_one`` commits before its own fetch for the same reason (VACUUM and the oldest
+    # xmin), but the robots lookup below comes first and would otherwise carry this one.
+    session.commit()
 
     # A feed the registry permits but this cycle cannot read. Counted rather than dropped
     # silently: a sitemap source is registered correctly and is simply not implemented yet, and
@@ -267,26 +229,49 @@ def run_cycle(
     if not due:
         return report
 
-    last_request_at: dict[int, float] = {}
     started = clock()
 
     # The publisher arrives with its feed. Reading it separately made two statements out of one,
     # and under READ COMMITTED they can disagree — a publisher deleted between them is missing
     # from the second, and the lookup raised *outside* the per-feed guard below, taking the whole
     # remaining roster with it.
-    for feed, source in _interleave(due):
+    for feed, source in round_robin(due, key=lambda pair: pair[0].source_id):
+        # ⚠️ Copies for the except clause. ``session.rollback()`` expires the instance, and
+        # reading ``feed.feed_id`` afterwards re-queries the row — if the feed was deleted
+        # while its own poll was raising, that raises ``ObjectDeletedError`` from inside the
+        # clause that exists to contain failures, and the rest of the roster is not polled.
+        feed_id, feed_url = feed.feed_id, feed.url
         try:
-            _pace(source, last_request_at, sleep, clock)
-            report += _poll_one(session, feed, source, fetcher)
+            robots = network.robots.check(feed_url, source)
+            if not robots.allowed:
+                # Recorded as a failed poll, not skipped in silence: ``consecutive_failures``
+                # is what the admin surface shows, and a feed that stopped arriving because of a
+                # robots rule must read differently from one nobody registered. One roster
+                # publisher writes exactly this rule against its own feeds (``Disallow: /*.rss``).
+                # An unreachable robots.txt is also a closed door (RFC 9309), and is recorded as
+                # the outage it is rather than as a rule the publisher never wrote.
+                retry = robots.outage_retry_in
+                error = (
+                    "robots: disallowed"
+                    if retry is None
+                    else f"robots: robots.txt unreachable; closed until retried in {retry:.0f}s"
+                )
+                poll_state.record(session, feed_id, status=None, error=error)
+                session.commit()
+                log.warning("feed %d (%s): %s; not polled", feed_id, feed_url, error)
+                report += CycleReport(robots_blocked=1)
+                continue
+            network.pacer.acquire(source)
+            report += _poll_one(session, feed, source, network.fetcher)
         except Exception as exc:
             session.rollback()
-            log.exception("feed %d (%s) raised during poll", feed.feed_id, feed.url)
-            _record_crash(session, feed, exc)
+            log.exception("feed %d (%s) raised during poll", feed_id, feed_url)
+            _record_crash(session, feed_id, exc)
             report += CycleReport(polled=1, failed=1)
     return report + CycleReport(duration_seconds=clock() - started)
 
 
-def _record_crash(session: Session, feed: Feed, exc: Exception) -> None:
+def _record_crash(session: Session, feed_id: int, exc: Exception) -> None:
     """Record a poll that raised, in a transaction of its own.
 
     ⚠️ The rollback above discards the article inserts *and* the poll-state write, because they
@@ -297,11 +282,12 @@ def _record_crash(session: Session, feed: Feed, exc: Exception) -> None:
     cannot count what it never sees.
 
     Its own try/except because this loop must not die: a failure to record a failure is worth a
-    log line, not the rest of the roster.
+    log line, not the rest of the roster. Takes the id rather than the instance: the instance
+    is expired by the rollback, and the row may be gone.
     """
     try:
-        poll_state.record(session, feed.feed_id, status=None, error=f"{type(exc).__name__}: {exc}")
+        poll_state.record(session, feed_id, status=None, error=f"{type(exc).__name__}: {exc}")
         session.commit()
     except Exception:
         session.rollback()
-        log.exception("could not record the failed poll of feed %d", feed.feed_id)
+        log.exception("could not record the failed poll of feed %d", feed_id)

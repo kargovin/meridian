@@ -8,6 +8,7 @@ import pytest
 from meridian.ingest.normalize import (
     LanguageVerdict,
     _is_latin_script,
+    content_hash,
     detect_language,
     language_input,
     strip_html,
@@ -280,3 +281,39 @@ def test_the_bar_does_not_stop_a_confident_foreign_call(text: str) -> None:
     Correct foreign calls sit far above it — 92.5% land at 0.8 or better.
     """
     assert detect_language(text).drop is True
+
+
+# --------------------------------------------------------------------------- content_hash
+
+_BODY = "The council approved the plan on Tuesday. Opponents asked for a review."
+
+
+def test_the_hash_is_a_sha256_hex_digest() -> None:
+    digest = content_hash(_BODY)
+    assert len(digest) == 64 and int(digest, 16) >= 0
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "the council approved the plan on tuesday opponents asked for a review",
+        "The  council approved\nthe plan on Tuesday.\n\nOpponents asked for a review.",
+        "  The council approved the plan on Tuesday — Opponents asked for a review!  ",
+        "“The council approved the plan on Tuesday.” Opponents asked for a review…",
+    ],
+    ids=["case-and-punctuation", "whitespace", "dash-and-bang", "curly-quotes-and-ellipsis"],
+)
+def test_case_punctuation_and_whitespace_do_not_change_the_hash(variant: str) -> None:
+    """2.1.2 §3.1's three normalizations, one at a time and together. Each is a way one wire
+    story is re-hosted with a different byte sequence and the same words."""
+    assert content_hash(variant) == content_hash(_BODY)
+
+
+def test_different_words_hash_differently() -> None:
+    assert content_hash(_BODY) != content_hash(_BODY.replace("approved", "rejected"))
+
+
+def test_symbols_are_kept_because_they_carry_meaning() -> None:
+    """Punctuation is stripped; symbols are not. "$5m" and "5m" are different figures."""
+    assert content_hash("The deal is worth $5m.") != content_hash("The deal is worth 5m.")
+    assert content_hash("A + B") != content_hash("A B")
