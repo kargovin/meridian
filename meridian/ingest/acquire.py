@@ -65,10 +65,10 @@ class AcquireReport:
     The outcomes are disjoint: each claimed row lands in exactly one of ``acquired``,
     ``dropped``, ``failed``, ``stale`` or ``fetch_deferred``; each network route an acquired
     article took lands in exactly one of ``fetched``, ``robots_blocked``, ``fetch_refused``,
-    ``fetch_abandoned``, ``extract_empty`` or ``adapter_missing``. Articles with nothing to
-    fetch — a tier-1 body already present, no rights, a tier-0 feed — are in ``acquired``
-    alone, since that is their expected state and a count of it would only ever say how big
-    the roster is.
+    ``fetch_abandoned``, ``extract_empty``, ``adapter_missing`` or ``withheld``. Articles with
+    nothing to fetch — a tier-1 body already present, no rights, a tier-0 feed — are in
+    ``acquired`` alone, since that is their expected state and a count of it would only ever
+    say how big the roster is.
     """
 
     claimed: int = 0
@@ -88,8 +88,9 @@ class AcquireReport:
     fetched: int = 0
     #: Pages ``robots.txt`` disallows for the publisher's User-Agent. Continue headline-only.
     robots_blocked: int = 0
-    #: A 4xx from the page. Not a robots block and not a failure: a 403 at the edge is the
-    #: publisher's decision about this request, and it is recorded as that.
+    #: A 4xx from the page, or a body over the size cap. Not a robots block and not a failure:
+    #: a 403 at the edge is the publisher's decision about this request and the cap is ours,
+    #: and neither changes on a retry. Recorded as that.
     fetch_refused: int = 0
     #: Rows given back for a later batch — a 5xx, no answer, or a pacing wait past the lease.
     fetch_deferred: int = 0
@@ -100,6 +101,10 @@ class AcquireReport:
     fetch_abandoned: int = 0
     #: A 200 that extraction found no body in.
     extract_empty: int = 0
+    #: Bodies obtained over the network and then not stored, because the publisher was stopped
+    #: or lost body rights between the request being decided and the body being written. The
+    #: request was polite when it was made; the hold is what the write has to justify.
+    withheld: int = 0
     #: A tier-2 article with no adapter for its host, or a URL or response the adapter did
     #: not recognise. Climbing while ``fetched`` is flat means the publisher changed its site.
     adapter_missing: int = 0
@@ -125,12 +130,33 @@ class _Deferred:
 
     error: str
     #: When the row is next due. None for a failed fetch — the caller sets it from the backoff
-    #: schedule, or on the last attempt gives the fetch up — and a time for a pacing wait,
-    #: which is not a failure and must never use up an attempt however often it recurs.
+    #: schedule, or on the last attempt gives the fetch up — and a time for a wait that is not
+    #: the row's fault (a pacing slot past the lease, a robots.txt outage), which is not a
+    #: failure and must never use up an attempt however often it recurs.
     retry_at: dt.datetime | None = None
 
 
 _NO_FETCH = _Obtained()
+
+
+def _gates_open(source: Source) -> bool:
+    """May the publisher be asked for a body, and may one be held for it? The one rule, read
+    where the request is decided and again where the body is written."""
+    return bool(
+        source.enabled and source.permitted_to_ingest and sources_repo.holds_body_rights(source)
+    )
+
+
+def _may_hold_body(session: Session, source: Source) -> bool:
+    """The gates, read from the database now rather than from the instance.
+
+    ``FOR SHARE`` on the publisher's row: the admin surface's governing writes take
+    ``FOR UPDATE`` on it, so either their change committed before this read and is seen, or it
+    waits for this transaction to commit — a body is written under the rights in force at the
+    write, never under rights already withdrawn. Held for the write transaction only.
+    """
+    session.refresh(source, with_for_update={"read": True})
+    return _gates_open(source)
 
 
 def _obtain_body(
@@ -155,14 +181,13 @@ def _obtain_body(
     # A publisher stopped in the registry — disabled, or its permission to ingest withdrawn —
     # gets no request of any kind, not only no poll. The article it already gave us continues
     # at the level it was taken under (Legal A-L5); what stops is new collection.
-    if not (source.enabled and source.permitted_to_ingest):
-        log.info(
-            "article %d: publisher %d is stopped; no request made",
-            article.article_id,
-            source.source_id,
-        )
-        return _NO_FETCH
-    if not sources_repo.holds_body_rights(source):
+    if not _gates_open(source):
+        if not (source.enabled and source.permitted_to_ingest):
+            log.info(
+                "article %d: publisher %d is stopped; no request made",
+                article.article_id,
+                source.source_id,
+            )
         return _NO_FETCH
     if feed is None:
         log.info("article %d has no feed, so no acquisition route", article.article_id)
@@ -198,6 +223,15 @@ def _obtain_body(
     session.commit()
 
     if not network.robots.allowed(request_url, source):
+        retry = network.robots.closed_by_outage(request_url, source)
+        if retry is not None:
+            # The host could not even say whether we may ask, and nothing earlier is held.
+            # That is an outage, not an answer: come back when the cache will, and do not
+            # spend the row's schedule on it — the page was never requested.
+            return _Deferred(
+                error=f"robots.txt for {request_url} unreachable; closed until retried",
+                retry_at=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=retry),
+            )
         log.info("article %d: robots.txt disallows %s", article.article_id, request_url)
         return _Obtained(counted=AcquireReport(robots_blocked=1))
 
@@ -214,7 +248,9 @@ def _obtain_body(
     result = network.fetcher(
         request_url, user_agent=source.user_agent or DEFAULT_USER_AGENT, headers={}
     )
-    if result.status is None or result.status >= 500:
+    if (result.status is None and result.retryable) or (
+        result.status is not None and result.status >= 500
+    ):
         return _Deferred(error=f"fetch {request_url}: status={result.status} {result.error}")
     if result.status != 200 or result.body is None:
         log.warning(
@@ -279,6 +315,11 @@ def handle(
     if verdict.drop:
         article.lede = lede
         article.language = verdict.language
+        if article.body_text is not None:
+            # A feed-shipped body is held even on a dropped record; RFC §5.1's invariant
+            # (``content_hash`` present exactly when ``body_text`` is) holds at rest, not only
+            # for records that continue.
+            article.content_hash = content_hash(article.body_text)
         work_queue.terminate(session, work, TerminalReason.DROPPED_LANGUAGE)
         session.commit()
         log.info(
@@ -303,6 +344,19 @@ def handle(
         )
         outcome = _Obtained(counted=AcquireReport(fetch_abandoned=1))
 
+    if outcome.text is not None and not _may_hold_body(session, source):
+        # The gates were read before the network and the registry may have moved since — an
+        # operator's stop or downgrade during the robots lookup, the pacing wait or the fetch.
+        # Read again inside the transaction that writes (RFC §5.2: the rights predicate is
+        # read wherever a body is written), and if the answer changed, hold nothing.
+        log.info(
+            "article %d: publisher %d was stopped or lost body rights during the fetch; "
+            "body not held",
+            article.article_id,
+            source.source_id,
+        )
+        outcome = _Obtained(counted=AcquireReport(withheld=1))
+
     article.lede = lede
     article.language = verdict.language
     if outcome.text is not None:
@@ -326,7 +380,15 @@ def _defer(session: Session, work: PipelineWork, deferred: _Deferred) -> Acquire
     retry_at = deferred.retry_at or dt.datetime.now(dt.UTC) + work_queue.backoff_after(
         work.attempts
     )
-    work_queue.release(session, work, retry_at=retry_at, error=deferred.error)
+    work_queue.release(
+        session,
+        work,
+        retry_at=retry_at,
+        error=deferred.error,
+        # The claim counted an attempt; a pacing wait gives it back, or a row paced out often
+        # enough would meet its first real failure with no schedule left.
+        strike=deferred.retry_at is None,
+    )
     session.commit()
     log.info("work %d released until %s: %s", work_id, retry_at.isoformat(), deferred.error)
     return AcquireReport(fetch_deferred=1)
@@ -353,6 +415,11 @@ def run_batch(
     is renewed per row and the lease bounds one article's work. The heartbeat also says which
     rows are still ours — one another worker reclaimed is dropped here rather than fetched and
     then refused by ``advance()``.
+
+    One row's own work can still outlast its lease: the pacing bound is measured from when the
+    slot is asked for, not from the row's stamp, so robots, pacing and the fetch together can
+    exceed it. Under one replica (T10, ``max_instances=1``) nothing reclaims the row meanwhile;
+    with a second worker, ``advance()`` and ``release()`` refuse a row that is no longer ours.
     """
     worker = worker or worker_name()
     claimed = work_queue.claim(session, stage=STAGE, worker=worker, lease=lease, limit=limit)

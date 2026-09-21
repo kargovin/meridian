@@ -160,9 +160,77 @@ def test_release_of_a_discharged_row_is_stale(app_session: Session) -> None:
     (claimed,) = work_queue.claim(app_session, stage=Stage.ACQUIRE, worker="w1", lease=LEASE)
     app_session.execute(sa.delete(PipelineWork).where(PipelineWork.work_id == work.work_id))
     app_session.commit()
-    app_session.expunge_all()
+    # No expunge: the instance stays in the identity map, as it does in a real batch. The guard
+    # has to notice from the database, not from what the session already believes.
     with pytest.raises(work_queue.StaleWork):
         work_queue.release(app_session, claimed, retry_at=dt.datetime.now(dt.UTC), error=None)
+
+
+def test_release_of_a_row_another_worker_reclaimed_is_stale_and_keeps_their_claim(
+    app_session: Session,
+) -> None:
+    """The row is not gone, it is theirs: our lease expired, they claimed it. A release that
+    wrote through our instance would clear *their* claim and hand the row back to the queue
+    while they are still working on it."""
+    source = make_source(app_session)
+    work = make_work(
+        app_session, stage=Stage.ACQUIRE, article=make_article(app_session, source, guid="a")
+    )
+    app_session.commit()
+    (ours,) = work_queue.claim(app_session, stage=Stage.ACQUIRE, worker="w1", lease=LEASE)
+    app_session.execute(
+        sa.update(PipelineWork)
+        .where(PipelineWork.work_id == work.work_id)
+        .values(claimed_at=dt.datetime.now(dt.UTC) - 2 * LEASE)
+    )
+    app_session.commit()
+    # Their claim goes through a session of their own — in one session the two claims would
+    # be one identity-map instance, and ``ours.claimed_by`` would already read theirs.
+    with Session(app_session.get_bind(), expire_on_commit=False) as other:
+        (theirs,) = work_queue.claim(other, stage=Stage.ACQUIRE, worker="w2", lease=LEASE)
+        assert theirs.work_id == ours.work_id and theirs.claimed_by == "w2"
+    assert ours.claimed_by == "w1"
+
+    with pytest.raises(work_queue.StaleWork):
+        work_queue.release(
+            app_session, ours, retry_at=dt.datetime.now(dt.UTC), error="503", strike=True
+        )
+    app_session.rollback()
+    app_session.expire_all()
+    row = app_session.get(PipelineWork, work.work_id)
+    assert row is not None and row.claimed_by == "w2" and row.claimed_at is not None
+    assert row.attempts == 2 and row.last_error is None
+
+
+def test_a_non_strike_release_gives_the_attempt_back(app_session: Session) -> None:
+    """A pacing wait is not the row's fault. ``claim`` counted it; the release un-counts it, so
+    however often a row is paced out, its first real failure still gets the whole schedule."""
+    source = make_source(app_session)
+    work = make_work(
+        app_session, stage=Stage.ACQUIRE, article=make_article(app_session, source, guid="a")
+    )
+    app_session.commit()
+    for _ in range(4):
+        (claimed,) = work_queue.claim(app_session, stage=Stage.ACQUIRE, worker="w1", lease=LEASE)
+        work_queue.release(
+            app_session,
+            claimed,
+            retry_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1),
+            error="pacing",
+            strike=False,
+        )
+        app_session.commit()
+    app_session.expire_all()
+    row = app_session.get(PipelineWork, work.work_id)
+    assert row is not None and row.attempts == 0
+    assert row.claimed_at is None and row.last_error == "pacing"
+
+    (claimed,) = work_queue.claim(app_session, stage=Stage.ACQUIRE, worker="w1", lease=LEASE)
+    work_queue.release(app_session, claimed, retry_at=dt.datetime.now(dt.UTC), error="503")
+    app_session.commit()
+    app_session.expire_all()
+    row = app_session.get(PipelineWork, work.work_id)
+    assert row is not None and row.attempts == 1
 
 
 @pytest.mark.parametrize(

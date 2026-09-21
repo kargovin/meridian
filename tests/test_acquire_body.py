@@ -793,3 +793,269 @@ def test_one_raising_article_does_not_stop_the_batch(app_session: Session) -> No
     for article in (first, third):
         refreshed = app_session.get(CanonicalRecord, article.article_id)
         assert refreshed is not None and refreshed.body_text is not None
+
+
+# ------------------------------------------------- the registry can move while a fetch is in flight
+
+
+def _operator_writes(session: Session, source_id: int, field: str) -> None:
+    """The operator's write, through the compare-and-set setters the admin surface uses."""
+    from meridian.db import sources as sources_repo
+
+    with _watcher(session) as db:
+        src = db.get(Source, source_id)
+        assert src is not None
+        if field == "rights_level":
+            sources_repo.set_rights_level(
+                db, source_id, level=RightsLevel.HEADLINE_ONLY, expected_updated_at=src.updated_at
+            )
+        elif field == "permitted_to_ingest":
+            sources_repo.set_permitted_to_ingest(
+                db, source_id, value=False, expected_updated_at=src.updated_at
+            )
+        else:
+            sources_repo.set_enabled(db, source_id, value=False, expected_updated_at=src.updated_at)
+        db.commit()
+
+
+@pytest.mark.parametrize("field", ["rights_level", "permitted_to_ingest", "enabled"])
+def test_a_publisher_stopped_or_downgraded_during_the_fetch_has_its_body_withheld(
+    app_session: Session, field: str
+) -> None:
+    """The gates are read before the network and the registry can move while the page is being
+    fetched — a pacing wait alone can be a whole lease. The body is written under the answer in
+    force at the write (RFC §5.2: the rights predicate is read wherever a body is written), so
+    an operator's stop or downgrade mid-fetch means the fetched text is not held. The article
+    continues, headline-only, and the report says a body was obtained and withheld."""
+    fetcher = Fetcher({f"{HOST}/news/one": FetchResult(status=200, body=_page())})
+    network, _ = _network(fetcher)
+    source, _, article, _ = _article(app_session)
+    fetcher.on_call[f"{HOST}/news/one"] = lambda: _operator_writes(
+        app_session, source.source_id, field
+    )
+
+    report = run_batch(app_session, network=network, lease=LEASE)
+
+    assert fetcher.articles == [f"{HOST}/news/one"], "the request itself was legitimate"
+    assert report == AcquireReport(claimed=1, acquired=1, withheld=1)
+    with _watcher(app_session) as db:
+        body = db.scalar(
+            sa.select(CanonicalRecord.body_text).where(
+                CanonicalRecord.article_id == article.article_id
+            )
+        )
+        state = db.scalar(
+            sa.select(CanonicalRecord.pipeline_state).where(
+                CanonicalRecord.article_id == article.article_id
+            )
+        )
+    assert body is None
+    assert state is PipelineState.ACQUIRED
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+
+
+# ----------------------------------------------------- handing a row back that is no longer ours
+
+
+def test_release_of_a_row_another_worker_completed_is_counted_stale(
+    app_session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Our lease expires mid-fetch; another worker reclaims, fetches and advances the row; then
+    our page answers 503 and we go to release it. The row is not ours to give back — and it is
+    gone. That is ``stale``, the same outcome ``advance()`` reports on the 200 branch, not a
+    failure with a traceback for someone to chase."""
+    fetcher = Fetcher({f"{HOST}/news/one": FetchResult(status=503, error="Service Unavailable")})
+    network, _ = _network(fetcher)
+    _, _, article, _ = _article(app_session)
+
+    def other_worker_completes() -> None:
+        with _watcher(app_session) as db:
+            db.execute(
+                sa.update(PipelineWork).values(claimed_at=dt.datetime.now(dt.UTC) - LEASE * 2)
+            )
+            db.commit()
+            (theirs,) = work_queue.claim(db, stage=Stage.ACQUIRE, worker="acquire@b:2", lease=LEASE)
+            record = db.get(CanonicalRecord, theirs.article_id)
+            assert record is not None
+            record.body_text = " ".join(_PARAS)
+            record.body_provenance = BodyProvenance.TIER3_EXTRACTED
+            work_queue.advance(db, theirs)
+            db.commit()
+
+    fetcher.on_call[f"{HOST}/news/one"] = other_worker_completes
+
+    with caplog.at_level(logging.INFO):
+        report = run_batch(app_session, network=network, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, stale=1), f"{report}\n{caplog.text}"
+    assert "Traceback" not in caplog.text
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    app_session.refresh(article)
+    assert article.pipeline_state is PipelineState.ACQUIRED
+    assert article.body_text == " ".join(_PARAS), "their body stands"
+
+
+# ------------------------------------------------ a wait that is not the row's fault is free
+
+
+def test_pacing_releases_leave_the_schedule_intact_for_the_first_real_failure(
+    app_session: Session,
+) -> None:
+    """``claim()`` counts every claim; a release for a pacing wait gives the count back. Four
+    pacing releases, then the slot opens and the page's first 503 is met with a release and
+    the first backoff — not the give-up. Deleting the give-back makes the fourth release leave
+    ``attempts`` at 4 and the 503 is given up on."""
+    fetcher = Fetcher(
+        {
+            ROBOTS: FetchResult(status=200, body=b"User-agent: *\nCrawl-delay: 60\n"),
+            f"{HOST}/news/one": FetchResult(status=503, error="Service Unavailable"),
+        }
+    )
+    network, clock = _network(fetcher)
+    _article(app_session)
+    short_lease = dt.timedelta(seconds=30)
+
+    for _ in range(work_queue.MAX_ATTEMPTS - 1):
+        app_session.execute(sa.update(PipelineWork).values(next_attempt_at=dt.datetime.now(dt.UTC)))
+        app_session.commit()
+        assert run_batch(app_session, network=network, lease=short_lease) == AcquireReport(
+            claimed=1, fetch_deferred=1
+        )
+        (row,) = _work_rows(app_session)
+        assert row.attempts == 0, "a pacing release is not a strike"
+        assert row.last_error is not None and "pacing" in row.last_error
+    assert fetcher.articles == []
+
+    clock.now += 120.0
+    app_session.execute(sa.update(PipelineWork).values(next_attempt_at=dt.datetime.now(dt.UTC)))
+    app_session.commit()
+    before = dt.datetime.now(dt.UTC)
+
+    report = run_batch(app_session, network=network, lease=short_lease)
+
+    assert fetcher.articles == [f"{HOST}/news/one"]
+    assert report == AcquireReport(claimed=1, fetch_deferred=1)
+    (row,) = _work_rows(app_session)
+    assert row.attempts == 1
+    assert row.next_attempt_at >= before + work_queue.backoff_after(1)
+
+
+# ---------------------------------------------------- the hash invariant holds for a dropped record
+
+
+def test_a_dropped_tier1_article_keeps_the_hash_invariant(app_session: Session) -> None:
+    """A feed-shipped body arrives without a hash and this stage adds it. A record FR-I7 then
+    drops leaves through ``terminate()``, body and all — and RFC §5.1's ``content_hash``
+    present exactly when ``body_text`` is holds at rest, not only for records that continue."""
+    network, _ = _network(Fetcher())
+    source = make_source(app_session, rate_limit_per_min=600)
+    feed = make_feed(app_session, source, acquisition_tier=AcquisitionTier.FULL_FEED)
+    body = "El gobierno cubano reconoce que la produccion agricola ha caido."
+    article = make_article(
+        app_session,
+        source,
+        guid="es",
+        url=f"{HOST}/news/es",
+        title="Por que Cuba no produce suficiente comida para alimentar a su poblacion",
+        body_text=body,
+        body_provenance=BodyProvenance.TIER1_FEED,
+        feed_id=feed.feed_id,
+    )
+    make_work(app_session, stage=Stage.ACQUIRE, article=article)
+    app_session.commit()
+
+    report = run_batch(app_session, network=network, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, dropped=1)
+    app_session.refresh(article)
+    assert article.terminal_reason is TerminalReason.DROPPED_LANGUAGE
+    assert article.body_text == body
+    assert article.content_hash == content_hash(body)
+
+
+# --------------------------------------------- a robots.txt outage is an outage, not an answer
+
+
+def test_an_unreachable_robots_txt_defers_the_fetch_without_a_strike(app_session: Session) -> None:
+    """RFC 9309 closes a host whose robots.txt cannot be read and nothing earlier is held. For
+    this stage that must not mean the article continues without a body for good — the host
+    was down, not refusing — so the row goes back until the cache will ask again, and the
+    wait costs no attempt."""
+    fetcher = Fetcher(
+        {
+            ROBOTS: FetchResult(status=503, error="Service Unavailable"),
+            f"{HOST}/news/one": FetchResult(status=200, body=_page()),
+        }
+    )
+    network, _ = _network(fetcher)
+    _, _, article, _ = _article(app_session)
+    before = dt.datetime.now(dt.UTC)
+
+    report = run_batch(app_session, network=network, lease=LEASE)
+
+    assert fetcher.articles == [], "closed: the page is not asked for"
+    assert report == AcquireReport(claimed=1, fetch_deferred=1)
+    (row,) = _work_rows(app_session)
+    assert row.attempts == 0
+    assert row.claimed_at is None
+    assert row.last_error is not None and "robots.txt" in row.last_error
+    assert (
+        before + dt.timedelta(minutes=9) <= row.next_attempt_at <= before + dt.timedelta(minutes=11)
+    )
+    app_session.refresh(article)
+    assert article.pipeline_state is PipelineState.DISCOVERED and article.body_text is None
+
+
+# ---------------------------------------------------- a body over the cap is refused, not retried
+
+
+def test_a_body_over_the_cap_is_refused_not_retried(app_session: Session) -> None:
+    """The fetcher refuses to read past the cap and reports no status. Unlike a timeout, asking
+    again reads the same bytes; the article continues without a body, once, counted as
+    refused, and nothing walks the backoff schedule five times over a 5 MB page."""
+    fetcher = Fetcher(
+        {
+            f"{HOST}/news/one": FetchResult(
+                status=None, error="body exceeded 5242880 bytes", retryable=False
+            )
+        }
+    )
+    network, _ = _network(fetcher)
+    _, _, article, _ = _article(app_session)
+
+    report = run_batch(app_session, network=network, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, acquired=1, fetch_refused=1)
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    app_session.refresh(article)
+    assert article.pipeline_state is PipelineState.ACQUIRED and article.body_text is None
+
+
+def test_a_cached_robots_rule_outlives_an_outage_and_is_still_a_rule(app_session: Session) -> None:
+    """The host published ``Disallow: /news/`` and then went down. RFC 9309 says keep using the
+    copy we hold — and a disallow from that copy is the publisher's rule, so the article
+    continues headline-only and is counted as robots-blocked rather than deferred as an
+    outage. Only an outage with nothing held is an outage."""
+    fetcher = Fetcher(
+        {
+            ROBOTS: FetchResult(status=200, body=b"User-agent: *\nDisallow: /news/\n"),
+            f"{HOST}/news/one": FetchResult(status=200, body=_page()),
+            f"{HOST}/news/two": FetchResult(status=200, body=_page()),
+        }
+    )
+    network, clock = _network(fetcher)
+    source, _, _first, _ = _article(app_session)
+    assert run_batch(app_session, network=network, lease=LEASE) == AcquireReport(
+        claimed=1, acquired=1, robots_blocked=1
+    )
+
+    # The copy's TTL expires and the host is now down: the cached rule is what answers.
+    clock.now += 25 * 3600
+    fetcher.answers[ROBOTS] = FetchResult(status=503, error="Service Unavailable")
+    _article(app_session, source=source, url=f"{HOST}/news/two", guid="two")
+
+    report = run_batch(app_session, network=network, lease=LEASE)
+
+    assert fetcher.calls.count(ROBOTS) == 2, "the refresh was attempted"
+    assert fetcher.articles == []
+    assert report == AcquireReport(claimed=1, acquired=1, robots_blocked=1)

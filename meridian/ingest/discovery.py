@@ -236,30 +236,41 @@ def run_cycle(
     # from the second, and the lookup raised *outside* the per-feed guard below, taking the whole
     # remaining roster with it.
     for feed, source in round_robin(due, key=lambda pair: pair[0].source_id):
+        # ⚠️ Copies for the except clause. ``session.rollback()`` expires the instance, and
+        # reading ``feed.feed_id`` afterwards re-queries the row — if the feed was deleted
+        # while its own poll was raising, that raises ``ObjectDeletedError`` from inside the
+        # clause that exists to contain failures, and the rest of the roster is not polled.
+        feed_id, feed_url = feed.feed_id, feed.url
         try:
-            if not network.robots.allowed(feed.url, source):
+            if not network.robots.allowed(feed_url, source):
                 # Recorded as a failed poll, not skipped in silence: ``consecutive_failures``
                 # is what the admin surface shows, and a feed that stopped arriving because of a
                 # robots rule must read differently from one nobody registered. One roster
                 # publisher writes exactly this rule against its own feeds (``Disallow: /*.rss``).
-                poll_state.record(session, feed.feed_id, status=None, error="robots: disallowed")
-                session.commit()
-                log.warning(
-                    "feed %d (%s) is disallowed by robots.txt; not polled", feed.feed_id, feed.url
+                # An unreachable robots.txt is also a closed door (RFC 9309), and is recorded as
+                # the outage it is rather than as a rule the publisher never wrote.
+                retry = network.robots.closed_by_outage(feed_url, source)
+                error = (
+                    "robots: disallowed"
+                    if retry is None
+                    else f"robots: robots.txt unreachable; closed until retried in {retry:.0f}s"
                 )
+                poll_state.record(session, feed_id, status=None, error=error)
+                session.commit()
+                log.warning("feed %d (%s): %s; not polled", feed_id, feed_url, error)
                 report += CycleReport(robots_blocked=1)
                 continue
             network.pacer.acquire(source)
             report += _poll_one(session, feed, source, network.fetcher)
         except Exception as exc:
             session.rollback()
-            log.exception("feed %d (%s) raised during poll", feed.feed_id, feed.url)
-            _record_crash(session, feed, exc)
+            log.exception("feed %d (%s) raised during poll", feed_id, feed_url)
+            _record_crash(session, feed_id, exc)
             report += CycleReport(polled=1, failed=1)
     return report + CycleReport(duration_seconds=clock() - started)
 
 
-def _record_crash(session: Session, feed: Feed, exc: Exception) -> None:
+def _record_crash(session: Session, feed_id: int, exc: Exception) -> None:
     """Record a poll that raised, in a transaction of its own.
 
     ⚠️ The rollback above discards the article inserts *and* the poll-state write, because they
@@ -270,11 +281,12 @@ def _record_crash(session: Session, feed: Feed, exc: Exception) -> None:
     cannot count what it never sees.
 
     Its own try/except because this loop must not die: a failure to record a failure is worth a
-    log line, not the rest of the roster.
+    log line, not the rest of the roster. Takes the id rather than the instance: the instance
+    is expired by the rollback, and the row may be gone.
     """
     try:
-        poll_state.record(session, feed.feed_id, status=None, error=f"{type(exc).__name__}: {exc}")
+        poll_state.record(session, feed_id, status=None, error=f"{type(exc).__name__}: {exc}")
         session.commit()
     except Exception:
         session.rollback()
-        log.exception("could not record the failed poll of feed %d", feed.feed_id)
+        log.exception("could not record the failed poll of feed %d", feed_id)

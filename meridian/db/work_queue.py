@@ -333,23 +333,40 @@ def release(
     *,
     retry_at: dt.datetime,
     error: str | None,
+    strike: bool = True,
 ) -> None:
     """Give the row back unfinished: clear the claim, set when it is next due, record why.
 
     For the failure a later attempt may not see — a publisher's 503, a timeout, a pacing wait
-    longer than the lease. The row keeps its ``attempts`` (the claim already counted this one),
-    so repeated releases walk up the backoff towards ``MAX_ATTEMPTS``.
+    longer than the lease. A strike keeps the ``attempts`` the claim counted, so repeated
+    releases walk up the backoff towards ``MAX_ATTEMPTS``; ``strike=False`` gives that count
+    back, for a release that is not the row's fault — a pacing wait is one — and must not walk
+    it anywhere however often it recurs.
+
+    ⚠️ A conditional UPDATE on our own claim, never a write through the instance. The instance
+    is in the identity map, so ``session.get`` would answer from it without a query and could
+    not notice that another worker reclaimed or completed the row after our lease expired: a
+    write through it would then clear *their* claim, or raise ``StaleDataError`` at flush for a
+    row that is gone. No match means the row was never ours to give back.
 
     Does not commit. The caller's rollback has already discarded the stage's partial output;
     this is written on the clean session and committed by the caller.
     """
-    row = session.get(PipelineWork, work.work_id)
-    if row is None:
-        raise StaleWork(f"work {work.work_id} is gone; another worker completed it")
-    row.claimed_at = None
-    row.claimed_by = None
-    row.next_attempt_at = retry_at
-    row.last_error = error[:2000] if error else None
+    released = session.scalar(
+        sa.update(PipelineWork)
+        .where(PipelineWork.work_id == work.work_id, PipelineWork.claimed_by == work.claimed_by)
+        .values(
+            claimed_at=None,
+            claimed_by=None,
+            next_attempt_at=retry_at,
+            last_error=error[:2000] if error else None,
+            attempts=PipelineWork.attempts if strike else PipelineWork.attempts - 1,
+        )
+        .returning(PipelineWork.work_id)
+    )
+    if released is None:
+        raise StaleWork(f"work {work.work_id} is no longer ours; another worker reclaimed it")
+    session.expunge(work)
 
 
 def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> None:
@@ -361,20 +378,28 @@ def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> N
     re-enqueue succeeds because the open-row index also ignores dead-lettered rows. This spans
     two tables and no CHECK can state it.
 
-    Does not commit.
+    The row is written by a conditional UPDATE on our own claim, for the reason ``release``
+    gives. Does not commit.
     """
-    row = session.get(PipelineWork, work.work_id)
-    if row is None:
-        raise StaleWork(f"work {work.work_id} is gone; another worker completed it")
-    if row.article_id is None:
+    if work.article_id is None:
         raise ValueError(
-            f"work {row.work_id} has a cluster subject; terminal_reason lives on an article"
+            f"work {work.work_id} has a cluster subject; terminal_reason lives on an article"
         )
-    article = session.get(CanonicalRecord, row.article_id)
+    article = session.get(CanonicalRecord, work.article_id)
     if article is None:
-        raise ValueError(f"work {row.work_id} names article {row.article_id}, which is gone")
-    row.dead_lettered_at = dt.datetime.now(dt.UTC)
-    row.claimed_at = None
-    row.claimed_by = None
-    row.last_error = error[:2000] if error else None
+        raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
+    dead = session.scalar(
+        sa.update(PipelineWork)
+        .where(PipelineWork.work_id == work.work_id, PipelineWork.claimed_by == work.claimed_by)
+        .values(
+            dead_lettered_at=dt.datetime.now(dt.UTC),
+            claimed_at=None,
+            claimed_by=None,
+            last_error=error[:2000] if error else None,
+        )
+        .returning(PipelineWork.work_id)
+    )
+    if dead is None:
+        raise StaleWork(f"work {work.work_id} is no longer ours; another worker reclaimed it")
+    session.expunge(work)
     article.terminal_reason = TerminalReason.FAILED

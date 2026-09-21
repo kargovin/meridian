@@ -75,6 +75,20 @@ class RobotsCache:
             return not entry.unreachable
         return bool(entry.rules.can_fetch(url, _agent(source)))
 
+    def closed_by_outage(self, url: str, source: Source) -> float | None:
+        """Seconds until this origin's ``robots.txt`` is asked for again, when it could not be
+        read and no earlier copy is held — the case ``allowed`` answers False for without any
+        rule having been written. None when a rule (or the absence of one) is what answers.
+
+        A caller can then tell an outage from a refusal: record it as one, and come back when
+        the cache will, rather than treating a host that was down for ten minutes as a
+        publisher that said no.
+        """
+        entry = self._entry(url, source)
+        if entry.rules is not None or not entry.unreachable:
+            return None
+        return max(entry.expires_at - self._clock(), 0.0)
+
     def crawl_delay(self, url: str, source: Source) -> float | None:
         """The site's own minimum spacing for our User-Agent, if it states one."""
         entry = self._entry(url, source)

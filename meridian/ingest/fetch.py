@@ -49,6 +49,10 @@ class FetchResult:
     ``status`` is None when there was no response at all — DNS, connection refused, timeout —
     and ``error`` says which. A 304 carries no body by definition, so ``body`` is None there
     too; the two are told apart by the status, never by the body being empty.
+
+    ``retryable`` is False when asking again cannot change the answer: a body over the size
+    cap was refused by us, not by the host, and a later attempt reads the same bytes. It is a
+    field rather than a test on ``error``, because a message is not a contract.
     """
 
     status: int | None
@@ -56,6 +60,7 @@ class FetchResult:
     etag: str | None = None
     last_modified: str | None = None
     error: str | None = None
+    retryable: bool = True
 
     @property
     def not_modified(self) -> bool:
@@ -118,7 +123,9 @@ class HttpFetcher:
                 body = self._read(response, deadline)
         except TooLarge:
             log.warning("%s exceeded %d bytes; not read", url, self._max_bytes)
-            return FetchResult(status=None, error=f"body exceeded {self._max_bytes} bytes")
+            return FetchResult(
+                status=None, error=f"body exceeded {self._max_bytes} bytes", retryable=False
+            )
         except TooSlow:
             log.warning("%s exceeded %.0f s; abandoned", url, self._max_duration)
             return FetchResult(status=None, error=f"exceeded {self._max_duration:.0f}s")

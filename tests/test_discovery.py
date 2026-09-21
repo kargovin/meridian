@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import pytest
+import sqlalchemy as sa
 from meridian_contract import (
     AcquisitionTier,
     BodyProvenance,
@@ -19,7 +20,7 @@ from meridian_contract import (
 from sqlalchemy.orm import Session
 
 from meridian.db import poll_state, sources
-from meridian.db.models import CanonicalRecord, Feed, PipelineWork
+from meridian.db.models import CanonicalRecord, Feed, FeedPollState, PipelineWork
 from meridian.ingest.discovery import CycleReport, run_cycle
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher, FetchResult
 from meridian.ingest.network import Network
@@ -864,3 +865,55 @@ def test_the_stored_url_is_canonical_not_what_the_feed_wrote(app_session: Sessio
     _cycle(app_session, FakeFetcher({feed.url: raw}))
 
     assert articles(app_session)[0].url_canonical == "https://x.example/floods?a=1&b=2"
+
+
+# ----------------------------------------------------- the per-feed guard survives its own rollback
+
+
+def test_a_feed_deleted_during_its_own_crashing_poll_does_not_stop_the_cycle(
+    app_session: Session,
+) -> None:
+    """An operator deletes a rotted feed while its poll is in flight. The feed answers, and
+    the article insert then violates the foreign key — inside the transaction, so the guard's
+    rollback is real and expires the instance. A log line reading ``feed.feed_id`` inside the
+    except clause would then re-query a row that is gone and raise from inside the clause that
+    exists to contain failures, and the rest of the roster would not be polled. Identifiers
+    are copied before the try. (A crash *at* the fetch does not reach this: no transaction is
+    open there and the rollback expires nothing.)"""
+    a = _feed_with_source(app_session, url="https://a.example/feed.xml")
+    b = _feed_with_source(app_session, url="https://b.example/feed.xml")
+    doomed_id, doomed_url = a.feed_id, a.url
+
+    def delete_the_feed() -> None:
+        with Session(app_session.get_bind()) as db:
+            db.execute(sa.delete(Feed).where(Feed.feed_id == doomed_id))
+            db.commit()
+
+    class Fetcher(FakeFetcher):
+        def __call__(self, url: str, *, user_agent: str, headers: Mapping[str, str]) -> FetchResult:
+            if url == doomed_url:
+                delete_the_feed()
+            return super().__call__(url, user_agent=user_agent, headers=headers)
+
+    report = _cycle(app_session, Fetcher({doomed_url: ONE_ITEM, b.url: ONE_ITEM}))
+
+    assert (report.polled, report.failed, report.discovered) == (2, 1, 1)
+
+
+def test_an_unreachable_robots_txt_is_recorded_as_an_outage_not_a_rule(
+    app_session: Session,
+) -> None:
+    """Fail-closed is right; the poll state must not say the publisher wrote a rule against
+    us when its host was down for ten minutes. The two read differently on the admin surface
+    and call for different responses from a person."""
+    feed = _feed_with_source(app_session)
+    fetcher = FakeFetcher(
+        {FEEDS_ROBOTS: FetchResult(status=503, error="Service Unavailable"), feed.url: ONE_ITEM}
+    )
+
+    report = _cycle(app_session, fetcher)
+
+    assert report.robots_blocked == 1
+    state = app_session.get(FeedPollState, feed.feed_id)
+    assert state is not None and state.last_error is not None
+    assert "unreachable" in state.last_error and "disallowed" not in state.last_error
