@@ -69,6 +69,21 @@ publisher whatever its feed carries, so the combination is honest and harmless; 
 feed to `1_full_feed` on the admin surface changes nothing. Four v1 publishers are registered
 this way (IPS, The Conversation, ProPublica, KFF Health News).
 
+**Set the tier by fetching one article, never from the licence alone.** A licence page says what
+may be done with the text; it says nothing about whether the article URL delivers it. The v1
+roster's first determinations read every publisher's terms and robots.txt and fetched nothing,
+and two of the four publishers the fetcher was built for do not yield a body from their article
+page: one serves a login-gated preview on every article (now `0_unavailable`), the other a
+JavaScript shell whose text arrives only through its own API (now `2_publisher_api`). Before
+recording a tier: fetch one article with the publisher's User-Agent, paced as the registry would,
+and check that extraction returns the article rather than a fragment, an error page or a gate.
+Record what was seen, and when, in the feed's `note` — the tier is a measurement, and a
+measurement without its evidence is a guess that survived.
+
+`0_unavailable` means no body is obtainable from this feed by any route we run. It is a fact
+about the feed, not a rights determination: the publisher may permit body use and still not
+deliver it. Records from such a feed carry a headline and lede only.
+
 ## Operational notes
 
 `user_agent` is optional and overrides the default per publisher. Set it if a publisher stops
