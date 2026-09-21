@@ -63,11 +63,12 @@ class AcquireReport:
     """What one batch did. Every field is a count a human would ask for during an incident.
 
     The outcomes are disjoint: each claimed row lands in exactly one of ``acquired``,
-    ``dropped``, ``failed``, ``stale``, ``fetch_deferred`` or ``dead_lettered``; each network
-    route an acquired article took lands in exactly one of ``fetched``, ``robots_blocked``,
-    ``fetch_refused``, ``extract_empty`` or ``adapter_missing``. Articles with nothing to fetch
-    — a tier-1 body already present, no rights, a tier-0 feed — are in ``acquired`` alone, since
-    that is their expected state and a count of it would only ever say how big the roster is.
+    ``dropped``, ``failed``, ``stale`` or ``fetch_deferred``; each network route an acquired
+    article took lands in exactly one of ``fetched``, ``robots_blocked``, ``fetch_refused``,
+    ``fetch_abandoned``, ``extract_empty`` or ``adapter_missing``. Articles with nothing to
+    fetch — a tier-1 body already present, no rights, a tier-0 feed — are in ``acquired``
+    alone, since that is their expected state and a count of it would only ever say how big
+    the roster is.
     """
 
     claimed: int = 0
@@ -92,9 +93,11 @@ class AcquireReport:
     fetch_refused: int = 0
     #: Rows given back for a later batch — a 5xx, no answer, or a pacing wait past the lease.
     fetch_deferred: int = 0
-    #: Transient failures that exhausted their retries. The row stays as the trace and the
-    #: article is terminal.
-    dead_lettered: int = 0
+    #: Pages that failed transiently on every attempt the schedule allows. The fetch is given
+    #: up and the article continues without a body, as from every other rung that yields none:
+    #: its headline and lede are real, and a cluster counts it (FR-S6) whether or not a body
+    #: was ever obtainable. Climbing steadily means a publisher's pages, not its feed, are down.
+    fetch_abandoned: int = 0
     #: A 200 that extraction found no body in.
     extract_empty: int = 0
     #: A tier-2 article with no adapter for its host, or a URL or response the adapter did
@@ -122,8 +125,8 @@ class _Deferred:
 
     error: str
     #: When the row is next due. None for a failed fetch — the caller sets it from the backoff
-    #: schedule, or dead-letters — and a time for a pacing wait, which is not a failure and
-    #: must never walk a row towards dead-letter however often it recurs.
+    #: schedule, or on the last attempt gives the fetch up — and a time for a pacing wait,
+    #: which is not a failure and must never use up an attempt however often it recurs.
     retry_at: dt.datetime | None = None
 
 
@@ -287,7 +290,18 @@ def handle(
 
     outcome = _obtain_body(session, article, source, feed, network=network, lease=lease)
     if isinstance(outcome, _Deferred):
-        return _defer(session, work, outcome)
+        if outcome.retry_at is not None or work.attempts < work_queue.MAX_ATTEMPTS:
+            return _defer(session, work, outcome)
+        # The page has failed on every attempt the schedule allows. What is given up is the
+        # fetch, not the article: its headline and lede are real, so it continues without a
+        # body exactly as it would from any other rung that yields none.
+        log.warning(
+            "article %d: fetch given up after %d attempts, continuing without a body: %s",
+            article.article_id,
+            work.attempts,
+            outcome.error,
+        )
+        outcome = _Obtained(counted=AcquireReport(fetch_abandoned=1))
 
     article.lede = lede
     article.language = verdict.language
@@ -302,24 +316,13 @@ def handle(
 
 
 def _defer(session: Session, work: PipelineWork, deferred: _Deferred) -> AcquireReport:
-    """Give the row back, or stop retrying it. Commits.
+    """Give the row back for a later batch. Commits.
 
     A pacing wait carries its own retry time and is never a strike against the row. A failed
-    fetch walks up the backoff schedule and, on the attempt ``MAX_ATTEMPTS`` names, is
-    dead-lettered instead — the row kept as the trace, the article marked terminal.
+    fetch walks up the backoff schedule; the caller stops sending it here on the attempt
+    ``MAX_ATTEMPTS`` names.
     """
-    work_id, article_id = work.work_id, work.article_id
-    if deferred.retry_at is None and work.attempts >= work_queue.MAX_ATTEMPTS:
-        work_queue.dead_letter(session, work, error=deferred.error)
-        session.commit()
-        log.warning(
-            "article %s dead-lettered after %d attempts: %s",
-            article_id,
-            work.attempts,
-            deferred.error,
-        )
-        return AcquireReport(dead_lettered=1)
-
+    work_id = work.work_id
     retry_at = deferred.retry_at or dt.datetime.now(dt.UTC) + work_queue.backoff_after(
         work.attempts
     )

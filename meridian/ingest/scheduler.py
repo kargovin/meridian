@@ -228,7 +228,7 @@ class AcquireScheduler(_CadencedJob[AcquireReport]):
         if report.claimed:
             log.info(
                 "acquire batch: claimed=%d acquired=%d dropped=%d failed=%d stale=%d "
-                "fetched=%d robots_blocked=%d refused=%d deferred=%d dead_lettered=%d "
+                "fetched=%d robots_blocked=%d refused=%d deferred=%d abandoned=%d "
                 "extract_empty=%d adapter_missing=%d",
                 report.claimed,
                 report.acquired,
@@ -239,7 +239,7 @@ class AcquireScheduler(_CadencedJob[AcquireReport]):
                 report.robots_blocked,
                 report.fetch_refused,
                 report.fetch_deferred,
-                report.dead_lettered,
+                report.fetch_abandoned,
                 report.extract_empty,
                 report.adapter_missing,
             )

@@ -291,7 +291,7 @@ def heartbeat(
 
     ⚠️ Never routes through ``claim()``'s update: that increments ``attempts``, and a heartbeat
     is not an attempt. Fifty rows in a batch would otherwise count as fifty attempts on every
-    row and dead-letter all of them.
+    row and exhaust all of their retries at once.
 
     ``WHERE claimed_by = worker`` is what makes the return value an ownership check: a row
     another worker reclaimed keeps that worker's stamp and is absent from the result, so the
@@ -315,7 +315,9 @@ def heartbeat(
 #: than knobs for now; with the lease they are one retry policy and belong in one place.
 RETRY_BASE = dt.timedelta(minutes=1)
 RETRY_CAP = dt.timedelta(hours=1)
-#: The attempt on which a row is dead-lettered instead of released.
+#: The attempt on which a stage stops retrying a transient failure. What it does instead is
+#: the stage's own call: acquire gives up the fetch and moves the article on without a body;
+#: ``dead_letter`` is for a stage whose output the article cannot continue without.
 MAX_ATTEMPTS = 5
 
 
@@ -336,7 +338,7 @@ def release(
 
     For the failure a later attempt may not see — a publisher's 503, a timeout, a pacing wait
     longer than the lease. The row keeps its ``attempts`` (the claim already counted this one),
-    so repeated releases walk up the backoff and reach ``dead_letter``.
+    so repeated releases walk up the backoff towards ``MAX_ATTEMPTS``.
 
     Does not commit. The caller's rollback has already discarded the stage's partial output;
     this is written on the clean session and committed by the caller.

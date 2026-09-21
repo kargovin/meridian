@@ -522,36 +522,53 @@ def test_a_page_with_nothing_extractable_is_counted_empty(app_session: Session) 
     assert article.pipeline_state is PipelineState.ACQUIRED
 
 
-@pytest.mark.parametrize(
-    ("attempts_before", "dead_lettered"),
-    [(work_queue.MAX_ATTEMPTS - 2, 0), (work_queue.MAX_ATTEMPTS - 1, 1)],
-    ids=["released-again", "dead-lettered"],
-)
-def test_the_final_transient_failure_dead_letters_the_row(
-    app_session: Session, attempts_before: int, dead_lettered: int
-) -> None:
-    """AC4, third half: the row is kept as the trace **and** the article is marked terminal —
-    one without the other and the reconciler resurrects it."""
+def test_the_penultimate_transient_failure_is_released_again(app_session: Session) -> None:
+    """AC4, third half, the attempt before last: still a release, still the same row."""
     fetcher = Fetcher({f"{HOST}/news/one": FetchResult(status=503, error="Service Unavailable")})
     network, _ = _network(fetcher)
     _, _, article, work = _article(app_session)
-    work.attempts = attempts_before
+    work.attempts = work_queue.MAX_ATTEMPTS - 2
     app_session.commit()
 
     report = run_batch(app_session, network=network, lease=LEASE)
 
-    assert (report.fetch_deferred, report.dead_lettered) == (1 - dead_lettered, dead_lettered)
+    assert report == AcquireReport(claimed=1, fetch_deferred=1)
     (row,) = _work_rows(app_session)
-    assert row.attempts == attempts_before + 1
-    assert (row.dead_lettered_at is not None) is bool(dead_lettered)
+    assert row.stage is Stage.ACQUIRE and row.attempts == work_queue.MAX_ATTEMPTS - 1
+    assert row.claimed_at is None and row.next_attempt_at > dt.datetime.now(dt.UTC)
     app_session.refresh(article)
-    assert (article.terminal_reason is TerminalReason.FAILED) is bool(dead_lettered)
     assert article.pipeline_state is PipelineState.DISCOVERED
-    if dead_lettered:
-        # Out of the queue for good: a later batch does not claim it.
-        row.next_attempt_at = dt.datetime.now(dt.UTC) - dt.timedelta(hours=2)
-        app_session.commit()
-        assert run_batch(app_session, network=network, lease=LEASE).claimed == 0
+    assert article.terminal_reason is None
+
+
+def test_the_final_transient_failure_continues_the_article_without_a_body(
+    app_session: Session,
+) -> None:
+    """AC4, third half: on the last attempt the fetch is given up, not the article. It moves on
+    headline-only — the same outcome as every other rung that yields no body — rather than
+    dying: its headline is real, and a cluster should count it whether or not its page is up.
+    Falsified by the neighbouring test: one attempt earlier, the same 503 is a release."""
+    fetcher = Fetcher({f"{HOST}/news/one": FetchResult(status=503, error="Service Unavailable")})
+    network, _ = _network(fetcher)
+    _, _, article, work = _article(app_session)
+    work.attempts = work_queue.MAX_ATTEMPTS - 1
+    app_session.commit()
+
+    report = run_batch(app_session, network=network, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, acquired=1, fetch_abandoned=1)
+    # Advanced like any acquired article: the acquire row is gone, the successor is queued.
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    app_session.refresh(article)
+    assert article.pipeline_state is PipelineState.ACQUIRED
+    assert article.terminal_reason is None
+    assert article.body_text is None and article.body_provenance is None
+    assert article.content_hash is None
+    # The final write is a real one: the lede is stripped and the language recorded.
+    assert article.lede == "Opponents asked for an independent review."
+    assert article.language == "en"
+    # Not retried: the next batch has nothing at this stage to claim.
+    assert run_batch(app_session, network=network, lease=LEASE).claimed == 0
 
 
 # ------------------------------------------------------------- AC3: one budget across both jobs
