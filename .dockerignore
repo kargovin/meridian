@@ -1,0 +1,23 @@
+# Not part of either deployable. The process docs and scratch space are local working state
+# (see .gitignore); the venv and caches are the host's, not the image's.
+.git
+.venv
+.scratch
+.claude
+.mypy_cache
+.ruff_cache
+.pytest_cache
+__pycache__
+*.py[cod]
+docs
+tools
+CLAUDE.md
+HANDOFF.md
+MARCUS-DECISIONS.md
+mlflow.db
+mlruns
+
+# Secrets come in through the environment, never baked into a layer.
+.env
+.env.*
+!.env.example

@@ -1,4 +1,33 @@
-# Dev PostgreSQL (T3). Production is a postgres:16 StatefulSet on the k3s cluster (T10).
+# The development stack: PostgreSQL (T3) plus the three processes that make up the two
+# deployables, all from one image with the source bind-mounted so an edit is live.
+#
+#   docker compose up -d --build        build, migrate, start everything
+#   docker compose logs -f ingest       watch discovery and acquisition
+#   docker compose run --rm ingest python -m meridian.db.seed seeds/v1.json
+#   docker compose exec web pytest -q   the suite, against the same server
+#
+# Production is a postgres:16 StatefulSet and per-deployable images on the k3s cluster (T10);
+# the `app` and `platform` targets in the Dockerfile are those images.
+
+x-env: &env
+  # Inside the network the server is `postgres:5432`; .env's localhost:5433 is for the host.
+  # Environment variables take precedence over the bind-mounted .env.
+  MERIDIAN_DATABASE_URL: postgresql+psycopg://meridian:meridian@postgres:5432/meridian
+  MERIDIAN_PLATFORM_DATABASE_URL: postgresql+psycopg://platform:platform@postgres:5432/platform
+  # The mount would otherwise fill the checkout with the container's __pycache__.
+  PYTHONDONTWRITEBYTECODE: "1"
+
+# One image for the three processes. Only `migrate` carries the build, so it is built once;
+# everything else waits on migrate and starts from the same tag.
+x-meridian: &meridian
+  image: meridian-dev
+  volumes:
+    - .:/app
+  environment: *env
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
 services:
   postgres:
     image: postgres:16
@@ -16,6 +45,49 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  # One-shot: provision the Platform's role and database, then bring both Alembic trees to
+  # head. Every service waits for it to exit 0, which is what a migration Job does in prod.
+  migrate:
+    <<: *meridian
+    build:
+      context: .
+      target: dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >-
+      sh -c "python -m meridian_platform.bootstrap
+      && alembic upgrade head
+      && alembic -c platform/alembic.ini upgrade head"
+
+  # Discovery + acquisition (APScheduler, T6). No port: it talks to publishers, not to us.
+  ingest:
+    <<: *meridian
+    command: python -m meridian.ingest
+
+  # The admin surface over the registry and runtime config. The only process that holds the
+  # admin credential — see AdminSettings in libs/config.
+  web:
+    <<: *meridian
+    environment:
+      <<: *env
+      MERIDIAN_ADMIN_TOKEN: ${MERIDIAN_ADMIN_TOKEN:?set MERIDIAN_ADMIN_TOKEN in .env (openssl rand -hex 32)}
+    command: >-
+      uvicorn meridian.web.app:create_app --factory --host 0.0.0.0 --port 8080
+      --reload --reload-dir meridian --reload-dir libs
+    ports:
+      - "8080:8080"
+
+  # The Summarization & Classification Platform. Inference is the canned stub until the
+  # models land; the job store, retention and rate limits are real.
+  platform:
+    <<: *meridian
+    command: >-
+      uvicorn meridian_platform.main:create_app --factory --host 0.0.0.0 --port 8081
+      --reload --reload-dir platform --reload-dir libs
+    ports:
+      - "8081:8081"
 
 volumes:
   pgdata:

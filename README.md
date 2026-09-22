@@ -85,6 +85,22 @@ tools/                 # Confluence authoring toolchain
 
 Deployment manifests are not in this repository. They live in `kargovin/govindappa-k8s-config` and are reconciled by Flux onto a single-node k3s cluster.
 
+## Running it locally
+
+`compose.yaml` runs the whole stack: PostgreSQL, a one-shot `migrate` step (provisions the Platform's role and database, brings both Alembic trees to head), and the three processes — `ingest`, `web` (the admin surface on :8080) and `platform` (on :8081). All three start from one image built from the `Dockerfile`'s `dev` target, with the checkout bind-mounted so an edit is live without a rebuild.
+
+```sh
+cp .env.example .env                      # then set MERIDIAN_ADMIN_TOKEN (openssl rand -hex 32)
+docker compose up -d --build
+docker compose run --rm ingest python -m meridian.db.seed seeds/v1.json   # once; inserts only
+docker compose logs -f ingest             # discovery and acquisition, cycle by cycle
+docker compose exec web pytest -q         # the test suite, against the same server
+```
+
+The registry and runtime config are at `http://localhost:8080/admin/sources` and `/admin/config` (HTTP Basic, any username, the token as password). The Platform's contract is at `http://localhost:8081/docs`. The database is reachable from the host on `localhost:5433` as `meridian`/`meridian`.
+
+The Dockerfile's `app` and `platform` targets are the per-deployable images the cluster runs; `dev` is the same code with the test tooling added.
+
 ## Tooling
 
 `tools/confluence/` publishes design documents to Confluence from Markdown. The renderer (`adf.py`) targets Atlassian Document Format directly, so documents are authored as Markdown instead of hand-written markup.

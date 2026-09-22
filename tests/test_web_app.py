@@ -1,5 +1,7 @@
 """The application factory."""
 
+from pathlib import Path
+
 import pytest
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
@@ -32,15 +34,20 @@ def test_building_the_app_can_avoid_the_environment(app_migrated: sa.Engine) -> 
 
 
 def test_a_web_process_without_a_token_refuses_to_start(
-    app_migrated: sa.Engine, monkeypatch: pytest.MonkeyPatch
+    app_migrated: sa.Engine, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The credential is a boot requirement, not a runtime check.
 
     Starting and serving the registry unguarded — even briefly, even to return 401s from a
     check somebody later makes conditional — is the state this rules out.
+
+    Settings read ``.env`` from the working directory as well as the environment, so the
+    variable is removed *and* the test runs from a directory with no ``.env`` — otherwise a
+    developer's own token satisfies the boot check and the test passes without testing it.
     """
     settings, _ = _settings(app_migrated)
     monkeypatch.delenv("MERIDIAN_ADMIN_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)
 
     with pytest.raises(ValidationError):
         create_app(settings=settings)
