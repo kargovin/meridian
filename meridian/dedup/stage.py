@@ -84,7 +84,8 @@ class DedupReport:
     advanced: int = 0
     #: Articles folded into a record from another publisher.
     collapsed: int = 0
-    #: Rows that raised. The row keeps its claim and is retried after the lease.
+    #: Rows that raised. Given back with backoff, and dead-lettered on the attempt
+    #: ``MAX_ATTEMPTS`` names.
     failed: int = 0
     #: Rows another worker had already completed — an expired lease, not a fault.
     stale: int = 0
@@ -94,6 +95,11 @@ class DedupReport:
     exact: int = 0
     #: Collapses on a fingerprint within the distance, bodies not identical.
     near: int = 0
+    #: Of the collapsed, copies that already had a note, dropped without a second one — a copy
+    #: discovery re-inserted while it was being collapsed.
+    already_noted: int = 0
+    #: Of the failed, rows given up on: the article stops here, marked failed.
+    dead_lettered: int = 0
     #: Matches within one publisher, logged and not collapsed. A steady count from one
     #: publisher is boilerplate in its bodies.
     same_publisher: int = 0
@@ -191,16 +197,22 @@ def handle(session: Session, work: PipelineWork, *, hamming_bits: int) -> DedupR
     match = find_match(session, article, stored, hamming_bits=hamming_bits, same_publisher=False)
     if match is not None:
         article_id = article.article_id
-        work_queue.collapse(session, work, into=match.article_id)
+        noted = work_queue.collapse(session, work, into=match.article_id)
         session.commit()
         log.info(
-            "article %d collapsed into %d (%s, distance %d)",
+            "article %d collapsed into %d (%s, distance %d)%s",
             article_id,
             match.article_id,
             "exact" if match.exact else "near",
             match.distance,
+            "" if noted else "; its copy was already noted",
         )
-        return DedupReport(collapsed=1, exact=int(match.exact), near=int(not match.exact))
+        return DedupReport(
+            collapsed=1,
+            exact=int(match.exact),
+            near=int(not match.exact),
+            already_noted=int(not noted),
+        )
 
     report = DedupReport(advanced=1)
     twin = find_match(session, article, stored, hamming_bits=hamming_bits, same_publisher=True)
@@ -253,18 +265,35 @@ def run_batch(
         except Exception as exc:
             session.rollback()
             log.exception("article %s raised during dedup", article_id)
-            _record_failure(session, work_id, exc)
-            report += DedupReport(failed=1)
+            dead = _record_failure(session, work_id, exc)
+            report += DedupReport(failed=1, dead_lettered=int(dead))
     return report
 
 
-def _record_failure(session: Session, work_id: int, exc: Exception) -> None:
-    """Write why a row failed, in a transaction of its own — the rollback took the handler's."""
+def _record_failure(session: Session, work_id: int, exc: Exception) -> bool:
+    """Give a failed row back with backoff, or give up on it. True if it was dead-lettered.
+
+    In a transaction of its own — the rollback took the handler's. ``claim()`` counts attempts
+    and never stops, so stopping is this stage's job: without it a row that always raises is
+    re-claimed every lease, forever, and the article sits at ``acquired`` with only
+    ``last_error`` to say why. Unlike acquire, the article cannot continue without this stage —
+    one that skipped dedup could be counted twice toward the two-source gate (FR-S6) — so the
+    last attempt dead-letters rather than advancing.
+    """
     try:
         row = session.get(PipelineWork, work_id)
-        if row is not None:
-            row.last_error = f"{type(exc).__name__}: {exc}"[:2000]
+        if row is None:
+            return False
+        error = f"{type(exc).__name__}: {exc}"
+        if row.attempts >= work_queue.MAX_ATTEMPTS:
+            work_queue.dead_letter(session, row, error=error)
             session.commit()
+            log.error("work %d dead-lettered after %d attempts: %s", work_id, row.attempts, error)
+            return True
+        retry_at = dt.datetime.now(dt.UTC) + work_queue.backoff_after(row.attempts)
+        work_queue.release(session, row, retry_at=retry_at, error=error)
+        session.commit()
     except Exception:
         session.rollback()
         log.exception("could not record the failure of work %d", work_id)
+    return False

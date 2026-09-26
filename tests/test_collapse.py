@@ -6,7 +6,7 @@ import time
 
 import pytest
 import sqlalchemy as sa
-from meridian_contract import PipelineState, Stage
+from meridian_contract import PipelineState, Stage, TerminalReason
 from sqlalchemy.orm import Session
 
 from meridian.db import work_queue
@@ -265,3 +265,120 @@ def test_a_representative_deleted_mid_collapse_is_refused_cleanly(
     finally:
         writer_thread.join(timeout=5)
         app_session.rollback()
+
+
+def _race_leftover(session: Session) -> tuple[CanonicalRecord, PipelineWork]:
+    """What discovery's probe-then-insert race leaves: a copy already noted on a representative,
+    and the same copy back in ``canonical_record`` waiting at dedup."""
+    origin = make_source(session, "Global Voices")
+    other = make_source(session, "openDemocracy")
+    representative = make_article(session, origin, guid="rep", state=PipelineState.DEDUPED)
+    make_alternate_copy(
+        session, representative, other, guid="g1", url="https://opendemocracy.test/g1"
+    )
+    back = make_article(
+        session,
+        other,
+        guid="g1",
+        url="https://opendemocracy.test/g1",
+        state=PipelineState.ACQUIRED,
+    )
+    work = make_work(session, stage=Stage.DEDUP, article=back)
+    session.commit()
+    return representative, work
+
+
+def test_a_copy_already_noted_is_dropped_without_a_second_note(app_session: Session) -> None:
+    """⚠️ Writing the note again fails on alternate_copy's unique constraints, and the row then
+    fails the same way on every retry. The copy is already kept; dropping it is the answer."""
+    representative, work = _race_leftover(app_session)
+    back_id = work.article_id
+
+    noted = work_queue.collapse(app_session, work, into=representative.article_id)
+    app_session.commit()
+
+    assert noted is False
+    assert app_session.get(CanonicalRecord, back_id) is None
+    assert app_session.scalars(sa.select(PipelineWork)).all() == []
+    assert len(app_session.scalars(sa.select(AlternateCopy)).all()) == 1
+
+
+def test_a_copy_noted_under_its_url_alone_is_recognised(app_session: Session) -> None:
+    """A note written with another guid — the publisher reissued it — still holds the URL."""
+    origin = make_source(app_session, "Global Voices")
+    other = make_source(app_session, "openDemocracy")
+    representative = make_article(app_session, origin, guid="rep", state=PipelineState.DEDUPED)
+    make_alternate_copy(
+        app_session, representative, other, guid="old-guid", url="https://opendemocracy.test/g1"
+    )
+    back = make_article(
+        app_session,
+        other,
+        guid="new-guid",
+        url="https://opendemocracy.test/g1",
+        state=PipelineState.ACQUIRED,
+    )
+    work = make_work(app_session, stage=Stage.DEDUP, article=back)
+    app_session.commit()
+
+    assert work_queue.collapse(app_session, work, into=representative.article_id) is False
+
+
+def test_a_copy_already_noted_is_dropped_even_if_its_target_has_since_stopped(
+    app_session: Session,
+) -> None:
+    """The note is checked before the representative: whatever has become of ``into``, the
+    copy is already recorded, and refusing would only retry it towards a dead letter."""
+    representative, work = _race_leftover(app_session)
+    representative.terminal_reason = TerminalReason.FAILED
+    app_session.commit()
+
+    assert work_queue.collapse(app_session, work, into=representative.article_id) is False
+
+
+def test_a_representative_terminated_since_the_match_is_refused(app_session: Session) -> None:
+    """The match is read without a lock. A note attached to a record that has stopped for good
+    takes the story down with it, so the lock re-checks what the match assumed."""
+    origin = make_source(app_session, "Global Voices")
+    other = make_source(app_session, "openDemocracy")
+    representative = make_article(app_session, origin, guid="rep", state=PipelineState.DEDUPED)
+    duplicate = make_article(app_session, other, guid="dupe", state=PipelineState.ACQUIRED)
+    work = make_work(app_session, stage=Stage.DEDUP, article=duplicate)
+    representative.terminal_reason = TerminalReason.FAILED
+    app_session.commit()
+    duplicate_id = duplicate.article_id
+
+    with pytest.raises(ValueError, match="must not be collapsed into it"):
+        work_queue.collapse(app_session, work, into=representative.article_id)
+    app_session.rollback()
+
+    assert app_session.get(CanonicalRecord, duplicate_id) is not None
+    assert app_session.scalars(sa.select(AlternateCopy)).all() == []
+
+
+def test_another_publishers_note_with_the_same_guid_is_not_this_copy(
+    app_session: Session,
+) -> None:
+    """A guid identifies an item only within its publisher; treating a stranger's note as this
+    copy's would drop the copy with its provenance unwritten."""
+    origin = make_source(app_session, "Global Voices")
+    other = make_source(app_session, "openDemocracy")
+    stranger = make_source(app_session, "Syndicator")
+    representative = make_article(app_session, origin, guid="rep", state=PipelineState.DEDUPED)
+    make_alternate_copy(
+        app_session, representative, stranger, guid="g1", url="https://syndicator.test/g1"
+    )
+    duplicate = make_article(
+        app_session,
+        other,
+        guid="g1",
+        url="https://opendemocracy.test/g1",
+        state=PipelineState.ACQUIRED,
+    )
+    work = make_work(app_session, stage=Stage.DEDUP, article=duplicate)
+    app_session.commit()
+
+    assert work_queue.collapse(app_session, work, into=representative.article_id) is True
+    app_session.commit()
+    sources = set(app_session.scalars(sa.select(AlternateCopy.source_id)))
+    assert sources == {stranger.source_id, other.source_id}

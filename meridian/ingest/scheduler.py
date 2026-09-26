@@ -300,16 +300,18 @@ class DedupScheduler(_CadencedJob[DedupReport]):
         if report.claimed:
             log.info(
                 "dedup batch at %d bits: claimed=%d advanced=%d collapsed=%d (exact=%d near=%d) "
-                "no_body=%d same_publisher=%d failed=%d stale=%d",
+                "already_noted=%d no_body=%d same_publisher=%d failed=%d dead_lettered=%d stale=%d",
                 hamming_bits,
                 report.claimed,
                 report.advanced,
                 report.collapsed,
                 report.exact,
                 report.near,
+                report.already_noted,
                 report.no_body,
                 report.same_publisher,
                 report.failed,
+                report.dead_lettered,
                 report.stale,
             )
         return report

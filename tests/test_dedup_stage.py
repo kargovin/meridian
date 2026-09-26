@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from meridian_contract import PipelineState, Stage, TerminalReason
 from sqlalchemy.orm import Session
 
+from meridian.db import work_queue
 from meridian.db.models import AlternateCopy, CanonicalRecord, PipelineWork, Source
 from meridian.db.simhash import simhash_from_db, simhash_to_db
 from meridian.dedup.fingerprint import distance, fingerprint
@@ -358,3 +359,85 @@ def test_a_body_without_a_hash_fails_the_row_and_says_why(app_session: Session) 
     healthy_article = app_session.get(CanonicalRecord, healthy_id)
     assert healthy_article is not None
     assert healthy_article.pipeline_state is PipelineState.DEDUPED
+
+
+def _broken(session: Session, *, attempts: int) -> int:
+    """A row that raises on every attempt: a body with no hash. Returns its article id."""
+    source = make_source(session)
+    article = make_article(
+        session, source, guid="broken", state=PipelineState.ACQUIRED, body_text=STORY
+    )
+    make_work(session, stage=Stage.DEDUP, article=article, attempts=attempts)
+    session.commit()
+    return article.article_id
+
+
+def _row(session: Session, article_id: int) -> PipelineWork:
+    session.expire_all()
+    return session.scalars(
+        sa.select(PipelineWork).where(PipelineWork.article_id == article_id)
+    ).one()
+
+
+def test_a_failed_row_is_given_back_with_backoff(app_session: Session) -> None:
+    """⚠️ Not left claimed: a claimed row is taken again one lease later, with no backoff and
+    no count of how often that has happened."""
+    article_id = _broken(app_session, attempts=0)
+    before = dt.datetime.now(dt.UTC)
+
+    report = run_batch(app_session, lease=LEASE, hamming_bits=H)
+
+    assert report == DedupReport(claimed=1, failed=1)
+    row = _row(app_session, article_id)
+    assert row.claimed_by is None
+    assert row.dead_lettered_at is None
+    assert row.next_attempt_at >= before + work_queue.backoff_after(1)
+    assert row.last_error is not None and "no content_hash" in row.last_error
+
+
+def test_a_row_that_fails_every_attempt_is_dead_lettered(app_session: Session) -> None:
+    """``claim()`` never stops on its own. On the attempt MAX_ATTEMPTS names the row is given up,
+    and the article is marked failed so the reconciler does not re-enqueue it."""
+    article_id = _broken(app_session, attempts=work_queue.MAX_ATTEMPTS - 1)
+
+    report = run_batch(app_session, lease=LEASE, hamming_bits=H)
+
+    assert report == DedupReport(claimed=1, failed=1, dead_lettered=1)
+    row = _row(app_session, article_id)
+    assert row.dead_lettered_at is not None
+    assert row.last_error is not None and "no content_hash" in row.last_error
+    article = app_session.get(CanonicalRecord, article_id)
+    assert article is not None and article.terminal_reason is TerminalReason.FAILED
+
+
+def test_one_attempt_short_of_the_limit_is_not_dead_lettered(app_session: Session) -> None:
+    article_id = _broken(app_session, attempts=work_queue.MAX_ATTEMPTS - 2)
+
+    report = run_batch(app_session, lease=LEASE, hamming_bits=H)
+
+    assert report == DedupReport(claimed=1, failed=1)
+    assert _row(app_session, article_id).dead_lettered_at is None
+
+
+def test_a_copy_the_discovery_race_let_back_in_is_dropped(app_session: Session) -> None:
+    """The race discovery's probe cannot close: the copy is noted and also back in the table.
+    The batch drops it, and it does not fail."""
+    origin = make_source(app_session, "Global Voices")
+    other = make_source(app_session, "openDemocracy")
+    representative = held(app_session, origin, "rep", STORY)
+    app_session.add(
+        AlternateCopy(
+            article_id=representative.article_id,
+            source_id=other.source_id,
+            guid="back",
+            url="https://example.test/back",
+        )
+    )
+    arrival(app_session, other, "back", STORY)
+    app_session.commit()
+
+    report = run_batch(app_session, lease=LEASE, hamming_bits=H)
+
+    assert report == DedupReport(claimed=1, collapsed=1, exact=1, already_noted=1)
+    assert surviving(app_session) == {"rep"}
+    assert len(app_session.scalars(sa.select(AlternateCopy)).all()) == 1

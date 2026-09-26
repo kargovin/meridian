@@ -107,8 +107,8 @@ def _collapsed_already(session: Session, feed: Feed, item: FeedItem) -> bool:
     guid: the guid scoped to its publisher, the URL across every publisher.
 
     Not atomic with the insert: a collapse committing between the probe and the insert lets one
-    copy back in. That arrival is then bounded rather than looping — its own collapse fails on
-    ``alternate_copy``'s unique constraints, is recorded on the work row, and dead-letters.
+    copy back in. Dedup then finds the note ``collapse`` would have written and drops the copy
+    without a second one.
     """
     return bool(
         session.scalar(
