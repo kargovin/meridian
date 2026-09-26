@@ -221,7 +221,7 @@ def test_a_fetched_body_is_stored_with_provenance_and_hash(app_session: Session)
     assert article.lede == "Opponents asked for an independent review."
     assert article.language == "en"
     assert article.pipeline_state is PipelineState.ACQUIRED
-    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.DEDUP]
 
 
 def test_a_tier1_body_leaves_the_stage_with_its_hash(app_session: Session) -> None:
@@ -490,7 +490,7 @@ def test_a_4xx_continues_without_a_body_and_is_counted_as_refused(app_session: S
     )
     assert article.body_text is None
     assert article.pipeline_state is PipelineState.ACQUIRED
-    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.DEDUP]
 
 
 def test_an_error_page_with_a_body_is_not_extracted(app_session: Session) -> None:
@@ -558,7 +558,7 @@ def test_the_final_transient_failure_continues_the_article_without_a_body(
 
     assert report == AcquireReport(claimed=1, acquired=1, fetch_abandoned=1)
     # Advanced like any acquired article: the acquire row is gone, the successor is queued.
-    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.DEDUP]
     app_session.refresh(article)
     assert article.pipeline_state is PipelineState.ACQUIRED
     assert article.terminal_reason is None
@@ -851,7 +851,7 @@ def test_a_publisher_stopped_or_downgraded_during_the_fetch_has_its_body_withhel
         )
     assert body is None
     assert state is PipelineState.ACQUIRED
-    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.DEDUP]
 
 
 # ----------------------------------------------------- handing a row back that is no longer ours
@@ -889,7 +889,7 @@ def test_release_of_a_row_another_worker_completed_is_counted_stale(
 
     assert report == AcquireReport(claimed=1, stale=1), f"{report}\n{caplog.text}"
     assert "Traceback" not in caplog.text
-    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.DEDUP]
     app_session.refresh(article)
     assert article.pipeline_state is PipelineState.ACQUIRED
     assert article.body_text == " ".join(_PARAS), "their body stands"
@@ -1014,7 +1014,7 @@ def test_an_unreachable_robots_txt_defers_the_fetch_and_the_schedule_ends_it(
     report = run_batch(app_session, network=network, lease=LEASE)
 
     assert report == AcquireReport(claimed=1, acquired=1, fetch_abandoned=1)
-    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.DEDUP]
     app_session.refresh(article)
     assert article.pipeline_state is PipelineState.ACQUIRED and article.body_text is None
 
@@ -1067,7 +1067,7 @@ def test_a_body_over_the_cap_is_refused_not_retried(app_session: Session) -> Non
     report = run_batch(app_session, network=network, lease=LEASE)
 
     assert report == AcquireReport(claimed=1, acquired=1, fetch_refused=1)
-    assert [row.stage for row in _work_rows(app_session)] == [Stage.CLASSIFY]
+    assert [row.stage for row in _work_rows(app_session)] == [Stage.DEDUP]
     app_session.refresh(article)
     assert article.pipeline_state is PipelineState.ACQUIRED and article.body_text is None
 

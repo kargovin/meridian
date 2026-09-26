@@ -69,7 +69,7 @@ def test_advance_moves_the_state_and_enqueues_the_successor(app_session: Session
 
     assert article.pipeline_state is PipelineState.ACQUIRED
     remaining = _queued(app_session, article.article_id)
-    assert [row.stage for row in remaining] == [Stage.CLASSIFY]
+    assert [row.stage for row in remaining] == [Stage.DEDUP]
 
 
 def test_advance_at_the_end_of_the_chain_enqueues_nothing(app_session: Session) -> None:
@@ -148,7 +148,7 @@ def test_an_english_article_is_normalized_and_handed_on(app_session: Session) ->
     assert article.language == "en"
     assert article.pipeline_state is PipelineState.ACQUIRED
     assert article.terminal_reason is None
-    assert [row.stage for row in _queued(app_session, article.article_id)] == [Stage.CLASSIFY]
+    assert [row.stage for row in _queued(app_session, article.article_id)] == [Stage.DEDUP]
 
 
 def test_the_hashes_are_left_null_until_there_is_a_body(app_session: Session) -> None:
@@ -293,7 +293,7 @@ def test_the_batch_claims_only_its_own_stage(app_session: Session) -> None:
     """
     source = make_source(app_session)
     article = make_article(app_session, source, state=PipelineState.ACQUIRED)
-    make_work(app_session, stage=Stage.CLASSIFY, article=article)
+    make_work(app_session, stage=Stage.DEDUP, article=article)
     app_session.commit()
 
     assert run_batch(app_session, network=NETWORK, lease=LEASE).claimed == 0

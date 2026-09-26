@@ -283,21 +283,32 @@ def language_input(title: str, lede: str | None) -> str:
     return f"{title} {lede}".strip() if lede else title.strip()
 
 
-def content_hash(body: str) -> str:
-    """The exact-duplicate fingerprint of a body (2.1.2 §3.1): SHA-256 over the body lowercased,
-    with punctuation removed and whitespace collapsed to single spaces.
+def normalized_tokens(body: str) -> list[str]:
+    """A body reduced to its comparable words (2.1.2 §3.1): lowercased, punctuation removed,
+    split on whitespace.
 
-    The three normalizations are what let two hostings of one wire story hash alike — a house
-    style's curly quotes, a dateline's trailing full stop, a different line-wrapping. Anything
-    beyond that is a near-duplicate and is SimHash's job (§3.2), not this function's.
+    The three normalizations are what let two hostings of one wire story compare alike — a
+    house style's curly quotes, a dateline's trailing full stop, a different line-wrapping.
 
     "Punctuation" is Unicode's: every character whose general category starts with ``P``.
     Symbols (``S*``, so currency signs and ``+``) stay, because they carry meaning in a figure.
-    Stated here because the definition *is* the column: two implementations that disagree on
-    one character class produce two hashes for one article, and the invariant that every
-    body has exactly one hash is what dedup joins on.
+
+    ⚠️ One definition, deliberately, because two of them disagreeing is invisible. Exact
+    matching hashes these tokens and near matching shingles them, and if the two split
+    ``don't`` differently then one detector is reading a word the other never saw. Changing
+    what this returns changes every ``content_hash`` and every ``simhash`` ever stored, so it
+    is a migration that recomputes them, never an edit.
     """
     lowered = body.lower()
     unpunctuated = "".join(c for c in lowered if not unicodedata.category(c).startswith("P"))
-    collapsed = " ".join(unpunctuated.split())
-    return hashlib.sha256(collapsed.encode()).hexdigest()
+    return unpunctuated.split()
+
+
+def content_hash(body: str) -> str:
+    """The exact-duplicate fingerprint of a body (2.1.2 §3.1): SHA-256 over its normalized
+    tokens rejoined by single spaces.
+
+    Catches byte-identical re-hosting. Anything short of identical is a near-duplicate and is
+    SimHash's job (§3.2), not this function's.
+    """
+    return hashlib.sha256(" ".join(normalized_tokens(body)).encode()).hexdigest()

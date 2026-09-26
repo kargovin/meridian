@@ -166,3 +166,18 @@ def test_a_seeded_value_is_inside_the_knobs_own_bounds() -> None:
     """
     for knob in runtime_config.KNOBS:
         knob.check(int(_seeded_by_migrations()[knob.key]))
+
+
+def test_the_match_threshold_cannot_reach_where_unrelated_articles_meet() -> None:
+    """A collapse deletes the record, so a threshold wide enough to reach unrelated articles
+    destroys them. The nearest unrelated pair measured on the roster was 14 bits apart."""
+    runtime_config.DEDUP_HAMMING_BITS.check(runtime_config.DEDUP_HAMMING_BITS.maximum)
+    with pytest.raises(ValueError, match="dedup_hamming_bits must be between"):
+        runtime_config.DEDUP_HAMMING_BITS.check(14)
+
+
+def test_every_declared_knob_is_listed() -> None:
+    """The seeding tests and the admin surface both iterate ``KNOBS``, so a knob declared but
+    left out of it is checked by nothing and editable nowhere."""
+    declared = {v for v in vars(runtime_config).values() if isinstance(v, runtime_config.IntKnob)}
+    assert declared == set(runtime_config.KNOBS)

@@ -14,7 +14,7 @@ from meridian.ingest.fetch import HttpFetcher
 from meridian.ingest.network import Network
 from meridian.ingest.pacing import Pacer
 from meridian.ingest.robots import RobotsCache
-from meridian.ingest.scheduler import AcquireScheduler, DiscoveryScheduler
+from meridian.ingest.scheduler import AcquireScheduler, DedupScheduler, DiscoveryScheduler
 
 
 def main() -> None:
@@ -28,18 +28,16 @@ def main() -> None:
     pacer = Pacer()
     network = Network(fetcher=fetcher, robots=RobotsCache(fetcher, pacer), pacer=pacer)
 
-    # One scheduler, two jobs. Separate schedulers would mean two thread pools in a process
-    # whose whole workload is one HTTP call at a time.
+    # One scheduler, three jobs. Separate schedulers would mean a thread pool per job in a
+    # process whose whole workload is one HTTP call at a time.
     scheduler = BackgroundScheduler()
+    lease = dt.timedelta(seconds=settings.work_lease_seconds)
     discovery = DiscoveryScheduler(sessions, network, scheduler=scheduler)
-    acquire = AcquireScheduler(
-        sessions,
-        network,
-        lease=dt.timedelta(seconds=settings.work_lease_seconds),
-        scheduler=scheduler,
-    )
+    acquire = AcquireScheduler(sessions, network, lease=lease, scheduler=scheduler)
+    dedup = DedupScheduler(sessions, lease=lease, scheduler=scheduler)
     discovery.start()
     acquire.start()
+    dedup.start()
 
     stop = threading.Event()
 
