@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from meridian.db import work_queue
 from meridian.db.models import AlternateCopy, CanonicalRecord, PipelineWork, Source
+from meridian.db.session import session_factory
 from meridian.db.simhash import simhash_from_db, simhash_to_db
 from meridian.dedup.fingerprint import distance, fingerprint
 from meridian.dedup.stage import DedupReport, handle, run_batch
@@ -441,3 +442,38 @@ def test_a_copy_the_discovery_race_let_back_in_is_dropped(app_session: Session) 
     assert report == DedupReport(claimed=1, collapsed=1, exact=1, already_noted=1)
     assert surviving(app_session) == {"rep"}
     assert len(app_session.scalars(sa.select(AlternateCopy)).all()) == 1
+
+
+def test_a_failure_does_not_touch_a_row_another_worker_has_reclaimed(
+    app_session: Session, app_migrated: sa.Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⚠️ Our lease runs out mid-article and another worker claims the row; our handler gets as
+    far as the collapse, which discharges and expunges the row, then fails before committing.
+    Reloaded after the rollback, the row names the other worker — so an ownership check against
+    the reloaded row passes, and we dead-letter their live claim, marking the article failed
+    under them."""
+    first = make_source(app_session, "First Publisher")
+    representative = held(app_session, first, "rep", body(3))
+    article_id = _broken(app_session, attempts=work_queue.MAX_ATTEMPTS - 2)
+    representative_id = representative.article_id
+
+    def reclaimed_then_raise(session: Session, work: PipelineWork, **_: Any) -> DedupReport:
+        with session_factory(app_migrated)() as other:
+            taken = work_queue.claim(
+                other, stage=Stage.DEDUP, worker="other", lease=dt.timedelta(0)
+            )
+            assert [row.work_id for row in taken] == [work.work_id]
+        work_queue.collapse(session, work, into=representative_id)
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr("meridian.dedup.stage.handle", reclaimed_then_raise)
+
+    report = run_batch(app_session, lease=LEASE, hamming_bits=H, worker="ours")
+
+    assert report == DedupReport(claimed=1, failed=1)
+    row = _row(app_session, article_id)
+    assert row.claimed_by == "other"
+    assert row.attempts == work_queue.MAX_ATTEMPTS
+    assert row.dead_lettered_at is None
+    article = app_session.get(CanonicalRecord, article_id)
+    assert article is not None and article.terminal_reason is None

@@ -265,12 +265,12 @@ def run_batch(
         except Exception as exc:
             session.rollback()
             log.exception("article %s raised during dedup", article_id)
-            dead = _record_failure(session, work_id, exc)
+            dead = _record_failure(session, work_id, exc, worker=worker)
             report += DedupReport(failed=1, dead_lettered=int(dead))
     return report
 
 
-def _record_failure(session: Session, work_id: int, exc: Exception) -> bool:
+def _record_failure(session: Session, work_id: int, exc: Exception, *, worker: str) -> bool:
     """Give a failed row back with backoff, or give up on it. True if it was dead-lettered.
 
     In a transaction of its own — the rollback took the handler's. ``claim()`` counts attempts
@@ -279,10 +279,24 @@ def _record_failure(session: Session, work_id: int, exc: Exception) -> bool:
     ``last_error`` to say why. Unlike acquire, the article cannot continue without this stage —
     one that skipped dedup could be counted twice toward the two-source gate (FR-S6) — so the
     last attempt dead-letters rather than advancing.
+
+    ⚠️ Ownership is checked against ``worker``, never against the row as reloaded. ``release``
+    and ``dead_letter`` match on the instance's own ``claimed_by``, and a row reloaded after
+    another worker reclaimed it (our lease ran out mid-article) names *them* — so the check
+    compared them with themselves, and we released or dead-lettered a claim that was not ours,
+    marking the article failed while they were still working on it.
     """
     try:
         row = session.get(PipelineWork, work_id)
         if row is None:
+            return False
+        if row.claimed_by != worker:
+            log.info(
+                "work %d was reclaimed by %s; its failure is not ours to record",
+                work_id,
+                row.claimed_by,
+            )
+            session.rollback()
             return False
         error = f"{type(exc).__name__}: {exc}"
         if row.attempts >= work_queue.MAX_ATTEMPTS:

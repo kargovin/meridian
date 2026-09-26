@@ -382,3 +382,28 @@ def test_another_publishers_note_with_the_same_guid_is_not_this_copy(
     app_session.commit()
     sources = set(app_session.scalars(sa.select(AlternateCopy.source_id)))
     assert sources == {stranger.source_id, other.source_id}
+
+
+def test_a_copy_noted_under_an_older_link_is_recognised_by_its_guid(
+    app_session: Session,
+) -> None:
+    """The publisher changed the article's link between polls and kept its guid. Discovery's
+    probe matches the guid, so the race lets this copy back in with the new link; only the
+    publisher-and-guid half of the check recognises it."""
+    origin = make_source(app_session, "Global Voices")
+    other = make_source(app_session, "openDemocracy")
+    representative = make_article(app_session, origin, guid="rep", state=PipelineState.DEDUPED)
+    make_alternate_copy(
+        app_session, representative, other, guid="g1", url="https://opendemocracy.test/old-link"
+    )
+    back = make_article(
+        app_session,
+        other,
+        guid="g1",
+        url="https://opendemocracy.test/new-link",
+        state=PipelineState.ACQUIRED,
+    )
+    work = make_work(app_session, stage=Stage.DEDUP, article=back)
+    app_session.commit()
+
+    assert work_queue.collapse(app_session, work, into=representative.article_id) is False
