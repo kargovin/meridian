@@ -61,7 +61,9 @@ class CanonicalRecord(Base):
         StrEnumType(BodyProvenance), nullable=True
     )
     content_hash: Mapped[str | None] = mapped_column(Sha256, nullable=True)
-    #: Unsigned 64-bit stored as signed bigint — see ``types.simhash_to_db``.
+    #: The SimHash fingerprint (FR-I5), unsigned 64-bit stored as signed bigint — written
+    #: by the dedup stage, see ``meridian.db.simhash.simhash_to_db``. Never sort or range-query
+    #: it: the stored order is an artifact of the sign wrap, not of similarity.
     simhash: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True)
 
     #: Legal assumption A-L1.
@@ -109,4 +111,9 @@ class AlternateCopy(Base):
     url: Mapped[str] = mapped_column(sa.Text)
     #: Nullable — tier-3 acquisition has no feed-native id. UNIQUE(url) is what covers those.
     guid: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    #: When the publisher published this copy. Kept because collapsing deletes the record that
+    #: held it, and a copy published *before* its representative carries a date that then exists
+    #: nowhere — while the cluster headline is the earliest-published member. NULL if the feed
+    #: gave none. Not the same clock as ``seen_at``, which is when we noticed the duplicate.
+    published_at: Mapped[dt.datetime | None] = mapped_column(TZDateTime, nullable=True)
     seen_at: Mapped[dt.datetime] = mapped_column(TZDateTime, server_default=sa.func.now())

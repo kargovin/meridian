@@ -80,8 +80,43 @@ ACQUIRE_INTERVAL_SECONDS = IntKnob(
     "a discovered article waits before it is normalized.",
 )
 
+#: How long the dedup stage waits between batches. A freshness term for the same reason the
+#: acquire cadence is: every article with a body passes through dedup before it is classified,
+#: so this is added to the poll and acquire intervals on the way to the reader.
+DEDUP_INTERVAL_SECONDS = IntKnob(
+    key="dedup_interval_seconds",
+    default=30,
+    minimum=5,
+    maximum=300,
+    summary="Seconds between dedup batches. Added to the poll and acquire intervals, this is "
+    "how long an acquired article waits before it moves on to classification.",
+)
+
+#: How many of the 64 fingerprint bits two bodies may differ by and still be one article
+#: (FR-I5). Not a cadence: a threshold, and the two directions fail differently. Too low and a
+#: re-syndicated copy with a changed credit line survives as a second story, counted twice
+#: toward the ≥2-source summarization gate. Too high and unrelated articles are collapsed — and
+#: a collapse deletes the record, so nothing downstream can undo it.
+#:
+#: ⚠️ The ceiling is set below the nearest *unrelated* pair measured on the roster (14 bits,
+#: two articles sharing one publisher's boilerplate; 17 across publishers; unrelated bodies
+#: centre at 32). Raising it past that collapses articles that are not copies.
+DEDUP_HAMMING_BITS = IntKnob(
+    key="dedup_hamming_bits",
+    default=3,
+    minimum=0,
+    maximum=10,
+    summary="Fingerprint bits two bodies may differ by and still count as one article. 0 "
+    "collapses only identical fingerprints; higher values catch lightly edited copies.",
+)
+
 #: Every declared knob, in the order the admin surface lists them.
-KNOBS: tuple[IntKnob, ...] = (POLL_INTERVAL_SECONDS, ACQUIRE_INTERVAL_SECONDS)
+KNOBS: tuple[IntKnob, ...] = (
+    POLL_INTERVAL_SECONDS,
+    ACQUIRE_INTERVAL_SECONDS,
+    DEDUP_INTERVAL_SECONDS,
+    DEDUP_HAMMING_BITS,
+)
 
 
 def get_int(session: Session, knob: IntKnob) -> int:

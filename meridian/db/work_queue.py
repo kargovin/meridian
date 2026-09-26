@@ -17,7 +17,7 @@ from meridian_contract import (
 )
 from sqlalchemy.orm import Session
 
-from meridian.db.models import CanonicalRecord, PipelineWork
+from meridian.db.models import AlternateCopy, CanonicalRecord, ClusterMember, PipelineWork
 from meridian.readmodel.project import project_article_cluster, project_cluster
 
 #: States that still owe an article stage — the filter for the rebuild derivation.
@@ -272,6 +272,132 @@ def terminate(session: Session, work: PipelineWork, reason: TerminalReason) -> N
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
     article.terminal_reason = reason
     _discharge(session, work)
+
+
+def collapse(session: Session, work: PipelineWork, *, into: int) -> bool:
+    """This article is a second copy of ``into``: keep the provenance, drop the record.
+
+    The third way a work row ends, and neither of the other two fits. ``advance()`` would send
+    the duplicate on to be classified, embedded and clustered as a story of its own, which is
+    the double-counting FR-I5 exists to prevent. ``terminate()`` keeps the record, and a record
+    that stays is still a cluster candidate — and it records nothing about the publisher whose
+    copy this was. A duplicate is neither finished nor rejected; it is a record that turned out
+    to be a second copy of one we already hold.
+
+    Collapse-not-drop is a foreign key, not a delete (RFC §5.2): the ``AlternateCopy`` keeps the
+    publisher, URL, guid, feed and publication date, so cross-source coverage is never
+    undercounted (US-K2). The count that reads them is ``1 + count(DISTINCT source_id)``.
+
+    ⚠️ The order below is not arbitrary. ``pipeline_work`` cascades from ``canonical_record``,
+    so deleting the record first takes this work row with it and the discharge — a conditional
+    DELETE that raises on zero rows — then reports that another worker completed a row we
+    destroyed ourselves. Discharge first, while the row is still ours to check. For the same
+    reason the duplicate's fields are read into locals before the delete: afterwards, touching
+    the instance re-queries a row that is gone.
+
+    A copy that already has a note — the same publisher and guid, or the same URL — is dropped
+    without a second one, and False is returned. Discovery's probe is not atomic with its insert,
+    so a copy collapsed while it was being re-polled comes back once; its provenance is already
+    kept, and writing it again would fail on ``alternate_copy``'s unique constraints on every
+    retry. True means a note was written.
+
+    Does not commit. The note, the deletion, the discharge and the projection are one
+    transaction, or a duplicate can be dropped with its provenance unwritten.
+    """
+    if work.article_id is None:
+        raise ValueError(
+            f"work {work.work_id} has a cluster subject; only an article can be collapsed"
+        )
+    if work.article_id == into:
+        raise ValueError(
+            f"article {into} cannot collapse into itself; the match query returned its own row"
+        )
+
+    duplicate = session.get(CanonicalRecord, work.article_id)
+    if duplicate is None:
+        raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
+    # Read before the delete: a rollback or a delete expires the instance, and every attribute
+    # access after that re-queries a row that no longer exists.
+    copy_of = dict(
+        source_id=duplicate.source_id,
+        feed_id=duplicate.feed_id,
+        url=duplicate.url_canonical,
+        guid=duplicate.guid,
+        published_at=duplicate.published_at,
+    )
+
+    # ⚠️ ``alternate_copy`` cascades from ``canonical_record`` too, so collapsing a record that
+    # is already somebody's representative would delete its notes with it — losing exactly the
+    # provenance this function exists to keep, with nothing raised. Unreachable today, because
+    # only a record still at this stage is collapsed and a representative has already passed
+    # it; a guard makes that true by construction rather than by argument.
+    held = session.scalar(
+        sa.select(AlternateCopy.alternate_copy_id)
+        .where(AlternateCopy.article_id == work.article_id)
+        .limit(1)
+    )
+    if held is not None:
+        raise ValueError(
+            f"article {work.article_id} already holds collapsed copies; collapsing it would "
+            "delete their provenance by cascade"
+        )
+
+    article_id = work.article_id
+    # Checked before the representative: a copy already noted is recorded whatever has become
+    # of ``into`` since, so nothing about ``into`` can make dropping it wrong.
+    noted = session.scalar(
+        sa.select(AlternateCopy.alternate_copy_id)
+        .where(
+            sa.or_(
+                sa.and_(
+                    AlternateCopy.source_id == copy_of["source_id"],
+                    AlternateCopy.guid == copy_of["guid"],
+                ),
+                AlternateCopy.url == copy_of["url"],
+            )
+        )
+        .limit(1)
+    )
+    if noted is not None:
+        _discharge(session, work)
+        session.execute(sa.delete(CanonicalRecord).where(CanonicalRecord.article_id == article_id))
+        return False
+
+    # ⚠️ Our lock, taken before anything is written. The AlternateCopy's foreign key would take
+    # only FOR KEY SHARE on the representative, and a foreign key's lock protects referential
+    # integrity, not this function's invariant — that what we are attaching to is still a
+    # representative at the moment we attach to it. The match was read without a lock, so a
+    # representative terminated since then is refused here: a note attached to a record that
+    # has stopped for good takes the story down with it.
+    locked = session.execute(
+        sa.select(CanonicalRecord.article_id, CanonicalRecord.terminal_reason)
+        .where(CanonicalRecord.article_id == into)
+        .with_for_update()
+    ).first()
+    if locked is None:
+        raise ValueError(f"article {into} is gone; nothing to collapse article {article_id} into")
+    if locked.terminal_reason is not None:
+        raise ValueError(
+            f"article {into} stopped ({locked.terminal_reason}); "
+            f"article {article_id} must not be collapsed into it"
+        )
+
+    _discharge(session, work)
+    session.add(AlternateCopy(article_id=into, **copy_of))
+    session.flush()
+    session.execute(sa.delete(CanonicalRecord).where(CanonicalRecord.article_id == article_id))
+
+    # RFC §6.3: the duplicate never enters the article chain and the representative has no
+    # stage left to complete, so neither projection trigger fires and the coverage list would
+    # silently omit the publisher collapse-not-drop just preserved. ``project_article_cluster``
+    # refuses an unclustered article by design; here that is the ordinary case, so the
+    # membership is looked up and only a real cluster is re-projected.
+    cluster_id = session.scalar(
+        sa.select(ClusterMember.cluster_id).where(ClusterMember.article_id == into)
+    )
+    if cluster_id is not None:
+        project_cluster(session, cluster_id)
+    return True
 
 
 def heartbeat(

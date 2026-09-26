@@ -62,6 +62,7 @@ class PipelineState(StrEnum):
 
     DISCOVERED = "discovered"
     ACQUIRED = "acquired"
+    DEDUPED = "deduped"
     CLASSIFIED = "classified"
     CLUSTERED = "clustered"
 
@@ -121,6 +122,7 @@ class Stage(StrEnum):
     """
 
     ACQUIRE = "acquire"
+    DEDUP = "dedup"
     CLASSIFY = "classify"
     CLUSTER = "cluster"
     SUMMARIZE = "summarize"

@@ -34,7 +34,7 @@ def test_chain_terminates() -> None:
         assert stage not in seen, f"cycle through {stage}"
         seen.append(stage)
         stage = STAGE_SUCCESSOR[stage]
-    assert seen == [Stage.ACQUIRE, Stage.CLASSIFY, Stage.CLUSTER]
+    assert seen == [Stage.ACQUIRE, Stage.DEDUP, Stage.CLASSIFY, Stage.CLUSTER]
 
 
 def test_summarize_is_outside_the_article_chain() -> None:
@@ -52,7 +52,8 @@ def test_owed_and_state_after_are_consistent() -> None:
 
 def test_owed_stage_walks_the_chain() -> None:
     assert owed_stage(ENTRY_STATE) is Stage.ACQUIRE
-    assert owed_stage(PipelineState.ACQUIRED) is Stage.CLASSIFY
+    assert owed_stage(PipelineState.ACQUIRED) is Stage.DEDUP
+    assert owed_stage(PipelineState.DEDUPED) is Stage.CLASSIFY
     assert owed_stage(PipelineState.CLASSIFIED) is Stage.CLUSTER
     assert owed_stage(PipelineState.CLUSTERED) is None
 

@@ -13,9 +13,17 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from meridian.db import runtime_config
-from meridian.db.models import RuntimeConfig
-from meridian.db.runtime_config import ACQUIRE_INTERVAL_SECONDS, POLL_INTERVAL_SECONDS
+from meridian.db.models import CanonicalRecord, RuntimeConfig, Source
+from meridian.db.runtime_config import (
+    ACQUIRE_INTERVAL_SECONDS,
+    DEDUP_HAMMING_BITS,
+    DEDUP_INTERVAL_SECONDS,
+    POLL_INTERVAL_SECONDS,
+)
 from meridian.db.session import session_factory
+from meridian.db.simhash import simhash_to_db
+from meridian.dedup.fingerprint import fingerprint
+from meridian.dedup.stage import DedupReport
 from meridian.ingest.acquire import AcquireReport
 from meridian.ingest.discovery import CycleReport
 from meridian.ingest.fetch import FetchResult
@@ -24,10 +32,14 @@ from meridian.ingest.pacing import Pacer
 from meridian.ingest.robots import RobotsCache
 from meridian.ingest.scheduler import (
     ACQUIRE_JOB_ID,
+    DEDUP_JOB_ID,
     JOB_ID,
     AcquireScheduler,
+    DedupScheduler,
     DiscoveryScheduler,
 )
+from tests.factories import make_source
+from tests.test_dedup_stage import arrival, body, flip, held
 
 pytestmark = pytest.mark.postgres
 
@@ -310,9 +322,119 @@ def test_two_jobs_share_one_scheduler_and_start_it_once(
     stub = StubScheduler()
     discovery = _scheduler(sessions, stub)
     acquire = _acquire(sessions, stub)
+    dedup = _dedup(sessions, stub)
 
     discovery.start()
     acquire.start()
+    dedup.start()
 
-    assert [job_id for job_id, _ in stub.added] == [JOB_ID, ACQUIRE_JOB_ID]
+    assert [job_id for job_id, _ in stub.added] == [JOB_ID, ACQUIRE_JOB_ID, DEDUP_JOB_ID]
     assert stub.started
+
+
+# --------------------------------------------------------------------------- the dedup job
+
+
+def _dedup(sessions: sessionmaker[Session], stub: StubScheduler, **kw: Any) -> DedupScheduler:
+    return DedupScheduler(sessions, lease=dt.timedelta(minutes=5), scheduler=stub, **kw)
+
+
+def test_the_dedup_job_reads_its_own_cadence(sessions: sessionmaker[Session]) -> None:
+    _set_knob(sessions, DEDUP_INTERVAL_SECONDS, 45)
+    stub = StubScheduler()
+
+    _dedup(sessions, stub, run=lambda session, **_: DedupReport()).start()
+
+    assert stub.added == [(DEDUP_JOB_ID, 45.0)]
+
+
+def test_changing_the_dedup_cadence_takes_effect_without_a_restart(
+    sessions: sessionmaker[Session],
+) -> None:
+    stub = StubScheduler()
+    scheduler = _dedup(sessions, stub, run=lambda session, **_: DedupReport())
+    scheduler.start()
+
+    _set_knob(sessions, DEDUP_INTERVAL_SECONDS, 120)
+    scheduler.tick()
+
+    assert stub.rescheduled == [(DEDUP_JOB_ID, 120.0)]
+
+
+def test_a_dedup_batch_that_raises_still_leaves_the_job_scheduled(
+    sessions: sessionmaker[Session],
+) -> None:
+    def explode(session: Session, **_: Any) -> DedupReport:
+        raise RuntimeError("boom")
+
+    stub = StubScheduler()
+    scheduler = _dedup(sessions, stub, run=explode)
+    scheduler.start()
+
+    _set_knob(sessions, DEDUP_INTERVAL_SECONDS, 90)
+    with pytest.raises(RuntimeError):
+        scheduler.tick()
+
+    assert stub.rescheduled == [(DEDUP_JOB_ID, 90.0)]
+
+
+def test_the_match_threshold_is_read_on_every_batch(sessions: sessionmaker[Session]) -> None:
+    """⚠️ A threshold captured at startup looks applied on the admin page while the running
+    process keeps the old one — and tuning it is the reason it is a knob."""
+    seen: list[int] = []
+
+    def record(session: Session, *, hamming_bits: int, **_: Any) -> DedupReport:
+        seen.append(hamming_bits)
+        return DedupReport()
+
+    scheduler = _dedup(sessions, StubScheduler(), run=record)
+    scheduler.start()
+
+    scheduler.tick()
+    _set_knob(sessions, DEDUP_HAMMING_BITS, 7)
+    scheduler.tick()
+
+    assert seen == [DEDUP_HAMMING_BITS.default, 7]
+
+
+def _five_bits_apart(
+    session: Session, first: Source, second: Source, *, seed: int, guid: str
+) -> None:
+    """A held record from ``first`` and an arrival from ``second``: unrelated bodies, so
+    nothing but the fingerprint can match them, with the held fingerprint set five bits from
+    what the stage will compute for the arrival."""
+    copy = body(seed + 1)
+    near = flip(fingerprint(copy) or 0, 5)
+    held(session, first, f"held-{guid}", body(seed), simhash=simhash_to_db(near))
+    arrival(session, second, guid, copy)
+
+
+def test_the_real_batch_collapses_at_the_threshold_the_knob_holds(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The default ``run`` against real rows, so the job's call matches ``run_batch``'s
+    signature — every other test here injects a stub. At the default of 3 a pair five bits
+    apart stays two stories; raising the knob to 5 collapses the next such pair without a
+    restart."""
+    with sessions() as session:
+        first = make_source(session, "First Publisher")
+        second = make_source(session, "Second Publisher")
+        _five_bits_apart(session, first, second, seed=11, guid="below")
+        session.commit()
+    scheduler = _dedup(sessions, StubScheduler())
+    scheduler.start()
+
+    assert scheduler.tick() == DedupReport(claimed=1, advanced=1)
+
+    with sessions() as session:
+        _five_bits_apart(session, session.merge(first), session.merge(second), seed=21, guid="at")
+        session.commit()
+    _set_knob(sessions, DEDUP_HAMMING_BITS, 5)
+
+    assert scheduler.tick() == DedupReport(claimed=1, collapsed=1, near=1)
+    with sessions() as session:
+        assert set(session.scalars(sa.select(CanonicalRecord.guid))) == {
+            "held-below",
+            "below",
+            "held-at",
+        }

@@ -19,14 +19,25 @@ from meridian_contract import (
 )
 from sqlalchemy.orm import Session
 
-from meridian.db import poll_state, sources
-from meridian.db.models import CanonicalRecord, Feed, FeedPollState, PipelineWork
+from meridian.db import poll_state, sources, work_queue
+from meridian.db.models import (
+    AlternateCopy,
+    CanonicalRecord,
+    Feed,
+    FeedPollState,
+    PipelineWork,
+)
 from meridian.ingest.discovery import CycleReport, run_cycle
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher, FetchResult
 from meridian.ingest.network import Network
 from meridian.ingest.pacing import Pacer
 from meridian.ingest.robots import RobotsCache
-from tests.factories import make_feed, make_source
+from tests.factories import (
+    make_alternate_copy,
+    make_article,
+    make_feed,
+    make_source,
+)
 
 pytestmark = pytest.mark.postgres
 
@@ -917,3 +928,91 @@ def test_an_unreachable_robots_txt_is_recorded_as_an_outage_not_a_rule(
     state = app_session.get(FeedPollState, feed.feed_id)
     assert state is not None and state.last_error is not None
     assert "unreachable" in state.last_error and "disallowed" not in state.last_error
+
+
+# --------------------------------------------------------------- a copy dedup already collapsed
+
+
+def _representative(session: Session) -> CanonicalRecord:
+    """A record another publisher ran first — what a collapsed copy is a note on."""
+    first = make_source(session, "First Publisher")
+    return make_article(session, first, guid="rep", url="https://first.example/rep")
+
+
+def test_a_collapsed_copy_is_not_rediscovered_on_the_next_poll(app_session: Session) -> None:
+    """⚠️ The loop this lookup exists to stop, driven through the real collapse.
+
+    Collapsing deletes the record, so ``UNIQUE(source_id, guid)`` and ``UNIQUE(url_canonical)``
+    no longer see it. Without the lookup every poll that still carries the item re-inserts it,
+    re-fetches its body and re-collapses it, until the note's own unique constraint raises.
+    """
+    feed = _feed_with_source(app_session)
+    representative = _representative(app_session)
+    app_session.commit()
+    fetcher = FakeFetcher({feed.url: ONE_ITEM})
+    _cycle(app_session, fetcher)
+    (arrival,) = [a for a in articles(app_session) if a.guid == "g1"]
+    work = app_session.scalars(
+        sa.select(PipelineWork).where(PipelineWork.article_id == arrival.article_id)
+    ).one()
+    work_queue.collapse(app_session, work, into=representative.article_id)
+    app_session.commit()
+
+    report = _cycle(app_session, fetcher)
+
+    assert report.discovered == 0
+    assert [a.guid for a in articles(app_session)] == ["rep"]
+    assert app_session.scalars(sa.select(PipelineWork)).all() == []
+    assert len(app_session.scalars(sa.select(AlternateCopy)).all()) == 1
+
+
+def test_a_collapsed_copy_is_recognised_by_its_guid_alone(app_session: Session) -> None:
+    """The publisher moved the article to a new URL; its guid is what still says it is ours."""
+    source = make_source(app_session)
+    feed = make_feed(app_session, source, url="https://feeds.example/a.xml")
+    make_alternate_copy(
+        app_session, _representative(app_session), source, guid="g1", url="https://x.example/old"
+    )
+    app_session.commit()
+
+    report = _cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}))
+
+    assert report.discovered == 0
+    assert [a.guid for a in articles(app_session)] == ["rep"]
+
+
+def test_a_collapsed_copy_is_recognised_by_its_url_alone(app_session: Session) -> None:
+    """A note with no guid — here another publisher's — still holds its URL, as
+    ``UNIQUE(url_canonical)`` would across every publisher."""
+    feed = _feed_with_source(app_session)
+    elsewhere = make_source(app_session, "Syndicator")
+    make_alternate_copy(
+        app_session, _representative(app_session), elsewhere, guid=None, url="https://x.example/g1"
+    )
+    app_session.commit()
+
+    report = _cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}))
+
+    assert report.discovered == 0
+    assert [a.guid for a in articles(app_session)] == ["rep"]
+
+
+def test_another_publishers_note_with_the_same_guid_does_not_hide_an_item(
+    app_session: Session,
+) -> None:
+    """A guid is an identity only within its publisher — two feeds can both say ``g1``."""
+    feed = _feed_with_source(app_session)
+    elsewhere = make_source(app_session, "Syndicator")
+    make_alternate_copy(
+        app_session,
+        _representative(app_session),
+        elsewhere,
+        guid="g1",
+        url="https://syndicator.example/g1",
+    )
+    app_session.commit()
+
+    report = _cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}))
+
+    assert report.discovered == 1
+    assert sorted(a.guid for a in articles(app_session)) == ["g1", "rep"]

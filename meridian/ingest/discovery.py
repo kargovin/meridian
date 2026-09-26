@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import sqlalchemy as sa
 from meridian_contract import (
     ENTRY_STATE,
     AcquisitionTier,
@@ -28,7 +29,7 @@ from sqlalchemy.orm import Session
 from meridian.db import feeds as feeds_repo
 from meridian.db import poll_state
 from meridian.db import sources as sources_repo
-from meridian.db.models import CanonicalRecord, Feed, PipelineWork, Source
+from meridian.db.models import AlternateCopy, CanonicalRecord, Feed, PipelineWork, Source
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher
 from meridian.ingest.network import Network
 from meridian.ingest.pacing import round_robin
@@ -93,6 +94,34 @@ def _body_text(source: Source, feed: Feed, item: FeedItem) -> str | None:
     return item.content
 
 
+def _collapsed_already(session: Session, feed: Feed, item: FeedItem) -> bool:
+    """Is this item a copy dedup has already collapsed into another record?
+
+    ⚠️ A collapsed duplicate is deleted from ``canonical_record``, so the two unique constraints
+    DO NOTHING relies on no longer see it. Without this the next poll that still carries the item
+    re-inserts it, acquire fetches the body again, dedup collapses it again — and the second note
+    for the same copy fails ``alternate_copy``'s own unique constraints, every poll, for as long
+    as the item stays in the feed.
+
+    The two probes mirror ``canonical_record``'s constraints, not ``alternate_copy``'s nullable
+    guid: the guid scoped to its publisher, the URL across every publisher.
+
+    Not atomic with the insert: a collapse committing between the probe and the insert lets one
+    copy back in. Dedup then finds the note ``collapse`` would have written and drops the copy
+    without a second one.
+    """
+    return bool(
+        session.scalar(
+            sa.select(
+                sa.exists().where(
+                    AlternateCopy.source_id == feed.source_id, AlternateCopy.guid == item.guid
+                )
+                | sa.exists().where(AlternateCopy.url == item.link)
+            )
+        )
+    )
+
+
 def _insert(session: Session, source: Source, feed: Feed, item: FeedItem) -> bool:
     """Create the record and its work row, or do nothing. True if it was new.
 
@@ -105,7 +134,12 @@ def _insert(session: Session, source: Source, feed: Feed, item: FeedItem) -> boo
     ordering is the whole point: the UNIQUE constraint can only refuse a duplicate if the value
     is canonical at insert, and a later stage rewriting the column would run after the second
     row already exists.
+
+    A copy dedup collapsed has left ``canonical_record``, so the constraints cannot see it;
+    ``_collapsed_already`` is the lookup that stands in for them.
     """
+    if _collapsed_already(session, feed, item):
+        return False
     body_text = _body_text(source, feed, item)
     article_id = session.scalar(
         insert(CanonicalRecord)

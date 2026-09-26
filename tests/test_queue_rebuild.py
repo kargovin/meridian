@@ -18,7 +18,8 @@ def populated(app_session: Session) -> dict[str, int]:
     ids = {}
     for label, state, stage in [
         ("discovered", PipelineState.DISCOVERED, Stage.ACQUIRE),
-        ("acquired", PipelineState.ACQUIRED, Stage.CLASSIFY),
+        ("acquired", PipelineState.ACQUIRED, Stage.DEDUP),
+        ("deduped", PipelineState.DEDUPED, Stage.CLASSIFY),
         ("classified", PipelineState.CLASSIFIED, Stage.CLUSTER),
     ]:
         article = make_article(app_session, source, guid=label, state=state)
@@ -69,7 +70,8 @@ def test_finished_and_terminal_articles_owe_nothing(
 def test_expected_work_follows_the_chain(app_session: Session, populated: dict[str, int]) -> None:
     assert expected_article_work(app_session) == {
         (populated["discovered"], Stage.ACQUIRE),
-        (populated["acquired"], Stage.CLASSIFY),
+        (populated["acquired"], Stage.DEDUP),
+        (populated["deduped"], Stage.CLASSIFY),
         (populated["classified"], Stage.CLUSTER),
     }
 
@@ -82,4 +84,4 @@ def test_a_dropped_enqueue_is_reported(app_session: Session, populated: dict[str
     )
     app_session.commit()
 
-    assert missing_article_work(app_session) == {(populated["acquired"], Stage.CLASSIFY)}
+    assert missing_article_work(app_session) == {(populated["acquired"], Stage.DEDUP)}

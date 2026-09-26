@@ -31,6 +31,7 @@ ENTRY_STATE = PipelineState.DISCOVERED
 #: (stage, the state an article is left in once that stage completes).
 ARTICLE_CHAIN: tuple[tuple[Stage, PipelineState], ...] = (
     (Stage.ACQUIRE, PipelineState.ACQUIRED),
+    (Stage.DEDUP, PipelineState.DEDUPED),
     (Stage.CLASSIFY, PipelineState.CLASSIFIED),
     (Stage.CLUSTER, PipelineState.CLUSTERED),
 )

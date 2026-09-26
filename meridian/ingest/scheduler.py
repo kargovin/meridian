@@ -23,6 +23,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from meridian.db import runtime_config
 from meridian.db.runtime_config import IntKnob
+from meridian.dedup import stage as dedup
+from meridian.dedup.stage import DedupReport
 from meridian.ingest.acquire import AcquireReport, run_batch
 from meridian.ingest.discovery import CycleReport, run_cycle
 from meridian.ingest.network import Network
@@ -42,10 +44,25 @@ class AcquireRun(Protocol):
     ) -> AcquireReport: ...
 
 
+class DedupRun(Protocol):
+    """What the dedup job calls. Spelled out for the same reason as ``AcquireRun``."""
+
+    def __call__(
+        self,
+        session: Session,
+        *,
+        lease: dt.timedelta,
+        hamming_bits: int,
+        limit: int = ...,
+        worker: str | None = ...,
+    ) -> DedupReport: ...
+
+
 log = logging.getLogger(__name__)
 
 JOB_ID = "discovery-poll"
 ACQUIRE_JOB_ID = "acquire-batch"
+DEDUP_JOB_ID = "dedup-batch"
 
 
 def poll_interval_seconds(session: Session) -> int:
@@ -243,5 +260,58 @@ class AcquireScheduler(_CadencedJob[AcquireReport]):
                 report.extract_empty,
                 report.adapter_missing,
                 report.withheld,
+            )
+        return report
+
+
+class DedupScheduler(_CadencedJob[DedupReport]):
+    """Runs the dedup stage on the configured cadence.
+
+    Makes no request to any publisher, so it takes no ``Network``: the comparison is a query
+    against records already held.
+
+    ⚠️ The match threshold is read from the config plane at the start of every batch, not once
+    at startup. It is a knob precisely so it can be tuned against what dedup is collapsing, and
+    a value captured at boot would make every tuning step a restart — or, worse, look applied on
+    the admin page while the running process kept the old one.
+    """
+
+    job_id = DEDUP_JOB_ID
+    knob = runtime_config.DEDUP_INTERVAL_SECONDS
+
+    def __init__(
+        self,
+        sessions: sessionmaker[Session],
+        *,
+        lease: dt.timedelta,
+        limit: int = 50,
+        scheduler: BackgroundScheduler | None = None,
+        run: DedupRun = dedup.run_batch,
+    ) -> None:
+        super().__init__(sessions, scheduler=scheduler)
+        self._lease = lease
+        self._limit = limit
+        self._run = run
+
+    def _run_once(self, session: Session) -> DedupReport:
+        hamming_bits = runtime_config.get_int(session, runtime_config.DEDUP_HAMMING_BITS)
+        report = self._run(session, lease=self._lease, hamming_bits=hamming_bits, limit=self._limit)
+        # Logged only when there was something to do, as acquire is.
+        if report.claimed:
+            log.info(
+                "dedup batch at %d bits: claimed=%d advanced=%d collapsed=%d (exact=%d near=%d) "
+                "already_noted=%d no_body=%d same_publisher=%d failed=%d dead_lettered=%d stale=%d",
+                hamming_bits,
+                report.claimed,
+                report.advanced,
+                report.collapsed,
+                report.exact,
+                report.near,
+                report.already_noted,
+                report.no_body,
+                report.same_publisher,
+                report.failed,
+                report.dead_lettered,
+                report.stale,
             )
         return report
