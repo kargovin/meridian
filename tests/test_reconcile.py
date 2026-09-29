@@ -405,10 +405,16 @@ def test_a_writer_takes_the_record_before_the_work_row(
     row first and reaches the record later holds the pair the other way round, and against a
     repair of the same article PostgreSQL detects a deadlock and aborts one of them.
 
-    The record is held from outside; the writer must queue behind it without having touched its
-    work row. ``advance`` is given a stale row for a stage its article has already passed, so the
-    state write that would otherwise reach the record first through autoflush has nothing to
-    write.
+    The record is held ``FOR SHARE``: the weakest lock a writer's must conflict with. Held
+    ``FOR UPDATE`` it would also queue a writer whose own lock is too weak to exclude another
+    writer (``FOR SHARE``, ``FOR KEY SHARE``), and that weakening would pass.
+
+    The record is held from outside; the writer must queue behind it — still running when the
+    work row is probed — without having touched its work row. ``advance`` is given a stale row
+    for a stage its article has already passed, so the state write that would otherwise reach
+    the record first through autoflush has nothing to write. ``terminate`` pins the order against
+    later edits and cannot fail today: its ``terminal_reason`` write reaches the record first
+    through autoflush with or without the explicit lock.
     """
     source = make_source(app_session)
     other_source = make_source(app_session, "Other Publisher")
@@ -434,17 +440,139 @@ def test_a_writer_takes_the_record_before_the_work_row(
 
     with app_migrated.connect() as holder:
         holder.execute(
-            sa.text("SELECT 1 FROM canonical_record WHERE article_id = :id FOR UPDATE"),
+            sa.text("SELECT 1 FROM canonical_record WHERE article_id = :id FOR SHARE"),
             {"id": article_id},
         )
         thread, errors = _in_thread(write)
         _blocked_or_done(app_migrated, thread)
+        # A writer that never reaches the record finishes here, and a deleted work row probes as
+        # free — so "free" alone would pass a writer that took no record lock at all.
+        queued = thread.is_alive()
         free = _work_row_is_free(app_migrated, work_id)
         holder.rollback()
     thread.join(timeout=10)
 
+    assert not thread.is_alive()
     assert not errors
+    assert queued, f"{writer} finished without waiting on the article"
     assert free, f"{writer} locked the work row before the article"
+
+
+def test_the_article_lock_does_not_block_a_foreign_key_to_it(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """⚠️ The lock is ``FOR NO KEY UPDATE``, the strength of the state UPDATE it stands in for. A
+    ``FOR UPDATE`` also excludes the ``FOR KEY SHARE`` an insert referencing the article takes, so
+    a writer holding something else and then inserting such a row would wait on it — a lock
+    cycle no writer had before the explicit lock existed."""
+    source = make_source(app_session)
+    other = make_source(app_session, "Other Publisher")
+    article = make_article(app_session, source, state=PipelineState.ACQUIRED)
+    work = make_work(app_session, stage=Stage.DEDUP, article=article)
+    app_session.commit()
+
+    work_queue._lock_article(app_session, work)
+    try:
+        with app_migrated.connect() as child:
+            child.execute(sa.text("SET lock_timeout = '2s'"))
+            child.execute(
+                sa.text(
+                    "INSERT INTO alternate_copy (article_id, source_id, guid, url, seen_at) "
+                    "VALUES (:a, :s, 'alt', 'https://other.test/alt', now())"
+                ),
+                {"a": article.article_id, "s": other.source_id},
+            )
+            child.rollback()
+    finally:
+        app_session.rollback()
+
+
+def test_collapse_locks_the_copy_at_delete_strength_from_the_start(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """⚠️ Collapse deletes the copy. Locked at update strength first, the lock is upgraded at the
+    DELETE, and a ``FOR KEY SHARE`` taken in between — any insert referencing the copy — makes the
+    DELETE wait on it. Taken at delete strength from the start, the insert waits instead.
+
+    The insert is attempted the moment collapse's first lock on the copy has been taken."""
+    source = make_source(app_session)
+    other_source = make_source(app_session, "Other Publisher")
+    copy = make_article(app_session, source, guid="copy", state=PipelineState.ACQUIRED)
+    into = make_article(app_session, other_source, guid="rep", state=PipelineState.DEDUPED)
+    make_work(app_session, stage=Stage.DEDUP, article=copy)
+    app_session.commit()
+    copy_id, into_id = copy.article_id, into.article_id
+    (claimed,) = work_queue.claim(app_session, stage=Stage.DEDUP, worker="w", lease=LEASE)
+    outcome: list[str] = []
+
+    def insert_referencing_the_copy(conn: Any, cursor: Any, statement: str, *_: Any) -> None:
+        if outcome or "FROM canonical_record" not in statement or " FOR " not in statement:
+            return
+        with app_migrated.connect() as child:
+            child.execute(sa.text("SET lock_timeout = '500ms'"))
+            try:
+                child.execute(
+                    sa.text(
+                        "INSERT INTO alternate_copy (article_id, source_id, guid, url, seen_at) "
+                        "VALUES (:a, :s, 'alt', 'https://other.test/alt', now())"
+                    ),
+                    {"a": copy_id, "s": other_source.source_id},
+                )
+                outcome.append("inserted")
+            except sa.exc.OperationalError:
+                outcome.append("waited")
+            finally:
+                child.rollback()
+
+    event.listen(app_migrated, "after_cursor_execute", insert_referencing_the_copy)
+    try:
+        work_queue.collapse(app_session, claimed, into=into_id)
+    finally:
+        event.remove(app_migrated, "after_cursor_execute", insert_referencing_the_copy)
+    app_session.commit()
+
+    assert outcome == ["waited"]
+
+
+@pytest.mark.parametrize("dirty", [False, True], ids=["clean", "dirty"])
+@pytest.mark.parametrize("writer", ["advance", "terminate", "dead_letter", "collapse"])
+def test_a_writer_whose_article_is_gone_reports_stale_work(
+    app_session: Session, app_migrated: sa.Engine, writer: str, dirty: bool
+) -> None:
+    """The article was removed — collapsed by the worker that reclaimed our row, taken down — and
+    its work row cascaded with it. That is somebody else ending this work, not a failure of ours.
+    ⚠️ The caller may still hold the article instance, and ``session.get`` then answers from the
+    identity map: without the database check the write fails later as a ``StaleDataError``, and
+    the batch counts a failure. ``dirty`` is the ordinary case — a stage handler has written its
+    output onto the article before the writer runs — and a check that autoflushes that write
+    first raises the ``StaleDataError`` before it can look."""
+    source = make_source(app_session)
+    other_source = make_source(app_session, "Other Publisher")
+    article = make_article(app_session, source, guid="gone", state=PipelineState.ACQUIRED)
+    into = make_article(app_session, other_source, guid="rep", state=PipelineState.DEDUPED)
+    make_work(app_session, stage=Stage.DEDUP, article=article)
+    app_session.commit()
+    (claimed,) = work_queue.claim(app_session, stage=Stage.DEDUP, worker="w", lease=LEASE)
+    held = app_session.get(CanonicalRecord, article.article_id)
+    assert held is not None
+    if dirty:
+        held.lede = "written by the stage before the writer runs"
+    with app_migrated.begin() as other:
+        other.execute(
+            sa.text("DELETE FROM canonical_record WHERE article_id = :id"),
+            {"id": article.article_id},
+        )
+
+    with pytest.raises(work_queue.StaleWork, match="is gone"):
+        if writer == "advance":
+            work_queue.advance(app_session, claimed)
+        elif writer == "terminate":
+            work_queue.terminate(app_session, claimed, TerminalReason.DROPPED_LANGUAGE)
+        elif writer == "dead_letter":
+            work_queue.dead_letter(app_session, claimed, error="boom")
+        else:
+            work_queue.collapse(app_session, claimed, into=into.article_id)
+    app_session.rollback()
 
 
 def test_one_failed_repair_does_not_stop_the_rest(

@@ -146,9 +146,9 @@ def repair(session: Session, article_id: int) -> Discrepancy | None:
 
     Re-derives the disagreement from scratch under a lock rather than trusting the survey that
     named this article: the survey was a snapshot, and a stage may have completed since. The
-    record is locked ``FOR UPDATE`` first — the lock ``advance()`` and ``terminate()`` also
-    take when they write the state — so either their change committed before this read and is
-    seen, or they wait for this one.
+    record is locked ``FOR UPDATE`` first, which conflicts with the lock every writer that ends
+    a stage takes on it (``work_queue._lock_article``) — so either their change committed before
+    this read and is seen, or they wait for this one.
 
     ⚠️ Record, then work row: the order every writer that takes both must use
     (``work_queue._lock_article``). The reverse order against this one is a deadlock.

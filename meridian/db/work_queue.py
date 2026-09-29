@@ -101,7 +101,7 @@ class StaleWork(Exception):
 _ARTICLE_STAGES = frozenset(stage for stage, _ in ARTICLE_CHAIN)
 
 
-def _check_subject(work: PipelineWork) -> None:
+def check_subject(work: PipelineWork) -> None:
     """Refuse a work row whose subject is the wrong kind for its stage.
 
     ``exactly_one_subject`` enforces that a row has one subject, not that it has the *right*
@@ -169,7 +169,7 @@ def advance(session: Session, work: PipelineWork) -> None:
     Raises ``StaleWork`` if the row has already been discharged — see ``_discharge``. The
     caller must not treat that as a completion.
     """
-    _check_subject(work)
+    check_subject(work)
     new_state = STATE_AFTER_STAGE[work.stage]
     successor = STAGE_SUCCESSOR[work.stage]
 
@@ -273,7 +273,7 @@ def collapse(session: Session, work: PipelineWork, *, into: int) -> bool:
             f"article {into} cannot collapse into itself; the match query returned its own row"
         )
 
-    _lock_article(session, work)
+    _lock_article(session, work, for_delete=True)
     duplicate = session.get(CanonicalRecord, work.article_id)
     if duplicate is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
@@ -469,8 +469,8 @@ def _require_claim(work: PipelineWork) -> None:
         )
 
 
-def _lock_article(session: Session, work: PipelineWork) -> None:
-    """Take ``FOR UPDATE`` on the work row's article before anything touches the work row.
+def _lock_article(session: Session, work: PipelineWork, *, for_delete: bool = False) -> None:
+    """Lock the work row's article before anything touches the work row.
 
     ⚠️ Record first, work row second, in every writer that takes both — the order the reconciler
     takes them in. A writer that locks the work row first (an UPDATE or DELETE on it) and
@@ -479,13 +479,36 @@ def _lock_article(session: Session, work: PipelineWork) -> None:
     same article PostgreSQL detects a deadlock and aborts one of them. Taken explicitly rather
     than left to an autoflush, which writes only what changed.
 
-    A missing article is left for the caller to report, which each does in its own words.
+    ⚠️ ``FOR NO KEY UPDATE``, not ``FOR UPDATE``: the strength of the UPDATE it stands in for. It
+    still excludes the reconciler's ``FOR UPDATE``, but not the ``FOR KEY SHARE`` a foreign-key
+    child insert takes on its parent — so a writer that holds something else and then inserts a
+    row referencing this article is not made to wait on it, and no new cycle is created.
+    ``for_delete`` takes ``FOR UPDATE`` from the start, for a writer that will delete the
+    article: taking the weaker lock and upgrading at the DELETE lets a ``FOR KEY SHARE`` in
+    between, and the DELETE then waits on it.
+
+    Raises ``StaleWork`` if the article is gone. ``pipeline_work`` cascades from it, so the row
+    went with it: somebody else ended this work — a collapse by the worker that reclaimed the
+    row, a takedown. Checked here, against the database, because ``session.get`` answers from
+    the identity map for an instance the caller still holds, and the write that follows would
+    then fail as a ``StaleDataError`` instead.
+
+    ⚠️ Without autoflush. Stage handlers write their output onto the article before calling the
+    writer that ends the stage, and flushing that UPDATE here — before the check — raises the
+    ``StaleDataError`` this exists to turn into ``StaleWork``. It flushes at the discharge
+    instead, after the record is locked and known to exist.
     """
-    session.execute(
-        sa.select(CanonicalRecord.article_id)
-        .where(CanonicalRecord.article_id == work.article_id)
-        .with_for_update()
-    )
+    with session.no_autoflush:
+        held = session.scalar(
+            sa.select(CanonicalRecord.article_id)
+            .where(CanonicalRecord.article_id == work.article_id)
+            .with_for_update(key_share=not for_delete)
+        )
+    if held is None:
+        raise StaleWork(
+            f"article {work.article_id} is gone, and work {work.work_id} with it; "
+            "another writer ended this work"
+        )
 
 
 def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> None:

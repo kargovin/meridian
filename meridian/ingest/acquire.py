@@ -325,9 +325,17 @@ def handle(
     split them and an article can end up advanced with nothing owed, or owing a stage it has
     already had.
     """
+    # First: a row with a cluster subject has no article to load, and would otherwise read as
+    # one that is gone — stale, when it is a defect in whatever enqueued it.
+    work_queue.check_subject(work)
     article = session.get(CanonicalRecord, work.article_id)
     if article is None:
-        raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
+        # The work row cascades from the article, so it went too: somebody else ended this work
+        # — a collapse by the worker that reclaimed the row, a takedown. Not a failure of ours.
+        raise work_queue.StaleWork(
+            f"article {work.article_id} is gone, and work {work.work_id} with it; "
+            "another writer ended this work"
+        )
     source = session.get(Source, article.source_id)
     if source is None:
         raise ValueError(
