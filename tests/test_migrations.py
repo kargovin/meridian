@@ -1,6 +1,7 @@
 """The migration and the models must describe the same database."""
 
 import datetime as dt
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -246,7 +247,7 @@ def test_the_reconciler_migration_dates_work_already_queued_by_its_earliest_stam
     ``now()`` would make a backlog that is days old read as fresh on the first run."""
     now = dt.datetime.now(dt.UTC)
     source = make_source(app_session)
-    rows = {
+    rows: dict[str, dict[str, Any]] = {
         "untouched": dict(next_attempt_at=now - dt.timedelta(hours=3)),
         "released": dict(
             next_attempt_at=now + dt.timedelta(hours=1),

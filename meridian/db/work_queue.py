@@ -266,6 +266,7 @@ def collapse(session: Session, work: PipelineWork, *, into: int) -> bool:
             f"article {into} cannot collapse into itself; the match query returned its own row"
         )
 
+    _lock_article(session, work)
     duplicate = session.get(CanonicalRecord, work.article_id)
     if duplicate is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
@@ -461,6 +462,24 @@ def _require_claim(work: PipelineWork) -> None:
         )
 
 
+def _lock_article(session: Session, work: PipelineWork) -> None:
+    """Take ``FOR UPDATE`` on the work row's article before anything touches the work row.
+
+    ⚠️ Record first, work row second, in every writer that takes both — the order the reconciler
+    and ``advance()`` take them in. A writer that locks the work row first (an UPDATE on it) and
+    reaches the record only when its pending write is flushed at commit holds the pair in the
+    other order, and against a reconciler repairing the same article PostgreSQL detects a
+    deadlock and aborts one of them.
+
+    A missing article is left for the caller to report, which each does in its own words.
+    """
+    session.execute(
+        sa.select(CanonicalRecord.article_id)
+        .where(CanonicalRecord.article_id == work.article_id)
+        .with_for_update()
+    )
+
+
 def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> None:
     """Stop retrying: keep the row as the trace, and mark the article terminal.
 
@@ -472,13 +491,15 @@ def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> N
     two tables and no CHECK can state it.
 
     The row is written by a conditional UPDATE on our own claim, and refuses an unclaimed
-    instance, for the reasons ``release`` gives. Does not commit.
+    instance, for the reasons ``release`` gives. The article is locked before it — see
+    ``_lock_article``. Does not commit.
     """
     _require_claim(work)
     if work.article_id is None:
         raise ValueError(
             f"work {work.work_id} has a cluster subject; terminal_reason lives on an article"
         )
+    _lock_article(session, work)
     article = session.get(CanonicalRecord, work.article_id)
     if article is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")

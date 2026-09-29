@@ -86,7 +86,14 @@ def survey(session: Session) -> list[Discrepancy]:
 
     Reads every article that owes a stage or holds an open row, and classifies them in Python
     with ``owed_stage`` — the same function discovery and the repair use — rather than a second
-    copy of the rule in SQL. That is every in-flight article, which at this volume is small.
+    copy of the rule in SQL.
+
+    Two branches under one ``UNION``, still one statement and one snapshot. As a single ``OR``
+    over the outer-joined work row the planner cannot use the state index and walks every record
+    ever ingested — the finished ones are nearly all of them, and the scan grows by a year's
+    articles a year. Split, one branch reads the records that owe a stage (indexed on state) and
+    the other the records that hold an open row (the queue's size). An article in both appears
+    once, because ``UNION`` drops identical rows.
     """
     open_work = (
         sa.select(PipelineWork.article_id, PipelineWork.stage)
@@ -99,28 +106,31 @@ def survey(session: Session) -> list[Discrepancy]:
         .distinct()
         .subquery("dead")
     )
-    rows = session.execute(
-        sa.select(
-            CanonicalRecord.article_id,
-            CanonicalRecord.pipeline_state,
-            CanonicalRecord.terminal_reason,
-            open_work.c.stage,
-            dead.c.article_id.is_not(None),
-        )
+    columns = (
+        CanonicalRecord.article_id,
+        CanonicalRecord.pipeline_state,
+        CanonicalRecord.terminal_reason,
+        open_work.c.stage.label("queued"),
+        dead.c.article_id.is_not(None).label("dead_lettered"),
+    )
+    owing = (
+        sa.select(*columns)
         .select_from(CanonicalRecord)
         .outerjoin(open_work, open_work.c.article_id == CanonicalRecord.article_id)
         .outerjoin(dead, dead.c.article_id == CanonicalRecord.article_id)
         .where(
-            sa.or_(
-                sa.and_(
-                    CanonicalRecord.terminal_reason.is_(None),
-                    CanonicalRecord.pipeline_state.in_(_OWING_STATES),
-                ),
-                open_work.c.stage.is_not(None),
-            )
+            CanonicalRecord.terminal_reason.is_(None),
+            CanonicalRecord.pipeline_state.in_(_OWING_STATES),
         )
-        .order_by(CanonicalRecord.article_id)
-    ).all()
+    )
+    holding = (
+        sa.select(*columns)
+        .select_from(CanonicalRecord)
+        .join(open_work, open_work.c.article_id == CanonicalRecord.article_id)
+        .outerjoin(dead, dead.c.article_id == CanonicalRecord.article_id)
+    )
+    both = sa.union(owing, holding).subquery("both")
+    rows = session.execute(sa.select(both).order_by(both.c.article_id)).all()
     found = []
     for article_id, state, terminal, queued_value, dead_lettered in rows:
         owed = owed_stage(state, terminal)
@@ -139,6 +149,9 @@ def repair(session: Session, article_id: int) -> Discrepancy | None:
     record is locked ``FOR UPDATE`` first — the lock ``advance()`` and ``terminate()`` also
     take when they write the state — so either their change committed before this read and is
     seen, or they wait for this one.
+
+    ⚠️ Record, then work row: the order every writer that takes both must use
+    (``work_queue._lock_article``). The reverse order against this one is a deadlock.
 
     Returns what was found under the lock, or ``None`` if the article agrees with its queue
     now, or is gone. An ``UNMARKED_DEAD_LETTER`` is returned and not repaired.
@@ -225,8 +238,9 @@ class ReconcileReport:
     """What one run found, and how much work each stage holds."""
 
     repaired: Sequence[Discrepancy] = ()
-    #: Found by the survey and not repaired: an ``UNMARKED_DEAD_LETTER``, or a repair that
-    #: raised. Each is logged where it happened.
+    #: Found and not repaired: an ``UNMARKED_DEAD_LETTER``, as re-derived under the lock, or a
+    #: repair that raised — which carries the survey's reading, taken before the lock and
+    #: possibly overtaken since. Each is logged where it happened.
     unrepaired: Sequence[Discrepancy] = ()
     depth: Sequence[StageDepth] = ()
 

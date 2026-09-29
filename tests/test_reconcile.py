@@ -5,6 +5,9 @@ COMMITTED's per-statement snapshots are all load-bearing here.
 """
 
 import datetime as dt
+import threading
+import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -14,7 +17,7 @@ from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from meridian.db import reconcile, work_queue
-from meridian.db.models import PipelineWork
+from meridian.db.models import CanonicalRecord, PipelineWork
 from meridian.db.reconcile import Discrepancy, Kind
 from meridian.db.session import session_factory
 from tests.factories import make_article, make_cluster, make_source, make_work
@@ -262,11 +265,11 @@ def test_an_unmarked_dead_letter_is_reported_and_never_re_enqueued(app_session: 
     make_work(app_session, stage=Stage.ACQUIRE, article=article, dead_lettered_at=sa.func.now())
     app_session.commit()
 
+    unmarked = Discrepancy(article.article_id, Kind.UNMARKED_DEAD_LETTER, Stage.ACQUIRE, None)
+    assert reconcile.survey(app_session) == [unmarked]
     for _ in range(2):
         report = reconcile.run(app_session)
-        assert list(report.unrepaired) == [
-            Discrepancy(article.article_id, Kind.UNMARKED_DEAD_LETTER, Stage.ACQUIRE, None)
-        ]
+        assert list(report.unrepaired) == [unmarked]
         assert report.repaired == []
     (row,) = _rows_of(app_session, article.article_id)
     assert row.dead_lettered_at is not None
@@ -286,6 +289,151 @@ def test_a_repair_re_reads_the_article_under_its_lock(app_session: Session) -> N
 
     assert reconcile.repair(app_session, article.article_id) is None
     assert len(_rows_of(app_session, article.article_id)) == 1
+
+
+def _blocked_or_done(engine: sa.Engine, thread: threading.Thread, timeout: float = 10) -> None:
+    """Return once ``thread`` has finished or some backend is waiting on a lock.
+
+    What makes the lock tests deterministic without a sleep: the concurrent writer either gets
+    through (no lock in its way) or is seen queued behind one, and the test proceeds from
+    whichever happened.
+    """
+    deadline = time.monotonic() + timeout
+    with engine.connect() as probe:
+        while thread.is_alive() and time.monotonic() < deadline:
+            waiting = probe.scalar(
+                sa.text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+            probe.rollback()
+            if waiting:
+                return
+            time.sleep(0.01)
+    if thread.is_alive():
+        raise AssertionError("the concurrent writer neither finished nor waited on a lock")
+
+
+def _in_thread(work: Callable[[], None]) -> tuple[threading.Thread, list[BaseException]]:
+    errors: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            work()
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    return thread, errors
+
+
+def test_a_repair_holds_the_record_so_a_stage_cannot_complete_under_it(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """⚠️ The record lock is what makes a repair's two reads one decision. Without it a stage can
+    complete between them: the repair reads "owes acquire", ``advance()`` commits, the repair
+    then finds a dedup row, calls it the wrong stage, and puts acquire back — the article is
+    sent back a stage and acquired twice.
+
+    The advance is started the moment the repair's first statement has run, and must queue
+    behind the lock rather than complete.
+    """
+    source = make_source(app_session)
+    article = make_article(app_session, source)
+    make_work(app_session, stage=Stage.ACQUIRE, article=article)
+    app_session.commit()
+    article_id = article.article_id
+    started: list[threading.Thread] = []
+    errors: list[BaseException] = []
+
+    def advance() -> None:
+        with session_factory(app_migrated)() as other:
+            (work,) = work_queue.claim(other, stage=Stage.ACQUIRE, worker="w", lease=LEASE)
+            work_queue.advance(other, work)
+            other.commit()
+
+    def race(*_: Any) -> None:
+        if started:
+            return
+        thread, raised = _in_thread(advance)
+        started.append(thread)
+        errors.extend(raised)
+        _blocked_or_done(app_migrated, thread)
+
+    event.listen(app_migrated, "after_cursor_execute", race)
+    try:
+        outcome = reconcile.repair(app_session, article_id)
+    finally:
+        event.remove(app_migrated, "after_cursor_execute", race)
+    (thread,) = started
+    thread.join(timeout=10)
+
+    assert not errors
+    assert outcome is None
+    record = app_session.get(CanonicalRecord, article_id, populate_existing=True)
+    assert record is not None and record.pipeline_state is PipelineState.ACQUIRED
+    assert [row.stage for row in _rows_of(app_session, article_id)] == [Stage.DEDUP]
+
+
+def _work_row_is_free(engine: sa.Engine, work_id: int) -> bool:
+    """Can the work row be locked right now? False if another transaction holds it."""
+    with engine.connect() as probe:
+        try:
+            probe.execute(
+                sa.text("SELECT 1 FROM pipeline_work WHERE work_id = :id FOR UPDATE NOWAIT"),
+                {"id": work_id},
+            )
+        except sa.exc.OperationalError:
+            return False
+        finally:
+            probe.rollback()
+    return True
+
+
+@pytest.mark.parametrize("writer", ["dead_letter", "collapse"])
+def test_a_writer_takes_the_record_before_the_work_row(
+    app_session: Session, app_migrated: sa.Engine, writer: str
+) -> None:
+    """⚠️ Record, then work row — the order a repair takes them in. A writer that locks the work
+    row first and reaches the record later holds the pair the other way round, and against a
+    repair of the same article PostgreSQL detects a deadlock and aborts one of them.
+
+    The record is held from outside; the writer must queue behind it without having touched its
+    work row.
+    """
+    source = make_source(app_session)
+    other_source = make_source(app_session, "Other Publisher")
+    article = make_article(app_session, source, guid="copy", state=PipelineState.ACQUIRED)
+    into = make_article(app_session, other_source, guid="rep", state=PipelineState.DEDUPED)
+    stage = Stage.ACQUIRE if writer == "dead_letter" else Stage.DEDUP
+    work = make_work(app_session, stage=stage, article=article)
+    app_session.commit()
+    article_id, into_id, work_id = article.article_id, into.article_id, work.work_id
+
+    def write() -> None:
+        with session_factory(app_migrated)() as w:
+            (claimed,) = work_queue.claim(w, stage=stage, worker="w", lease=LEASE)
+            if writer == "dead_letter":
+                work_queue.dead_letter(w, claimed, error="boom")
+            else:
+                work_queue.collapse(w, claimed, into=into_id)
+            w.commit()
+
+    with app_migrated.connect() as holder:
+        holder.execute(
+            sa.text("SELECT 1 FROM canonical_record WHERE article_id = :id FOR UPDATE"),
+            {"id": article_id},
+        )
+        thread, errors = _in_thread(write)
+        _blocked_or_done(app_migrated, thread)
+        free = _work_row_is_free(app_migrated, work_id)
+        holder.rollback()
+    thread.join(timeout=10)
+
+    assert not errors
+    assert free, f"{writer} locked the work row before the article"
 
 
 def test_one_failed_repair_does_not_stop_the_rest(
