@@ -15,6 +15,7 @@ from meridian.db import work_queue
 from meridian.db.models import AlternateCopy, CanonicalRecord, PipelineWork, Source
 from meridian.db.session import session_factory
 from meridian.db.simhash import simhash_from_db, simhash_to_db
+from meridian.dedup import stage as dedup_stage
 from meridian.dedup.fingerprint import distance, fingerprint
 from meridian.dedup.stage import DedupReport, handle, run_batch
 from meridian.ingest.normalize import content_hash
@@ -477,3 +478,32 @@ def test_a_failure_does_not_touch_a_row_another_worker_has_reclaimed(
     assert row.dead_lettered_at is None
     article = app_session.get(CanonicalRecord, article_id)
     assert article is not None and article.terminal_reason is None
+
+
+def test_an_article_collapsed_by_another_worker_mid_batch_is_stale_not_failed(
+    app_session: Session, app_migrated: sa.Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Our lease ran out; the worker that reclaimed the row collapsed the article, taking the row
+    with it. We then finish the comparison, write the fingerprint and advance — onto a record
+    that is gone. Somebody else ended this work: ``stale``, not ``failed``.
+
+    ⚠️ The fingerprint is written onto the article before ``advance()`` runs, so a check that
+    flushed it first would fail as a ``StaleDataError`` and count a failure."""
+    source = make_source(app_session)
+    article = held(app_session, source, "gone", STORY, state=PipelineState.ACQUIRED, simhash=None)
+    make_work(app_session, stage=Stage.DEDUP, article=article)
+    app_session.commit()
+    article_id = article.article_id
+    find_match_impl = dedup_stage.find_match
+
+    def delete_then_match(*args: Any, **kw: Any) -> Any:
+        with app_migrated.begin() as other:
+            other.execute(
+                sa.text("DELETE FROM canonical_record WHERE article_id = :id"), {"id": article_id}
+            )
+        return find_match_impl(*args, **kw)
+
+    monkeypatch.setattr(dedup_stage, "find_match", delete_then_match)
+    report = run_batch(app_session, lease=LEASE, hamming_bits=H)
+
+    assert report == DedupReport(claimed=1, stale=1)

@@ -273,7 +273,7 @@ def collapse(session: Session, work: PipelineWork, *, into: int) -> bool:
             f"article {into} cannot collapse into itself; the match query returned its own row"
         )
 
-    _lock_article(session, work)
+    _lock_article(session, work, for_delete=True)
     duplicate = session.get(CanonicalRecord, work.article_id)
     if duplicate is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
@@ -469,7 +469,7 @@ def _require_claim(work: PipelineWork) -> None:
         )
 
 
-def _lock_article(session: Session, work: PipelineWork) -> None:
+def _lock_article(session: Session, work: PipelineWork, *, for_delete: bool = False) -> None:
     """Lock the work row's article before anything touches the work row.
 
     ⚠️ Record first, work row second, in every writer that takes both — the order the reconciler
@@ -483,18 +483,27 @@ def _lock_article(session: Session, work: PipelineWork) -> None:
     still excludes the reconciler's ``FOR UPDATE``, but not the ``FOR KEY SHARE`` a foreign-key
     child insert takes on its parent — so a writer that holds something else and then inserts a
     row referencing this article is not made to wait on it, and no new cycle is created.
+    ``for_delete`` takes ``FOR UPDATE`` from the start, for a writer that will delete the
+    article: taking the weaker lock and upgrading at the DELETE lets a ``FOR KEY SHARE`` in
+    between, and the DELETE then waits on it.
 
     Raises ``StaleWork`` if the article is gone. ``pipeline_work`` cascades from it, so the row
     went with it: somebody else ended this work — a collapse by the worker that reclaimed the
     row, a takedown. Checked here, against the database, because ``session.get`` answers from
     the identity map for an instance the caller still holds, and the write that follows would
     then fail as a ``StaleDataError`` instead.
+
+    ⚠️ Without autoflush. Stage handlers write their output onto the article before calling the
+    writer that ends the stage, and flushing that UPDATE here — before the check — raises the
+    ``StaleDataError`` this exists to turn into ``StaleWork``. It flushes at the discharge
+    instead, after the record is locked and known to exist.
     """
-    held = session.scalar(
-        sa.select(CanonicalRecord.article_id)
-        .where(CanonicalRecord.article_id == work.article_id)
-        .with_for_update(key_share=True)
-    )
+    with session.no_autoflush:
+        held = session.scalar(
+            sa.select(CanonicalRecord.article_id)
+            .where(CanonicalRecord.article_id == work.article_id)
+            .with_for_update(key_share=not for_delete)
+        )
     if held is None:
         raise StaleWork(
             f"article {work.article_id} is gone, and work {work.work_id} with it; "

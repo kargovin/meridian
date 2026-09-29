@@ -405,6 +405,10 @@ def test_a_writer_takes_the_record_before_the_work_row(
     row first and reaches the record later holds the pair the other way round, and against a
     repair of the same article PostgreSQL detects a deadlock and aborts one of them.
 
+    The record is held ``FOR SHARE``: the weakest lock a writer's must conflict with. Held
+    ``FOR UPDATE`` it would also queue a writer whose own lock is too weak to exclude another
+    writer (``FOR SHARE``, ``FOR KEY SHARE``), and that weakening would pass.
+
     The record is held from outside; the writer must queue behind it — still running when the
     work row is probed — without having touched its work row. ``advance`` is given a stale row
     for a stage its article has already passed, so the state write that would otherwise reach
@@ -436,7 +440,7 @@ def test_a_writer_takes_the_record_before_the_work_row(
 
     with app_migrated.connect() as holder:
         holder.execute(
-            sa.text("SELECT 1 FROM canonical_record WHERE article_id = :id FOR UPDATE"),
+            sa.text("SELECT 1 FROM canonical_record WHERE article_id = :id FOR SHARE"),
             {"id": article_id},
         )
         thread, errors = _in_thread(write)
@@ -483,15 +487,65 @@ def test_the_article_lock_does_not_block_a_foreign_key_to_it(
         app_session.rollback()
 
 
+def test_collapse_locks_the_copy_at_delete_strength_from_the_start(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """⚠️ Collapse deletes the copy. Locked at update strength first, the lock is upgraded at the
+    DELETE, and a ``FOR KEY SHARE`` taken in between — any insert referencing the copy — makes the
+    DELETE wait on it. Taken at delete strength from the start, the insert waits instead.
+
+    The insert is attempted the moment collapse's first lock on the copy has been taken."""
+    source = make_source(app_session)
+    other_source = make_source(app_session, "Other Publisher")
+    copy = make_article(app_session, source, guid="copy", state=PipelineState.ACQUIRED)
+    into = make_article(app_session, other_source, guid="rep", state=PipelineState.DEDUPED)
+    make_work(app_session, stage=Stage.DEDUP, article=copy)
+    app_session.commit()
+    copy_id, into_id = copy.article_id, into.article_id
+    (claimed,) = work_queue.claim(app_session, stage=Stage.DEDUP, worker="w", lease=LEASE)
+    outcome: list[str] = []
+
+    def insert_referencing_the_copy(conn: Any, cursor: Any, statement: str, *_: Any) -> None:
+        if outcome or "FROM canonical_record" not in statement or " FOR " not in statement:
+            return
+        with app_migrated.connect() as child:
+            child.execute(sa.text("SET lock_timeout = '500ms'"))
+            try:
+                child.execute(
+                    sa.text(
+                        "INSERT INTO alternate_copy (article_id, source_id, guid, url, seen_at) "
+                        "VALUES (:a, :s, 'alt', 'https://other.test/alt', now())"
+                    ),
+                    {"a": copy_id, "s": other_source.source_id},
+                )
+                outcome.append("inserted")
+            except sa.exc.OperationalError:
+                outcome.append("waited")
+            finally:
+                child.rollback()
+
+    event.listen(app_migrated, "after_cursor_execute", insert_referencing_the_copy)
+    try:
+        work_queue.collapse(app_session, claimed, into=into_id)
+    finally:
+        event.remove(app_migrated, "after_cursor_execute", insert_referencing_the_copy)
+    app_session.commit()
+
+    assert outcome == ["waited"]
+
+
+@pytest.mark.parametrize("dirty", [False, True], ids=["clean", "dirty"])
 @pytest.mark.parametrize("writer", ["advance", "terminate", "dead_letter", "collapse"])
 def test_a_writer_whose_article_is_gone_reports_stale_work(
-    app_session: Session, app_migrated: sa.Engine, writer: str
+    app_session: Session, app_migrated: sa.Engine, writer: str, dirty: bool
 ) -> None:
     """The article was removed — collapsed by the worker that reclaimed our row, taken down — and
     its work row cascaded with it. That is somebody else ending this work, not a failure of ours.
     ⚠️ The caller may still hold the article instance, and ``session.get`` then answers from the
     identity map: without the database check the write fails later as a ``StaleDataError``, and
-    the batch counts a failure."""
+    the batch counts a failure. ``dirty`` is the ordinary case — a stage handler has written its
+    output onto the article before the writer runs — and a check that autoflushes that write
+    first raises the ``StaleDataError`` before it can look."""
     source = make_source(app_session)
     other_source = make_source(app_session, "Other Publisher")
     article = make_article(app_session, source, guid="gone", state=PipelineState.ACQUIRED)
@@ -501,6 +555,8 @@ def test_a_writer_whose_article_is_gone_reports_stale_work(
     (claimed,) = work_queue.claim(app_session, stage=Stage.DEDUP, worker="w", lease=LEASE)
     held = app_session.get(CanonicalRecord, article.article_id)
     assert held is not None
+    if dirty:
+        held.lede = "written by the stage before the writer runs"
     with app_migrated.begin() as other:
         other.execute(
             sa.text("DELETE FROM canonical_record WHERE article_id = :id"),
