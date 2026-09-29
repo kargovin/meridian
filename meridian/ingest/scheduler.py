@@ -21,7 +21,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import Session, sessionmaker
 
-from meridian.db import runtime_config
+from meridian.db import reconcile, runtime_config
+from meridian.db.reconcile import Kind, ReconcileReport
 from meridian.db.runtime_config import IntKnob
 from meridian.dedup import stage as dedup
 from meridian.dedup.stage import DedupReport
@@ -63,6 +64,7 @@ log = logging.getLogger(__name__)
 JOB_ID = "discovery-poll"
 ACQUIRE_JOB_ID = "acquire-batch"
 DEDUP_JOB_ID = "dedup-batch"
+RECONCILE_JOB_ID = "work-queue-reconcile"
 
 
 def poll_interval_seconds(session: Session) -> int:
@@ -244,13 +246,14 @@ class AcquireScheduler(_CadencedJob[AcquireReport]):
         # that is usually quiet, and a line per empty batch buries the ones that matter.
         if report.claimed:
             log.info(
-                "acquire batch: claimed=%d acquired=%d dropped=%d failed=%d stale=%d "
-                "fetched=%d robots_blocked=%d refused=%d deferred=%d abandoned=%d "
+                "acquire batch: claimed=%d acquired=%d dropped=%d failed=%d dead_lettered=%d "
+                "stale=%d fetched=%d robots_blocked=%d refused=%d deferred=%d abandoned=%d "
                 "extract_empty=%d adapter_missing=%d withheld=%d",
                 report.claimed,
                 report.acquired,
                 report.dropped,
                 report.failed,
+                report.dead_lettered,
                 report.stale,
                 report.fetched,
                 report.robots_blocked,
@@ -315,3 +318,54 @@ class DedupScheduler(_CadencedJob[DedupReport]):
                 report.stale,
             )
         return report
+
+
+class ReconcileScheduler(_CadencedJob[ReconcileReport]):
+    """Runs the work-queue reconciler on the configured cadence (RFC §6.3).
+
+    Logs one line per run whether or not anything was repaired: the per-stage depth and the age
+    of each stage's oldest row are how a backlog is seen, and a backlog is visible only if the
+    line is there when nothing is wrong too. Anything repaired is a warning — see ``reconcile``.
+    """
+
+    job_id = RECONCILE_JOB_ID
+    knob = runtime_config.RECONCILE_INTERVAL_SECONDS
+
+    def __init__(
+        self,
+        sessions: sessionmaker[Session],
+        *,
+        scheduler: BackgroundScheduler | None = None,
+        run: Callable[[Session], ReconcileReport] = reconcile.run,
+    ) -> None:
+        super().__init__(sessions, scheduler=scheduler)
+        self._run = run
+
+    def _run_once(self, session: Session) -> ReconcileReport:
+        report = self._run(session)
+        stages = " ".join(f"{d.stage}={d.open}/{_age(d.oldest)}" for d in report.depth) or "empty"
+        line = (
+            "work queue reconcile: missing=%d wrong_stage=%d orphaned=%d unmarked_dead=%d "
+            "| open/oldest %s"
+        )
+        args = (
+            report.count(Kind.MISSING),
+            report.count(Kind.WRONG_STAGE),
+            report.count(Kind.ORPHANED),
+            report.count(Kind.UNMARKED_DEAD_LETTER),
+            stages,
+        )
+        if report.clean:
+            log.info(line, *args)
+        else:
+            log.warning(line, *args)
+        return report
+
+
+def _age(age: dt.timedelta) -> str:
+    """A queue age a human reads at a glance: 40s, 12m, 3h, 2d."""
+    seconds = int(age.total_seconds())
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"

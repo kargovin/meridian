@@ -1,4 +1,6 @@
-"""Claiming work rows, and deriving what the queue should hold (RFC §6.2)."""
+"""Claiming work rows, and the writes that end a stage (RFC §6.2).
+
+What the queue *should* hold is derived in ``reconcile``."""
 
 import datetime as dt
 from collections.abc import Sequence
@@ -7,21 +9,15 @@ import sqlalchemy as sa
 from meridian_contract import (
     ARTICLE_CHAIN,
     PROJECTABLE_STATE,
-    STAGE_OWED_BY_STATE,
     STAGE_SUCCESSOR,
     STATE_AFTER_STAGE,
-    PipelineState,
     Stage,
     TerminalReason,
-    owed_stage,
 )
 from sqlalchemy.orm import Session
 
 from meridian.db.models import AlternateCopy, CanonicalRecord, ClusterMember, PipelineWork
 from meridian.readmodel.project import project_article_cluster, project_cluster
-
-#: States that still owe an article stage — the filter for the rebuild derivation.
-_OWING_STATES = [state for state in PipelineState if STAGE_OWED_BY_STATE[state] is not None]
 
 
 def claim(
@@ -92,49 +88,6 @@ def claim(
     return claimed
 
 
-def expected_article_work(session: Session) -> set[tuple[int, Stage]]:
-    """``(article_id, stage)`` pairs the records say are owed.
-
-    Computed from ``pipeline_state`` and ``terminal_reason`` alone, which is what lets
-    ``pipeline_work`` be truncated and rebuilt rather than being a second source of truth.
-
-    Article work only. Summarize work has a cluster subject and derives from
-    ``Cluster.distinct_source_count`` and ``Summary.input_fingerprint`` instead.
-    """
-    rows = session.execute(
-        sa.select(
-            CanonicalRecord.article_id,
-            CanonicalRecord.pipeline_state,
-            CanonicalRecord.terminal_reason,
-        ).where(
-            CanonicalRecord.terminal_reason.is_(None),
-            CanonicalRecord.pipeline_state.in_(_OWING_STATES),
-        )
-    ).all()
-    owed = {(article_id, owed_stage(state, terminal)) for article_id, state, terminal in rows}
-    return {(article_id, stage) for article_id, stage in owed if stage is not None}
-
-
-def open_article_work(session: Session) -> set[tuple[int, Stage]]:
-    """``(article_id, stage)`` pairs the queue currently holds, excluding dead-lettered rows."""
-    rows = session.execute(
-        sa.select(PipelineWork.article_id, PipelineWork.stage).where(
-            PipelineWork.article_id.is_not(None),
-            PipelineWork.dead_lettered_at.is_(None),
-        )
-    ).all()
-    return {(article_id, stage) for article_id, stage in rows if article_id is not None}
-
-
-def missing_article_work(session: Session) -> set[tuple[int, Stage]]:
-    """What the records say is owed but the queue does not hold.
-
-    A healthy system returns the empty set; a non-zero result is a defect in a stage handler,
-    not a repair to absorb quietly (RFC §6.3).
-    """
-    return expected_article_work(session) - open_article_work(session)
-
-
 class StaleWork(Exception):
     """The work row is no longer ours to complete — another worker discharged it first.
 
@@ -153,8 +106,8 @@ def _check_subject(work: PipelineWork) -> None:
 
     ``exactly_one_subject`` enforces that a row has one subject, not that it has the *right*
     one. A row with ``stage='acquire'`` and a cluster subject otherwise advances silently to a
-    successor row that is also mis-subjected — and both ``expected_article_work`` and
-    ``open_article_work`` skip cluster rows, so the reconciler can never see it. ``terminate``
+    successor row that is also mis-subjected — and the reconciler surveys article rows only,
+    so it can never see it. ``terminate``
     already refuses this; the two are symmetric on purpose.
     """
     if work.stage in _ARTICLE_STAGES:
@@ -220,6 +173,12 @@ def advance(session: Session, work: PipelineWork) -> None:
     new_state = STATE_AFTER_STAGE[work.stage]
     successor = STAGE_SUCCESSOR[work.stage]
 
+    # ⚠️ Explicitly, not through the state write's autoflush: a record whose state already
+    # equals ``new_state`` (a stale row for a stage it has passed) has nothing to flush, and the
+    # record would then be reached only by the successor's foreign key — after the work row.
+    if work.article_id is not None:
+        _lock_article(session, work)
+
     if work.article_id is not None and new_state is not None:
         article = session.get(CanonicalRecord, work.article_id)
         if article is None:
@@ -253,7 +212,7 @@ def terminate(session: Session, work: PipelineWork, reason: TerminalReason) -> N
     """The article stops here for good: record why, discharge the work row, enqueue nothing.
 
     Not a failure path. A dropped article is a decision, and the row survives it deliberately:
-    ``expected_article_work`` skips records with a ``terminal_reason``, so nothing re-enqueues
+    ``owed_stage`` owes nothing to a record with a ``terminal_reason``, so nothing re-enqueues
     it, and discovery's ``UNIQUE(source_id, guid)`` recognises it on the next poll and inserts
     nothing. Delete the record instead and every poll rediscovers, re-decides and re-drops the
     same article forever, hitting the publisher each time.
@@ -267,6 +226,7 @@ def terminate(session: Session, work: PipelineWork, reason: TerminalReason) -> N
         raise ValueError(
             f"work {work.work_id} has a cluster subject; terminal_reason lives on an article"
         )
+    _lock_article(session, work)
     article = session.get(CanonicalRecord, work.article_id)
     if article is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
@@ -313,6 +273,7 @@ def collapse(session: Session, work: PipelineWork, *, into: int) -> bool:
             f"article {into} cannot collapse into itself; the match query returned its own row"
         )
 
+    _lock_article(session, work)
     duplicate = session.get(CanonicalRecord, work.article_id)
     if duplicate is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
@@ -508,23 +469,45 @@ def _require_claim(work: PipelineWork) -> None:
         )
 
 
+def _lock_article(session: Session, work: PipelineWork) -> None:
+    """Take ``FOR UPDATE`` on the work row's article before anything touches the work row.
+
+    ⚠️ Record first, work row second, in every writer that takes both — the order the reconciler
+    takes them in. A writer that locks the work row first (an UPDATE or DELETE on it) and
+    reaches the record only later — its pending write flushed at commit, or a successor's
+    foreign key — holds the pair in the other order, and against a reconciler repairing the
+    same article PostgreSQL detects a deadlock and aborts one of them. Taken explicitly rather
+    than left to an autoflush, which writes only what changed.
+
+    A missing article is left for the caller to report, which each does in its own words.
+    """
+    session.execute(
+        sa.select(CanonicalRecord.article_id)
+        .where(CanonicalRecord.article_id == work.article_id)
+        .with_for_update()
+    )
+
+
 def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> None:
     """Stop retrying: keep the row as the trace, and mark the article terminal.
 
-    ⚠️ Both writes, or the reconciler resurrects its own dead letters. ``open_article_work``
-    excludes dead-lettered rows and ``expected_article_work`` only excludes articles carrying a
-    ``terminal_reason`` — so a dead-lettered row alone reads as work owed forever, and the
-    re-enqueue succeeds because the open-row index also ignores dead-lettered rows. This spans
+    ⚠️ Both writes, or the article reads as owing work forever. The reconciler counts only
+    open rows as queued and owes nothing only to an article carrying a ``terminal_reason`` — so a
+    dead-lettered row alone reads as work owed and not queued, and a re-enqueue would succeed
+    because the open-row index also ignores dead-lettered rows. The reconciler refuses to
+    re-enqueue it and reports it instead (``Kind.UNMARKED_DEAD_LETTER``). This spans
     two tables and no CHECK can state it.
 
     The row is written by a conditional UPDATE on our own claim, and refuses an unclaimed
-    instance, for the reasons ``release`` gives. Does not commit.
+    instance, for the reasons ``release`` gives. The article is locked before it — see
+    ``_lock_article``. Does not commit.
     """
     _require_claim(work)
     if work.article_id is None:
         raise ValueError(
             f"work {work.work_id} has a cluster subject; terminal_reason lives on an article"
         )
+    _lock_article(session, work)
     article = session.get(CanonicalRecord, work.article_id)
     if article is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")

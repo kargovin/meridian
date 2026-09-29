@@ -50,7 +50,7 @@ interface other teams have built against, and is reviewed as one.
 | Language | Python 3.12, both deployables |
 | Web | FastAPI + Uvicorn; the published contract is generated from Pydantic |
 | Storage | PostgreSQL 16; SQLAlchemy 2.x + Alembic |
-| Work queue | `pipeline_state` on the canonical record, claimed with `SELECT … FOR UPDATE SKIP LOCKED`. No broker |
+| Work queue | A `pipeline_work` table claimed with `SELECT … FOR UPDATE SKIP LOCKED`, derivable from `pipeline_state` on the canonical record; a periodic reconciler holds the two together and reports per-stage depth. No broker |
 | Scheduling | APScheduler in-process; poll cadence is configuration, not a constant |
 | Classification | Fine-tuned DeBERTa-v3-base on CPU, with temperature scaling |
 | Clustering | SimHash near-duplicate detection → BGE-small embeddings → leader-follower + batch reconciliation. No vector database, no ANN index |
