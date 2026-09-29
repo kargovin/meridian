@@ -470,7 +470,7 @@ def _require_claim(work: PipelineWork) -> None:
 
 
 def _lock_article(session: Session, work: PipelineWork) -> None:
-    """Take ``FOR UPDATE`` on the work row's article before anything touches the work row.
+    """Lock the work row's article before anything touches the work row.
 
     ⚠️ Record first, work row second, in every writer that takes both — the order the reconciler
     takes them in. A writer that locks the work row first (an UPDATE or DELETE on it) and
@@ -479,13 +479,27 @@ def _lock_article(session: Session, work: PipelineWork) -> None:
     same article PostgreSQL detects a deadlock and aborts one of them. Taken explicitly rather
     than left to an autoflush, which writes only what changed.
 
-    A missing article is left for the caller to report, which each does in its own words.
+    ⚠️ ``FOR NO KEY UPDATE``, not ``FOR UPDATE``: the strength of the UPDATE it stands in for. It
+    still excludes the reconciler's ``FOR UPDATE``, but not the ``FOR KEY SHARE`` a foreign-key
+    child insert takes on its parent — so a writer that holds something else and then inserts a
+    row referencing this article is not made to wait on it, and no new cycle is created.
+
+    Raises ``StaleWork`` if the article is gone. ``pipeline_work`` cascades from it, so the row
+    went with it: somebody else ended this work — a collapse by the worker that reclaimed the
+    row, a takedown. Checked here, against the database, because ``session.get`` answers from
+    the identity map for an instance the caller still holds, and the write that follows would
+    then fail as a ``StaleDataError`` instead.
     """
-    session.execute(
+    held = session.scalar(
         sa.select(CanonicalRecord.article_id)
         .where(CanonicalRecord.article_id == work.article_id)
-        .with_for_update()
+        .with_for_update(key_share=True)
     )
+    if held is None:
+        raise StaleWork(
+            f"article {work.article_id} is gone, and work {work.work_id} with it; "
+            "another writer ended this work"
+        )
 
 
 def dead_letter(session: Session, work: PipelineWork, *, error: str | None) -> None:
