@@ -173,6 +173,12 @@ def advance(session: Session, work: PipelineWork) -> None:
     new_state = STATE_AFTER_STAGE[work.stage]
     successor = STAGE_SUCCESSOR[work.stage]
 
+    # ⚠️ Explicitly, not through the state write's autoflush: a record whose state already
+    # equals ``new_state`` (a stale row for a stage it has passed) has nothing to flush, and the
+    # record would then be reached only by the successor's foreign key — after the work row.
+    if work.article_id is not None:
+        _lock_article(session, work)
+
     if work.article_id is not None and new_state is not None:
         article = session.get(CanonicalRecord, work.article_id)
         if article is None:
@@ -220,6 +226,7 @@ def terminate(session: Session, work: PipelineWork, reason: TerminalReason) -> N
         raise ValueError(
             f"work {work.work_id} has a cluster subject; terminal_reason lives on an article"
         )
+    _lock_article(session, work)
     article = session.get(CanonicalRecord, work.article_id)
     if article is None:
         raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
@@ -466,10 +473,11 @@ def _lock_article(session: Session, work: PipelineWork) -> None:
     """Take ``FOR UPDATE`` on the work row's article before anything touches the work row.
 
     ⚠️ Record first, work row second, in every writer that takes both — the order the reconciler
-    and ``advance()`` take them in. A writer that locks the work row first (an UPDATE on it) and
-    reaches the record only when its pending write is flushed at commit holds the pair in the
-    other order, and against a reconciler repairing the same article PostgreSQL detects a
-    deadlock and aborts one of them.
+    takes them in. A writer that locks the work row first (an UPDATE or DELETE on it) and
+    reaches the record only later — its pending write flushed at commit, or a successor's
+    foreign key — holds the pair in the other order, and against a reconciler repairing the
+    same article PostgreSQL detects a deadlock and aborts one of them. Taken explicitly rather
+    than left to an autoflush, which writes only what changed.
 
     A missing article is left for the caller to report, which each does in its own words.
     """

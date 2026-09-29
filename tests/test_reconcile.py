@@ -199,6 +199,10 @@ def test_a_wrong_stage_row_is_replaced_not_added_to(app_session: Session) -> Non
     stale = make_work(app_session, stage=Stage.CLUSTER, article=article)
     app_session.commit()
 
+    # In both of the survey's branches — it owes a stage and holds a row — and listed once.
+    assert reconcile.survey(app_session) == [
+        Discrepancy(article.article_id, Kind.WRONG_STAGE, Stage.DEDUP, Stage.CLUSTER)
+    ]
     report = reconcile.run(app_session)
 
     assert list(report.repaired) == [
@@ -345,8 +349,8 @@ def test_a_repair_holds_the_record_so_a_stage_cannot_complete_under_it(
     make_work(app_session, stage=Stage.ACQUIRE, article=article)
     app_session.commit()
     article_id = article.article_id
-    started: list[threading.Thread] = []
-    errors: list[BaseException] = []
+    fired: list[bool] = []
+    ran: list[tuple[threading.Thread, list[BaseException]]] = []
 
     def advance() -> None:
         with session_factory(app_migrated)() as other:
@@ -355,11 +359,11 @@ def test_a_repair_holds_the_record_so_a_stage_cannot_complete_under_it(
             other.commit()
 
     def race(*_: Any) -> None:
-        if started:
+        if fired:
             return
+        fired.append(True)
         thread, raised = _in_thread(advance)
-        started.append(thread)
-        errors.extend(raised)
+        ran.append((thread, raised))
         _blocked_or_done(app_migrated, thread)
 
     event.listen(app_migrated, "after_cursor_execute", race)
@@ -367,9 +371,10 @@ def test_a_repair_holds_the_record_so_a_stage_cannot_complete_under_it(
         outcome = reconcile.repair(app_session, article_id)
     finally:
         event.remove(app_migrated, "after_cursor_execute", race)
-    (thread,) = started
+    ((thread, errors),) = ran
     thread.join(timeout=10)
 
+    assert not thread.is_alive()
     assert not errors
     assert outcome is None
     record = app_session.get(CanonicalRecord, article_id, populate_existing=True)
@@ -392,7 +397,7 @@ def _work_row_is_free(engine: sa.Engine, work_id: int) -> bool:
     return True
 
 
-@pytest.mark.parametrize("writer", ["dead_letter", "collapse"])
+@pytest.mark.parametrize("writer", ["dead_letter", "collapse", "advance", "terminate"])
 def test_a_writer_takes_the_record_before_the_work_row(
     app_session: Session, app_migrated: sa.Engine, writer: str
 ) -> None:
@@ -401,13 +406,15 @@ def test_a_writer_takes_the_record_before_the_work_row(
     repair of the same article PostgreSQL detects a deadlock and aborts one of them.
 
     The record is held from outside; the writer must queue behind it without having touched its
-    work row.
+    work row. ``advance`` is given a stale row for a stage its article has already passed, so the
+    state write that would otherwise reach the record first through autoflush has nothing to
+    write.
     """
     source = make_source(app_session)
     other_source = make_source(app_session, "Other Publisher")
     article = make_article(app_session, source, guid="copy", state=PipelineState.ACQUIRED)
     into = make_article(app_session, other_source, guid="rep", state=PipelineState.DEDUPED)
-    stage = Stage.ACQUIRE if writer == "dead_letter" else Stage.DEDUP
+    stage = Stage.DEDUP if writer == "collapse" else Stage.ACQUIRE
     work = make_work(app_session, stage=stage, article=article)
     app_session.commit()
     article_id, into_id, work_id = article.article_id, into.article_id, work.work_id
@@ -417,8 +424,12 @@ def test_a_writer_takes_the_record_before_the_work_row(
             (claimed,) = work_queue.claim(w, stage=stage, worker="w", lease=LEASE)
             if writer == "dead_letter":
                 work_queue.dead_letter(w, claimed, error="boom")
-            else:
+            elif writer == "collapse":
                 work_queue.collapse(w, claimed, into=into_id)
+            elif writer == "advance":
+                work_queue.advance(w, claimed)
+            else:
+                work_queue.terminate(w, claimed, TerminalReason.DROPPED_LANGUAGE)
             w.commit()
 
     with app_migrated.connect() as holder:
