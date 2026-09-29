@@ -549,6 +549,9 @@ def test_an_article_deleted_mid_batch_does_not_take_down_the_rest(app_session: S
             )
             session.commit()
             session.expire_all()
+            # An unexpected error, not the handler's own "gone" check — which reports StaleWork
+            # and never reaches the generic branch this test is for.
+            raise RuntimeError("the takedown raced the handler")
         return _handle(session, work, **kw)
 
     with pytest.MonkeyPatch.context() as patch:
@@ -562,3 +565,32 @@ def test_an_article_deleted_mid_batch_does_not_take_down_the_rest(app_session: S
         survivor = app_session.get(CanonicalRecord, article.article_id)
         assert survivor is not None
         assert survivor.pipeline_state is PipelineState.ACQUIRED
+
+
+def test_an_article_gone_before_the_handler_loads_it_is_stale_not_failed(
+    app_session: Session, app_migrated: sa.Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removed between the claim and the handler — a takedown, or a collapse by the worker that
+    reclaimed the row — and the work row cascaded with it. Somebody else ended this work."""
+    source = make_source(app_session)
+    article = make_article(app_session, source, title="Storm Bertha closes the ports")
+    make_work(app_session, stage=Stage.ACQUIRE, article=article)
+    app_session.commit()
+    article_id = article.article_id
+    real_claim = work_queue.claim
+
+    def claim_then_delete(*args: Any, **kw: Any) -> Any:
+        claimed = real_claim(*args, **kw)
+        with app_migrated.begin() as other:
+            other.execute(
+                sa.text("DELETE FROM canonical_record WHERE article_id = :id"), {"id": article_id}
+            )
+        return claimed
+
+    # The batch's session has not loaded this article, as in a running process; a held
+    # instance would answer ``session.get`` from the identity map and hide the deletion.
+    app_session.expunge_all()
+    monkeypatch.setattr("meridian.ingest.acquire.work_queue.claim", claim_then_delete)
+    report = run_batch(app_session, network=NETWORK, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, stale=1)

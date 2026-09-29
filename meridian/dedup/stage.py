@@ -180,7 +180,12 @@ def handle(session: Session, work: PipelineWork, *, hamming_bits: int) -> DedupR
     """Run the stage for one work row and end it — advanced or collapsed. Commits once."""
     article = session.get(CanonicalRecord, work.article_id)
     if article is None:
-        raise ValueError(f"work {work.work_id} names article {work.article_id}, which is gone")
+        # The work row cascades from the article, so it went too: somebody else ended this work
+        # — a collapse by the worker that reclaimed the row, a takedown. Not a failure of ours.
+        raise work_queue.StaleWork(
+            f"article {work.article_id} is gone, and work {work.work_id} with it; "
+            "another writer ended this work"
+        )
 
     if article.body_text is None:
         work_queue.advance(session, work)

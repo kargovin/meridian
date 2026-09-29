@@ -507,3 +507,32 @@ def test_an_article_collapsed_by_another_worker_mid_batch_is_stale_not_failed(
     report = run_batch(app_session, lease=LEASE, hamming_bits=H)
 
     assert report == DedupReport(claimed=1, stale=1)
+
+
+def test_an_article_gone_before_the_handler_loads_it_is_stale_not_failed(
+    app_session: Session, app_migrated: sa.Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same removal landing a moment earlier — between the claim and the handler loading the
+    article. Dedup has no heartbeat between rows, so any row in a batch can meet it."""
+    source = make_source(app_session)
+    article = held(app_session, source, "gone", STORY, state=PipelineState.ACQUIRED, simhash=None)
+    make_work(app_session, stage=Stage.DEDUP, article=article)
+    app_session.commit()
+    article_id = article.article_id
+    real_claim = work_queue.claim
+
+    def claim_then_delete(*args: Any, **kw: Any) -> Any:
+        claimed = real_claim(*args, **kw)
+        with app_migrated.begin() as other:
+            other.execute(
+                sa.text("DELETE FROM canonical_record WHERE article_id = :id"), {"id": article_id}
+            )
+        return claimed
+
+    # The batch's session has not loaded this article, as in a running process; a held
+    # instance would answer ``session.get`` from the identity map and hide the deletion.
+    app_session.expunge_all()
+    monkeypatch.setattr("meridian.dedup.stage.work_queue.claim", claim_then_delete)
+    report = run_batch(app_session, lease=LEASE, hamming_bits=H)
+
+    assert report == DedupReport(claimed=1, stale=1)
