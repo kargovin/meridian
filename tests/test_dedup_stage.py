@@ -19,7 +19,7 @@ from meridian.dedup import stage as dedup_stage
 from meridian.dedup.fingerprint import distance, fingerprint
 from meridian.dedup.stage import DedupReport, handle, run_batch
 from meridian.ingest.normalize import content_hash
-from tests.factories import make_article, make_source, make_work
+from tests.factories import make_article, make_cluster, make_source, make_work
 
 pytestmark = pytest.mark.postgres
 
@@ -536,3 +536,56 @@ def test_an_article_gone_before_the_handler_loads_it_is_stale_not_failed(
     report = run_batch(app_session, lease=LEASE, hamming_bits=H)
 
     assert report == DedupReport(claimed=1, stale=1)
+
+
+def test_a_stolen_row_leaves_no_fingerprint_behind(app_session: Session) -> None:
+    """Another worker finished the row while our lease was expired; our discharge is refused as
+    stale. The fingerprint our handler wrote before it must go with the rollback — the next
+    article in the batch commits, and would otherwise carry it in."""
+    source = make_source(app_session)
+    other = make_source(app_session, "Other Publisher")
+    stolen = held(app_session, source, "stolen", STORY, state=PipelineState.ACQUIRED, simhash=None)
+    make_work(
+        app_session,
+        stage=Stage.DEDUP,
+        article=stolen,
+        next_attempt_at=dt.datetime.now(dt.UTC) - dt.timedelta(minutes=1),
+    )
+    arrival(app_session, other, "next", body(7))
+    app_session.commit()
+    stolen_id = stolen.article_id
+    real = handle
+
+    def steal_then_handle(session: Session, work: PipelineWork, **kw: Any) -> DedupReport:
+        if work.article_id == stolen_id:
+            session.execute(sa.delete(PipelineWork).where(PipelineWork.work_id == work.work_id))
+            session.commit()
+        return real(session, work, **kw)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("meridian.dedup.stage.handle", steal_then_handle)
+        report = run_batch(app_session, lease=LEASE, hamming_bits=H)
+
+    assert report == DedupReport(claimed=2, advanced=1, stale=1)
+    app_session.expire_all()
+    assert (
+        app_session.scalar(
+            sa.select(CanonicalRecord.simhash).where(CanonicalRecord.article_id == stolen_id)
+        )
+        is None
+    )
+
+
+def test_a_row_with_a_cluster_subject_fails_rather_than_reading_as_stale(
+    app_session: Session,
+) -> None:
+    """Dedup acts on an article; a row naming a cluster is a defect upstream, reported as one."""
+    make_work(app_session, stage=Stage.DEDUP, cluster=make_cluster(app_session))
+    app_session.commit()
+
+    report = run_batch(app_session, lease=LEASE, hamming_bits=H)
+
+    assert report == DedupReport(claimed=1, failed=1)
+    app_session.expire_all()
+    (row,) = app_session.scalars(sa.select(PipelineWork)).all()
+    assert row.last_error is not None and "has a cluster subject" in row.last_error

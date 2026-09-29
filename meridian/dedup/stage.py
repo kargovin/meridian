@@ -178,6 +178,9 @@ def find_match(
 
 def handle(session: Session, work: PipelineWork, *, hamming_bits: int) -> DedupReport:
     """Run the stage for one work row and end it — advanced or collapsed. Commits once."""
+    # First: a row with a cluster subject has no article to load, and would otherwise read as
+    # one that is gone — stale, when it is a defect in whatever enqueued it.
+    work_queue.check_subject(work)
     article = session.get(CanonicalRecord, work.article_id)
     if article is None:
         # The work row cascades from the article, so it went too: somebody else ended this work

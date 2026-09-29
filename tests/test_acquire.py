@@ -502,8 +502,16 @@ def test_a_stolen_row_does_not_take_down_the_rest_of_the_batch(app_session: Sess
         survivor = app_session.get(CanonicalRecord, article.article_id)
         assert survivor is not None
         assert survivor.pipeline_state is PipelineState.ACQUIRED
-    # The stolen article keeps whatever the other worker left it at, and owes nothing extra.
+    # The stolen article keeps whatever the other worker left it at, and owes nothing extra —
+    # and nothing our handler wrote onto it before the discharge refused survives: the StaleWork
+    # branch's rollback discards it, or the next article's commit would carry it in.
     assert _queued(app_session, stolen.article_id) == []
+    untouched = app_session.execute(
+        sa.select(CanonicalRecord.pipeline_state, CanonicalRecord.language).where(
+            CanonicalRecord.article_id == stolen.article_id
+        )
+    ).one()
+    assert tuple(untouched) == (PipelineState.DISCOVERED, None)
 
 
 def test_advance_refuses_a_stage_and_subject_that_do_not_match(app_session: Session) -> None:
@@ -526,7 +534,10 @@ def test_an_article_deleted_mid_batch_does_not_take_down_the_rest(app_session: S
     """⚠️ The case that reaches the *generic* failure branch with a row that no longer exists.
 
     A takedown removing an article is a real operation (RFC §10), and ``pipeline_work`` cascades
-    on ``article_id``, so the work row goes with it. The handler then raises — and before the
+    on ``article_id``, so the work row goes with it. A deletion alone now reaches the StaleWork
+    branch (the handler and ``_lock_article`` both report a gone article as stale); the generic
+    branch meets a gone row only when some other error follows the deletion, which is why this
+    test raises one itself. The handler then raises — and before the
     fix the guard raised *while logging that failure*: ``work.article_id`` on a rolled-back,
     deleted instance re-queries a row that is gone and throws ``ObjectDeletedError``, which
     escaped ``run_batch`` and stranded every remaining article in the batch.
@@ -594,3 +605,21 @@ def test_an_article_gone_before_the_handler_loads_it_is_stale_not_failed(
     report = run_batch(app_session, network=NETWORK, lease=LEASE)
 
     assert report == AcquireReport(claimed=1, stale=1)
+
+
+def test_a_row_with_a_cluster_subject_fails_rather_than_reading_as_stale(
+    app_session: Session,
+) -> None:
+    """A defect in whatever enqueued it: acquire acts on an article. With no article to load it
+    must not read as one somebody else removed — stale is silent, and the row would be re-taken
+    every lease with nothing written about why."""
+    make_work(app_session, stage=Stage.ACQUIRE, cluster=make_cluster(app_session))
+    app_session.commit()
+
+    report = run_batch(app_session, network=NETWORK, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, failed=1)
+    app_session.expire_all()
+    (row,) = app_session.scalars(sa.select(PipelineWork)).all()
+    assert row.claimed_by is None
+    assert row.last_error is not None and "has a cluster subject" in row.last_error

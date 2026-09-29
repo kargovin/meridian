@@ -101,7 +101,7 @@ class StaleWork(Exception):
 _ARTICLE_STAGES = frozenset(stage for stage, _ in ARTICLE_CHAIN)
 
 
-def _check_subject(work: PipelineWork) -> None:
+def check_subject(work: PipelineWork) -> None:
     """Refuse a work row whose subject is the wrong kind for its stage.
 
     ``exactly_one_subject`` enforces that a row has one subject, not that it has the *right*
@@ -169,7 +169,7 @@ def advance(session: Session, work: PipelineWork) -> None:
     Raises ``StaleWork`` if the row has already been discharged — see ``_discharge``. The
     caller must not treat that as a completion.
     """
-    _check_subject(work)
+    check_subject(work)
     new_state = STATE_AFTER_STAGE[work.stage]
     successor = STAGE_SUCCESSOR[work.stage]
 
