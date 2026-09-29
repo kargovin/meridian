@@ -397,14 +397,16 @@ def test_the_match_threshold_is_read_on_every_batch(sessions: sessionmaker[Sessi
     assert seen == [DEDUP_HAMMING_BITS.default, 7]
 
 
-def _five_bits_apart(
-    session: Session, first: Source, second: Source, *, seed: int, guid: str
-) -> None:
+#: Past the default threshold and inside the knob's bounds, so only a raised knob collapses it.
+_APART = DEDUP_HAMMING_BITS.default + 2
+
+
+def _bits_apart(session: Session, first: Source, second: Source, *, seed: int, guid: str) -> None:
     """A held record from ``first`` and an arrival from ``second``: unrelated bodies, so
-    nothing but the fingerprint can match them, with the held fingerprint set five bits from
+    nothing but the fingerprint can match them, with the held fingerprint set ``_APART`` bits from
     what the stage will compute for the arrival."""
     copy = body(seed + 1)
-    near = flip(fingerprint(copy) or 0, 5)
+    near = flip(fingerprint(copy) or 0, _APART)
     held(session, first, f"held-{guid}", body(seed), simhash=simhash_to_db(near))
     arrival(session, second, guid, copy)
 
@@ -413,13 +415,13 @@ def test_the_real_batch_collapses_at_the_threshold_the_knob_holds(
     sessions: sessionmaker[Session],
 ) -> None:
     """The default ``run`` against real rows, so the job's call matches ``run_batch``'s
-    signature — every other test here injects a stub. At the default of 3 a pair five bits
-    apart stays two stories; raising the knob to 5 collapses the next such pair without a
+    signature — every other test here injects a stub. At the default a pair two bits past it
+    stays two stories; raising the knob to that distance collapses the next such pair without a
     restart."""
     with sessions() as session:
         first = make_source(session, "First Publisher")
         second = make_source(session, "Second Publisher")
-        _five_bits_apart(session, first, second, seed=11, guid="below")
+        _bits_apart(session, first, second, seed=11, guid="below")
         session.commit()
     scheduler = _dedup(sessions, StubScheduler())
     scheduler.start()
@@ -427,9 +429,9 @@ def test_the_real_batch_collapses_at_the_threshold_the_knob_holds(
     assert scheduler.tick() == DedupReport(claimed=1, advanced=1)
 
     with sessions() as session:
-        _five_bits_apart(session, session.merge(first), session.merge(second), seed=21, guid="at")
+        _bits_apart(session, session.merge(first), session.merge(second), seed=21, guid="at")
         session.commit()
-    _set_knob(sessions, DEDUP_HAMMING_BITS, 5)
+    _set_knob(sessions, DEDUP_HAMMING_BITS, _APART)
 
     assert scheduler.tick() == DedupReport(claimed=1, collapsed=1, near=1)
     with sessions() as session:

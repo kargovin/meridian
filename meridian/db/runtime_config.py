@@ -101,9 +101,14 @@ DEDUP_INTERVAL_SECONDS = IntKnob(
 #: ⚠️ The ceiling is set below the nearest *unrelated* pair measured on the roster (14 bits,
 #: two articles sharing one publisher's boilerplate; 17 across publishers; unrelated bodies
 #: centre at 32). Raising it past that collapses articles that are not copies.
+#:
+#: ⚠️ The default sits above the largest shift a credit line alone produced on real bodies
+#: (0 to 4 bits over six republications); at 3, two of those six survive as separate stories. No
+#: wire copy has been observed yet, so 5 is a working value inside a 4-to-6 band, not a
+#: measured optimum.
 DEDUP_HAMMING_BITS = IntKnob(
     key="dedup_hamming_bits",
-    default=3,
+    default=5,
     minimum=0,
     maximum=10,
     summary="Fingerprint bits two bodies may differ by and still count as one article. 0 "

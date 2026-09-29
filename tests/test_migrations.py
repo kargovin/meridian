@@ -19,6 +19,8 @@ _BELOW_TIER_0 = "9f21c4a7e0bd"
 _BELOW_DEDUP = "c3e1fa9f2e61"
 #: The revision below ``5b8e1d07a4c2``, the dedup knobs.
 _BELOW_DEDUP_KNOBS = "d3cdd889525c"
+#: The revision below ``95fea1045f0d``, the match threshold's move from 3 to 5.
+_BELOW_THRESHOLD_5 = "5b8e1d07a4c2"
 
 
 def test_models_and_migration_agree(app_migrated: sa.Engine, app_alembic_config: Config) -> None:
@@ -181,5 +183,51 @@ def test_downgrading_past_the_dedup_knobs_removes_their_rows_alone(
             command.downgrade(app_alembic_config, _BELOW_DEDUP_KNOBS)
             keys = set(conn.execute(sa.text("SELECT key FROM runtime_config")).scalars())
             assert keys == {"poll_interval_seconds", "acquire_interval_seconds"}
+        finally:
+            command.upgrade(app_alembic_config, "head")
+
+
+def _threshold(conn: sa.Connection) -> str:
+    value: str = conn.execute(
+        sa.text("SELECT value FROM runtime_config WHERE key = 'dedup_hamming_bits'")
+    ).scalar_one()
+    return value
+
+
+def _set_threshold(conn: sa.Connection, value: str) -> None:
+    conn.execute(
+        sa.text("UPDATE runtime_config SET value = :v WHERE key = 'dedup_hamming_bits'"),
+        {"v": value},
+    )
+
+
+@pytest.mark.parametrize(("stored", "after"), [("3", "5"), ("7", "7")])
+def test_the_threshold_migration_moves_only_the_old_default(
+    app_migrated: sa.Engine, app_alembic_config: Config, stored: str, after: str
+) -> None:
+    """Revision 95fea1045f0d up: a database still at 3 moves to 5; a value somebody set by hand
+    is theirs and stays."""
+    with app_migrated.begin() as conn:
+        app_alembic_config.attributes["connection"] = conn
+        try:
+            command.downgrade(app_alembic_config, _BELOW_THRESHOLD_5)
+            _set_threshold(conn, stored)
+            command.upgrade(app_alembic_config, "95fea1045f0d")
+            assert _threshold(conn) == after
+        finally:
+            command.upgrade(app_alembic_config, "head")
+
+
+@pytest.mark.parametrize(("stored", "after"), [("5", "3"), ("7", "7")])
+def test_downgrading_past_the_threshold_move_restores_only_its_own_value(
+    app_migrated: sa.Engine, app_alembic_config: Config, stored: str, after: str
+) -> None:
+    """Revision 95fea1045f0d down: 5 goes back to 3; a hand-set value is left alone."""
+    with app_migrated.begin() as conn:
+        app_alembic_config.attributes["connection"] = conn
+        try:
+            _set_threshold(conn, stored)
+            command.downgrade(app_alembic_config, _BELOW_THRESHOLD_5)
+            assert _threshold(conn) == after
         finally:
             command.upgrade(app_alembic_config, "head")

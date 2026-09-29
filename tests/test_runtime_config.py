@@ -118,8 +118,33 @@ def test_a_missing_row_reads_the_default_and_cannot_be_written(app_session: Sess
     )
 
 
+def _upgrades_in_order() -> list[str]:
+    """The source of each migration's ``upgrade()``, base first, following ``down_revision``.
+
+    File names carry a date, but two revisions written on one day would sort by their random
+    ids, and a later seed read before an earlier one reports the wrong final value.
+    """
+    by_parent: dict[str | None, tuple[str, str]] = {}
+    for migration in Path("migrations/versions").glob("*.py"):
+        text = migration.read_text()
+        revision = re.search(r'^revision: str = "([0-9a-f]+)"', text, re.M)
+        parent = re.search(r'^down_revision: .*= (?:"([0-9a-f]+)"|None)', text, re.M)
+        assert revision and parent, f"{migration.name} names no revision"
+        assert parent[1] not in by_parent, f"two revisions follow {parent[1]}"
+        upgrade = text.split("def upgrade()", 1)[1].split("def downgrade()", 1)[0]
+        by_parent[parent[1]] = (revision[1], upgrade)
+    ordered: list[str] = []
+    current: str | None = None
+    while current in by_parent:
+        current, upgrade = by_parent[current]
+        ordered.append(upgrade)
+    assert len(ordered) == len(by_parent), "the migration tree is not one chain"
+    return ordered
+
+
 def _seeded_by_migrations() -> dict[str, str]:
-    """Every ``runtime_config`` row the migration tree inserts, as key -> value.
+    """Every ``runtime_config`` row the migration tree leaves on a fresh database, as
+    key -> value: the inserts, then any later update of a seeded value.
 
     Read out of the migration source rather than out of a database, deliberately. The test
     fixture re-creates a row for every declared knob after truncating, so a database read would
@@ -127,13 +152,19 @@ def _seeded_by_migrations() -> dict[str, str]:
     provide it or not.
     """
     seeded: dict[str, str] = {}
-    for migration in Path("migrations/versions").glob("*.py"):
-        text = migration.read_text()
-        if "INSERT INTO runtime_config" not in text:
-            continue
-        for key, value in re.findall(r"VALUES\s*\(\s*'([^']+)'\s*,\s*'([^']*)'\s*\)", text):
-            assert key not in seeded, f"{key} is seeded by more than one migration"
-            seeded[key] = value
+    for upgrade in _upgrades_in_order():
+        if "INSERT INTO runtime_config" in upgrade:
+            for key, value in re.findall(r"VALUES\s*\(\s*'([^']+)'\s*,\s*'([^']*)'\s*\)", upgrade):
+                assert key not in seeded, f"{key} is seeded by more than one migration"
+                seeded[key] = value
+        for value, key, old in re.findall(
+            r"UPDATE runtime_config SET value = '([^']*)'\s+"
+            r"WHERE key = '([^']+)' AND value = '([^']*)'",
+            upgrade,
+        ):
+            assert key in seeded, f"{key} is updated before any migration seeds it"
+            if seeded[key] == old:
+                seeded[key] = value
     return seeded
 
 
