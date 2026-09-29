@@ -115,12 +115,25 @@ DEDUP_HAMMING_BITS = IntKnob(
     "collapses only identical fingerprints; higher values catch lightly edited copies.",
 )
 
+#: How long the work-queue reconciler waits between runs (RFC §6.3). Not a freshness term: the
+#: normal path never waits on it, because ``advance()`` enqueues the successor itself. Only an
+#: article a handler defect has stranded waits this long, and a healthy run repairs nothing.
+RECONCILE_INTERVAL_SECONDS = IntKnob(
+    key="reconcile_interval_seconds",
+    default=300,
+    minimum=60,
+    maximum=3600,
+    summary="Seconds between work-queue reconciliations. Housekeeping: only an article "
+    "stranded by a defect waits on it.",
+)
+
 #: Every declared knob, in the order the admin surface lists them.
 KNOBS: tuple[IntKnob, ...] = (
     POLL_INTERVAL_SECONDS,
     ACQUIRE_INTERVAL_SECONDS,
     DEDUP_INTERVAL_SECONDS,
     DEDUP_HAMMING_BITS,
+    RECONCILE_INTERVAL_SECONDS,
 )
 
 

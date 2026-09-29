@@ -10,15 +10,18 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
+from meridian_contract import Stage
 from sqlalchemy.orm import Session, sessionmaker
 
 from meridian.db import runtime_config
 from meridian.db.models import CanonicalRecord, RuntimeConfig, Source
+from meridian.db.reconcile import Discrepancy, Kind, ReconcileReport, StageDepth
 from meridian.db.runtime_config import (
     ACQUIRE_INTERVAL_SECONDS,
     DEDUP_HAMMING_BITS,
     DEDUP_INTERVAL_SECONDS,
     POLL_INTERVAL_SECONDS,
+    RECONCILE_INTERVAL_SECONDS,
 )
 from meridian.db.session import session_factory
 from meridian.db.simhash import simhash_to_db
@@ -34,9 +37,11 @@ from meridian.ingest.scheduler import (
     ACQUIRE_JOB_ID,
     DEDUP_JOB_ID,
     JOB_ID,
+    RECONCILE_JOB_ID,
     AcquireScheduler,
     DedupScheduler,
     DiscoveryScheduler,
+    ReconcileScheduler,
 )
 from tests.factories import make_source
 from tests.test_dedup_stage import arrival, body, flip, held
@@ -323,12 +328,19 @@ def test_two_jobs_share_one_scheduler_and_start_it_once(
     discovery = _scheduler(sessions, stub)
     acquire = _acquire(sessions, stub)
     dedup = _dedup(sessions, stub)
+    reconciler = ReconcileScheduler(sessions, scheduler=stub)
 
     discovery.start()
     acquire.start()
     dedup.start()
+    reconciler.start()
 
-    assert [job_id for job_id, _ in stub.added] == [JOB_ID, ACQUIRE_JOB_ID, DEDUP_JOB_ID]
+    assert [job_id for job_id, _ in stub.added] == [
+        JOB_ID,
+        ACQUIRE_JOB_ID,
+        DEDUP_JOB_ID,
+        RECONCILE_JOB_ID,
+    ]
     assert stub.started
 
 
@@ -440,3 +452,78 @@ def test_the_real_batch_collapses_at_the_threshold_the_knob_holds(
             "below",
             "held-at",
         }
+
+
+# --------------------------------------------------------------------------- the reconcile job
+
+
+def _reconciler(
+    sessions: sessionmaker[Session], stub: StubScheduler, report: ReconcileReport
+) -> ReconcileScheduler:
+    return ReconcileScheduler(
+        sessions,
+        scheduler=stub,
+        run=lambda session: report,
+    )
+
+
+def test_the_reconcile_job_reads_its_own_cadence(sessions: sessionmaker[Session]) -> None:
+    _set_knob(sessions, RECONCILE_INTERVAL_SECONDS, 600)
+    stub = StubScheduler()
+
+    _reconciler(sessions, stub, ReconcileReport()).start()
+
+    assert stub.added == [(RECONCILE_JOB_ID, 600.0)]
+
+
+def test_changing_the_reconcile_cadence_takes_effect_without_a_restart(
+    sessions: sessionmaker[Session],
+) -> None:
+    stub = StubScheduler()
+    scheduler = _reconciler(sessions, stub, ReconcileReport())
+    scheduler.start()
+
+    _set_knob(sessions, RECONCILE_INTERVAL_SECONDS, 900)
+    scheduler.tick()
+
+    assert stub.rescheduled == [(RECONCILE_JOB_ID, 900.0)]
+
+
+def test_a_clean_run_still_logs_the_depth_of_every_stage(
+    sessions: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A backlog is visible only if the line is there when nothing is wrong too."""
+    report = ReconcileReport(
+        depth=[
+            StageDepth(Stage.ACQUIRE, 12, dt.timedelta(minutes=4)),
+            StageDepth(Stage.CLASSIFY, 800, dt.timedelta(days=3, hours=2)),
+        ]
+    )
+    with caplog.at_level("INFO", logger="meridian.ingest.scheduler"):
+        _reconciler(sessions, StubScheduler(), report).tick()
+
+    (record,) = [r for r in caplog.records if "work queue reconcile" in r.getMessage()]
+    assert record.levelname == "INFO"
+    assert record.getMessage() == (
+        "work queue reconcile: missing=0 wrong_stage=0 orphaned=0 unmarked_dead=0 "
+        "| open/oldest acquire=12/4m classify=800/3d"
+    )
+
+
+def test_a_run_that_found_anything_is_a_warning(
+    sessions: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A healthy system repairs nothing, so any repair is a handler defect, not housekeeping."""
+    report = ReconcileReport(
+        repaired=[Discrepancy(1, Kind.MISSING, Stage.DEDUP, None)],
+        unrepaired=[Discrepancy(2, Kind.UNMARKED_DEAD_LETTER, Stage.ACQUIRE, None)],
+    )
+    with caplog.at_level("INFO", logger="meridian.ingest.scheduler"):
+        _reconciler(sessions, StubScheduler(), report).tick()
+
+    (record,) = [r for r in caplog.records if "work queue reconcile" in r.getMessage()]
+    assert record.levelname == "WARNING"
+    assert record.getMessage() == (
+        "work queue reconcile: missing=1 wrong_stage=0 orphaned=0 unmarked_dead=1 "
+        "| open/oldest empty"
+    )

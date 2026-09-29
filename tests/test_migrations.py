@@ -1,5 +1,7 @@
 """The migration and the models must describe the same database."""
 
+import datetime as dt
+
 import pytest
 import sqlalchemy as sa
 from alembic import command
@@ -21,6 +23,8 @@ _BELOW_DEDUP = "c3e1fa9f2e61"
 _BELOW_DEDUP_KNOBS = "d3cdd889525c"
 #: The revision below ``95fea1045f0d``, the match threshold's move from 3 to 5.
 _BELOW_THRESHOLD_5 = "5b8e1d07a4c2"
+#: The revision below ``7c4d2e9a1b36``, the work-queue reconciler.
+_BELOW_RECONCILER = "95fea1045f0d"
 
 
 def test_models_and_migration_agree(app_migrated: sa.Engine, app_alembic_config: Config) -> None:
@@ -229,5 +233,46 @@ def test_downgrading_past_the_threshold_move_restores_only_its_own_value(
             _set_threshold(conn, stored)
             command.downgrade(app_alembic_config, _BELOW_THRESHOLD_5)
             assert _threshold(conn) == after
+        finally:
+            command.upgrade(app_alembic_config, "head")
+
+
+def test_the_reconciler_migration_dates_work_already_queued_by_its_earliest_stamp(
+    app_session: Session, app_migrated: sa.Engine, app_alembic_config: Config
+) -> None:
+    """Revision 7c4d2e9a1b36: rows queued before ``enqueued_at`` existed get the earliest time
+    they carry. A row never released keeps its insert time in ``next_attempt_at``; one released
+    since has pushed that forward, and its claim is the best bound left. Stamping them all
+    ``now()`` would make a backlog that is days old read as fresh on the first run."""
+    now = dt.datetime.now(dt.UTC)
+    source = make_source(app_session)
+    rows = {
+        "untouched": dict(next_attempt_at=now - dt.timedelta(hours=3)),
+        "released": dict(
+            next_attempt_at=now + dt.timedelta(hours=1),
+            claimed_at=now - dt.timedelta(hours=1),
+            claimed_by="w",
+        ),
+    }
+    ids = {}
+    for guid, stamps in rows.items():
+        article = make_article(app_session, source, guid=guid)
+        ids[guid] = make_work(app_session, stage=Stage.ACQUIRE, article=article, **stamps).work_id
+    app_session.commit()
+
+    enqueued = sa.text("SELECT enqueued_at FROM pipeline_work WHERE work_id = :id")
+    with app_migrated.begin() as conn:
+        app_alembic_config.attributes["connection"] = conn
+        try:
+            command.downgrade(app_alembic_config, _BELOW_RECONCILER)
+            command.upgrade(app_alembic_config, "7c4d2e9a1b36")
+            assert (
+                conn.execute(enqueued, {"id": ids["untouched"]}).scalar_one()
+                == rows["untouched"]["next_attempt_at"]
+            )
+            assert (
+                conn.execute(enqueued, {"id": ids["released"]}).scalar_one()
+                == rows["released"]["claimed_at"]
+            )
         finally:
             command.upgrade(app_alembic_config, "head")

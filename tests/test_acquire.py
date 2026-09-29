@@ -12,8 +12,9 @@ import sqlalchemy as sa
 from meridian_contract import PipelineState, Stage, TerminalReason
 from sqlalchemy.orm import Session
 
-from meridian.db import work_queue
+from meridian.db import reconcile, work_queue
 from meridian.db.models import CanonicalRecord, PipelineWork
+from meridian.db.session import session_factory
 from meridian.ingest.acquire import AcquireReport, run_batch
 from meridian.ingest.acquire import handle as _handle
 from meridian.ingest.fetch import FetchResult
@@ -199,8 +200,8 @@ def test_a_dropped_article_is_never_owed_work_again(app_session: Session) -> Non
 
     handle(app_session, work)
 
-    assert work_queue.expected_article_work(app_session) == set()
-    assert work_queue.missing_article_work(app_session) == set()
+    assert reconcile.survey(app_session) == []
+    assert reconcile.run(app_session).clean
 
 
 def test_a_second_batch_does_not_re_examine_a_dropped_article(app_session: Session) -> None:
@@ -273,6 +274,105 @@ def test_a_failure_records_what_it_failed_on(app_session: Session) -> None:
     assert row.last_error is not None
     assert "a very specific failure" in row.last_error
     assert row.attempts == 1
+
+
+def _always_raises(session: Session, *, attempts: int) -> int:
+    """An acquire row whose handler raises something the ladder did not classify. Returns its
+    article id."""
+    source = make_source(session)
+    article = make_article(session, source, guid="broken", title="Storm Bertha closes the ports")
+    make_work(session, stage=Stage.ACQUIRE, article=article, attempts=attempts)
+    session.commit()
+    return article.article_id
+
+
+def _explode(*_: object, **__: object) -> None:
+    raise RuntimeError("unexpected")
+
+
+def test_an_unexpected_error_gives_the_row_back_with_backoff(app_session: Session) -> None:
+    """⚠️ Not left claimed: a claimed row is taken again one lease later, with no backoff and no
+    limit, for as long as the error recurs."""
+    article_id = _always_raises(app_session, attempts=0)
+    before = dt.datetime.now(dt.UTC)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("meridian.ingest.acquire.work_queue.advance", _explode)
+        report = run_batch(app_session, network=NETWORK, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, failed=1)
+    app_session.expire_all()
+    (row,) = _queued(app_session, article_id)
+    assert row.claimed_by is None
+    assert row.dead_lettered_at is None
+    assert row.next_attempt_at >= before + work_queue.backoff_after(1)
+    assert row.last_error == "RuntimeError: unexpected"
+
+
+def test_an_unexpected_error_on_every_attempt_is_dead_lettered(app_session: Session) -> None:
+    """On the attempt MAX_ATTEMPTS names the row is given up and the article marked failed, so
+    the reconciler neither re-enqueues it nor reads it as healthy. Not the fetch give-up's
+    headline-only continuation: the error may be in writing the body."""
+    article_id = _always_raises(app_session, attempts=work_queue.MAX_ATTEMPTS - 1)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("meridian.ingest.acquire.work_queue.advance", _explode)
+        report = run_batch(app_session, network=NETWORK, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, failed=1, dead_lettered=1)
+    app_session.expire_all()
+    (row,) = _queued(app_session, article_id)
+    assert row.dead_lettered_at is not None
+    assert row.last_error == "RuntimeError: unexpected"
+    article = app_session.get(CanonicalRecord, article_id)
+    assert article is not None
+    assert article.terminal_reason is TerminalReason.FAILED
+    assert article.pipeline_state is PipelineState.DISCOVERED
+
+
+def test_an_unexpected_error_one_attempt_short_is_not_dead_lettered(app_session: Session) -> None:
+    article_id = _always_raises(app_session, attempts=work_queue.MAX_ATTEMPTS - 2)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("meridian.ingest.acquire.work_queue.advance", _explode)
+        report = run_batch(app_session, network=NETWORK, lease=LEASE)
+
+    assert report == AcquireReport(claimed=1, failed=1)
+    app_session.expire_all()
+    (row,) = _queued(app_session, article_id)
+    assert row.dead_lettered_at is None
+    article = app_session.get(CanonicalRecord, article_id)
+    assert article is not None and article.terminal_reason is None
+
+
+def test_an_unexpected_error_does_not_touch_a_row_another_worker_has_reclaimed(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """⚠️ Our lease runs out mid-article and another worker claims the row, then our handler
+    fails. Reloaded after the rollback, the row names the other worker — an ownership check
+    against the reloaded row would pass, and we would dead-letter their live claim."""
+    article_id = _always_raises(app_session, attempts=work_queue.MAX_ATTEMPTS - 2)
+
+    def reclaimed_then_raise(session: Session, work: PipelineWork) -> None:
+        with session_factory(app_migrated)() as other:
+            taken = work_queue.claim(
+                other, stage=Stage.ACQUIRE, worker="other", lease=dt.timedelta(0)
+            )
+            assert [row.work_id for row in taken] == [work.work_id]
+        raise RuntimeError("commit failed")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("meridian.ingest.acquire.work_queue.advance", reclaimed_then_raise)
+        report = run_batch(app_session, network=NETWORK, lease=LEASE, worker="ours")
+
+    assert report == AcquireReport(claimed=1, failed=1)
+    app_session.expire_all()
+    (row,) = _queued(app_session, article_id)
+    assert row.claimed_by == "other"
+    assert row.attempts == work_queue.MAX_ATTEMPTS
+    assert row.dead_lettered_at is None
+    article = app_session.get(CanonicalRecord, article_id)
+    assert article is not None and article.terminal_reason is None
 
 
 def test_the_batch_respects_its_limit(app_session: Session) -> None:

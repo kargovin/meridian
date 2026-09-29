@@ -74,6 +74,11 @@ class PipelineWork(Base):
     #: Backoff, and the debounce window.
     next_attempt_at: Mapped[dt.datetime] = mapped_column(TZDateTime, server_default=sa.func.now())
 
+    #: When the row was inserted; never moved. The age of a stage's oldest open row is measured
+    #: from here, because ``next_attempt_at`` moves on every release and ``claimed_at`` on every
+    #: heartbeat — a row released forever would look young by both.
+    enqueued_at: Mapped[dt.datetime] = mapped_column(TZDateTime, server_default=sa.func.now())
+
     last_error: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     #: Set on terminal failure; the row is kept.
     dead_lettered_at: Mapped[dt.datetime | None] = mapped_column(TZDateTime, nullable=True)

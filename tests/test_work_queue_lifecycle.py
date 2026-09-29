@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from meridian_contract import Stage, TerminalReason
 from sqlalchemy.orm import Session
 
-from meridian.db import work_queue
+from meridian.db import reconcile, work_queue
 from meridian.db.models import CanonicalRecord, PipelineWork
 from tests.factories import make_article, make_source, make_work
 
@@ -261,10 +261,10 @@ def test_dead_letter_keeps_the_row_and_marks_the_article_terminal(app_session: S
     record = app_session.get(CanonicalRecord, article.article_id)
     assert record is not None and record.terminal_reason is TerminalReason.FAILED
 
-    # Neither claimable nor owed: the queue skips it, and the rebuild derivation does not
-    # think the article still owes acquire.
+    # Neither claimable nor owed: the queue skips it, and the reconciler neither re-enqueues it
+    # nor reports it.
     assert work_queue.claim(app_session, stage=Stage.ACQUIRE, worker="w2", lease=LEASE) == []
-    assert (article.article_id, Stage.ACQUIRE) not in work_queue.expected_article_work(app_session)
+    assert reconcile.survey(app_session) == []
 
 
 @pytest.mark.parametrize("primitive", ["release", "dead_letter"])

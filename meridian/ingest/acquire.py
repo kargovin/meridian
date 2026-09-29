@@ -77,8 +77,14 @@ class AcquireReport:
     #: Articles stopped by FR-I7. Steady state is small and non-zero; a spike means either a
     #: publisher changed language or the detector is being fed something it should not be.
     dropped: int = 0
-    #: Articles that raised. The row keeps its claim and is retried after the lease.
+    #: Articles that raised. The row is given back on the backoff schedule, and on the attempt
+    #: ``MAX_ATTEMPTS`` names it is dead-lettered instead.
     failed: int = 0
+    #: Of ``failed``, rows given up for good: the article is marked failed and its work row kept
+    #: as the trace. Not the fetch give-up (``fetch_abandoned``) — an unexpected error may be in
+    #: writing the body rather than obtaining it, so there is no headline-only state known to be
+    #: sound to continue in.
+    dead_lettered: int = 0
     #: Rows another worker had already completed or reclaimed — an expired lease, not a
     #: fault. Counted separately because a batch reporting these as failures sends someone
     #: hunting a bug in a record that was processed correctly.
@@ -421,9 +427,8 @@ def run_batch(
 
     ⚠️ Each article is handled inside its own try/except, for the reason discovery polls each
     feed inside one: a single record that provokes a bug must not stop the rest of the batch.
-    Unlike discovery, the failure leaves a trace without any help — ``claim`` has already
-    committed the row with ``attempts`` incremented — but the trace says only *how often*, so
-    the message is written too.
+    The failed row is given back on the backoff schedule with its message, and dead-lettered
+    on the last attempt — see ``_record_failure``.
 
     After each article the rows still held are heartbeated. The claim promised to finish
     within the lease; with a paced fetch per article a batch cannot keep that promise, so it
@@ -460,8 +465,8 @@ def run_batch(
         except Exception as exc:
             session.rollback()
             log.exception("article %s raised during acquire", article_id)
-            _record_failure(session, work_id, exc)
-            report += AcquireReport(failed=1)
+            dead = _record_failure(session, work_id, exc, worker=worker)
+            report += AcquireReport(failed=1, dead_lettered=int(dead))
 
         if pending:
             kept = work_queue.heartbeat(session, [row.work_id for row in pending], worker=worker)
@@ -491,25 +496,53 @@ def _by_publisher(session: Session, claimed: Sequence[PipelineWork]) -> list[Pip
     return round_robin(claimed, key=lambda row: publisher_of.get(row.article_id))
 
 
-def _record_failure(session: Session, work_id: int, exc: Exception) -> None:
-    """Write why a row failed, in a transaction of its own.
+def _record_failure(session: Session, work_id: int, exc: Exception, *, worker: str) -> bool:
+    """Give a failed row back with backoff, or give up on it. True if it was dead-lettered.
 
-    ⚠️ The rollback above discards everything the handler did, and a message written inside
-    that transaction would go with it — leaving the one failure class this guard exists to
-    survive as the one that says nothing about itself. ``attempts`` alone reports that a row
-    keeps failing and never what it fails on.
+    For an error the ladder did not classify — a bug, a database error, an extractor crash. The
+    classified failures (a 5xx, no answer, a robots outage) are released inside ``handle`` and
+    never reach here.
 
-    Takes an id rather than the instance, because the instance is expired by the rollback and
-    the row may be gone.
+    ⚠️ In a transaction of its own. The rollback above discards everything the handler did, and
+    a message written inside that transaction would go with it — leaving the one failure class
+    this guard exists to survive as the one that says nothing about itself.
 
-    Its own try/except, because a failure to record a failure is worth a log line rather than
-    the rest of the batch.
+    ⚠️ ``claim()`` counts attempts and never stops, so stopping is this function's job: a row
+    left claimed is re-taken one lease later, with no backoff and no limit, for as long as the
+    error recurs — and the article sits at ``discovered`` with an open row, which the reconciler
+    reads as healthy. On the attempt ``MAX_ATTEMPTS`` names the row is dead-lettered and the
+    article marked failed. Not the fetch give-up's headline-only continuation: that rule is for
+    a page that would not answer, where the record is known to be intact.
+
+    ⚠️ Ownership is checked against ``worker``, never against the row as reloaded. ``release``
+    and ``dead_letter`` match on the instance's own ``claimed_by``, and a row reloaded after
+    another worker reclaimed it names *them* — the check would compare them with themselves and
+    act on a claim that is not ours.
+
+    Takes an id rather than the instance: the rollback expired it, and the row may be gone.
     """
     try:
         row = session.get(PipelineWork, work_id)
-        if row is not None:
-            row.last_error = f"{type(exc).__name__}: {exc}"[:2000]
+        if row is None:
+            return False
+        if row.claimed_by != worker:
+            log.info(
+                "work %d was reclaimed by %s; its failure is not ours to record",
+                work_id,
+                row.claimed_by,
+            )
+            session.rollback()
+            return False
+        error = f"{type(exc).__name__}: {exc}"
+        if row.attempts >= work_queue.MAX_ATTEMPTS:
+            work_queue.dead_letter(session, row, error=error)
             session.commit()
+            log.error("work %d dead-lettered after %d attempts: %s", work_id, row.attempts, error)
+            return True
+        retry_at = dt.datetime.now(dt.UTC) + work_queue.backoff_after(row.attempts)
+        work_queue.release(session, row, retry_at=retry_at, error=error)
+        session.commit()
     except Exception:
         session.rollback()
         log.exception("could not record the failure of work %d", work_id)
+    return False
