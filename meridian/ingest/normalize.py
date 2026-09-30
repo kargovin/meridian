@@ -5,7 +5,8 @@ two fiddly judgements here (where a sentence ends, and whether this is English) 
 against fixtures rather than against a live poll.
 
 Discovery stores the teaser exactly as the publisher wrote it, markup included, because
-``parse`` records and does not judge. This is where it is judged.
+``parse`` records and does not judge. This is where it is judged. A tier-1 body is the
+exception: discovery converts it with ``body_from_html`` before it is written.
 """
 
 import hashlib
@@ -71,9 +72,16 @@ _OPAQUE_TAGS = frozenset({"script", "style"})
 
 
 class _TextExtractor(HTMLParser):
+    """Text runs in document order, with ``None`` wherever a block element opened or closed.
+
+    The boundary is a marker, not a character, because the text itself may hold newlines: a
+    newline inside ``<p>`` in the source is ordinary whitespace, and only the caller knows
+    whether a boundary is a space (a teaser) or a line break (a body).
+    """
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
+        self.parts: list[str | None] = []
         self._opaque = 0
 
     # `attrs` is unused: this is HTMLParser's signature, which it calls positionally.
@@ -81,13 +89,13 @@ class _TextExtractor(HTMLParser):
         if tag in _OPAQUE_TAGS:
             self._opaque += 1
         elif tag in _BLOCK_TAGS:
-            self.parts.append(" ")
+            self.parts.append(None)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _OPAQUE_TAGS:
             self._opaque = max(0, self._opaque - 1)
         elif tag in _BLOCK_TAGS:
-            self.parts.append(" ")
+            self.parts.append(None)
 
     def handle_data(self, data: str) -> None:
         if not self._opaque:
@@ -114,14 +122,57 @@ def strip_html(raw: str | None) -> str | None:
     """
     if raw is None:
         return None
+    parts = _text_parts(raw)
+    text = _collapse_whitespace("".join(" " if part is None else part for part in parts))
+    return text or None
+
+
+def body_from_html(raw: str | None) -> str | None:
+    """A feed-shipped article body as plain text: one line per block, markup gone.
+
+    What a tier-1 feed puts in ``<content:encoded>`` is HTML. The body is stored as text so
+    that ``content_hash`` and the SimHash fingerprint read words rather than tags and URLs,
+    and so that a tier-1 body has the shape a tier-3 extraction has — paragraphs on their own
+    lines, which ``strip_html`` would flatten into one run. Whitespace inside a block
+    collapses to single spaces, and a block holding no text leaves no empty line.
+
+    ``None`` in, ``None`` out, and markup with no text is ``None`` too, for the same reason as
+    ``strip_html``.
+
+    ⚠️ Removes markup and nothing else. Whatever page furniture a publisher puts inside the
+    element — share buttons, related-article lists, a donate block — is text and is kept.
+
+    ⚠️ Not a fixpoint, like ``strip_html``: an escaped ``&lt;tag&gt;`` in the body becomes a
+    literal ``<tag>`` here, and a second pass would delete it. Run it once, on what the
+    publisher sent — never on a stored body.
+    """
+    if raw is None:
+        return None
+    blocks: list[str] = []
+    run: list[str] = []
+    for part in [*_text_parts(raw), None]:
+        if part is not None:
+            run.append(part)
+            continue
+        line = _collapse_whitespace("".join(run))
+        if line:
+            blocks.append(line)
+        run = []
+    return "\n".join(blocks) or None
+
+
+def _text_parts(raw: str) -> list[str | None]:
     parser = _TextExtractor()
     parser.feed(raw)
     parser.close()
+    return parser.parts
+
+
+def _collapse_whitespace(text: str) -> str:
     # \s matches non-breaking spaces here: the pattern is a str, so re is in Unicode mode and
-    # the \xa0 that &nbsp; becomes is whitespace. Without that, entity-heavy teasers keep a
+    # the \xa0 that &nbsp; becomes is whitespace. Without that, entity-heavy text keeps a
     # character that reads as a space and does not split as one.
-    text = re.sub(r"\s+", " ", "".join(parser.parts)).strip()
-    return text or None
+    return re.sub(r"\s+", " ", text).strip()
 
 
 # --------------------------------------------------------------------------- FR-I7

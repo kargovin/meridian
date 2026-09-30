@@ -32,6 +32,7 @@ from meridian.db import sources as sources_repo
 from meridian.db.models import AlternateCopy, CanonicalRecord, Feed, PipelineWork, Source
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher
 from meridian.ingest.network import Network
+from meridian.ingest.normalize import body_from_html
 from meridian.ingest.pacing import round_robin
 from meridian.ingest.parse import FeedItem, FeedUnreadable, parse
 
@@ -86,12 +87,16 @@ def _body_text(source: Source, feed: Feed, item: FeedItem) -> str | None:
     never a note of what the rights were. See ``sources.holds_body_rights`` for what a
     downgrade or an upgrade does to records already on file. ``pollable()`` reads the registry
     once per cycle, so a change lands on the next cycle, as ``enabled`` does.
+
+    The feed ships the body as HTML and it is stored as text, converted here because this is
+    the only time the publisher's markup is seen: it is not kept (Legal A-L1), and converting a
+    stored body again is not safe (``body_from_html``). Markup with no text in it is no body.
     """
     if not sources_repo.holds_body_rights(source):
         return None
     if feed.acquisition_tier is not AcquisitionTier.FULL_FEED:
         return None
-    return item.content
+    return body_from_html(item.content)
 
 
 def _collapsed_already(session: Session, feed: Feed, item: FeedItem) -> bool:

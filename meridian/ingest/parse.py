@@ -42,7 +42,8 @@ class FeedItem:
     published_at: dt.datetime | None
     #: The teaser, raw. ``None`` where the feed offers none of its own.
     summary: str | None
-    #: The full article body, raw. ``None`` on all but a tier-1 feed.
+    #: The full article body, raw HTML — discovery converts it to text before storing it.
+    #: ``None`` on all but a tier-1 feed.
     content: str | None
 
 

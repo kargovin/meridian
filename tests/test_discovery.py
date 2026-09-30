@@ -4,7 +4,9 @@ No network: ``run_cycle`` takes its fetcher as an argument, so these drive the r
 against feeds we author here.
 """
 
+import re
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -40,6 +42,8 @@ from tests.factories import (
 )
 
 pytestmark = pytest.mark.postgres
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def feed_xml(*items: tuple[str, str], description: str = "A teaser.") -> bytes:
@@ -470,6 +474,71 @@ def test_a_tier_one_feed_stores_the_content_element_as_the_body(
     # here rather than by a later stage because a body stored with NULL provenance is
     # indistinguishable downstream from one nobody obtained (RFC §5.1).
     assert article.body_provenance is BodyProvenance.TIER1_FEED
+
+
+#: A real tier-1 body: Global Voices' ``<content:encoded>`` for
+#: https://globalvoices.org/2026/09/25/movement-from-behind-your-gadget/, as the dev stack's
+#: poll stored it in late September 2026, trimmed to 8 of its blocks. Kept real because
+#: what a CMS emits — a caption ``div``, italics nested round links, a byline built from
+#: spans — is what a hand-written fixture leaves out.
+GLOBAL_VOICES_BODY = (FIXTURES / "global_voices_content_encoded.html").read_text()
+
+TAG = re.compile(r"</?[a-zA-Z][^>]*>")
+
+
+def one_item_with_content(content: str) -> bytes:
+    return (
+        '<?xml version="1.0"?>'
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        "<channel><title>Ex</title><item><title>One</title>"
+        "<link>https://x.example/g1</link><guid>g1</guid>"
+        "<description>A teaser.</description>"
+        f"<content:encoded><![CDATA[{content}]]></content:encoded>"
+        "</item></channel></rss>"
+    ).encode()
+
+
+def test_a_tier_one_body_is_stored_as_text_not_the_feeds_html(app_session: Session) -> None:
+    """The body is what ``content_hash`` and the SimHash fingerprint read, and every stage
+    after them. Stored as the feed's HTML, both hashed tags and URLs, and a tier-1 copy of an
+    article could never hash equal to the same text from any other tier.
+
+    ⚠️ The earlier tier-1 tests used plain-text fixtures, which pass whether or not anything
+    converts the markup. This one is real publisher HTML.
+    """
+    feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.FULL_FEED)
+
+    _cycle(app_session, FakeFetcher({feed.url: one_item_with_content(GLOBAL_VOICES_BODY)}))
+
+    article = articles(app_session)[0]
+    assert article.body_text is not None
+    assert TAG.search(article.body_text) is None
+    assert "&amp;" not in article.body_text
+    lines = article.body_text.split("\n")
+    assert lines[0] == "Online vs offline protest, how effective it is?"
+    assert lines[5] == "Both of them are effective, no?"
+    assert lines[-1] == "Written by Juliana Harsianti"
+    assert len(lines) == 9
+    assert article.body_provenance is BodyProvenance.TIER1_FEED
+
+
+def test_a_content_element_holding_only_markup_is_no_body(app_session: Session) -> None:
+    """An image and nothing else is not an article. Storing an empty string would be a body
+    downstream — hashed, fingerprinted, handed to a summarizer — with provenance claiming the
+    feed shipped it.
+    """
+    feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.FULL_FEED)
+
+    _cycle(
+        app_session,
+        FakeFetcher(
+            {feed.url: one_item_with_content('<div><img src="https://x.example/a.jpg"/></div>')}
+        ),
+    )
+
+    article = articles(app_session)[0]
+    assert article.body_text is None
+    assert article.body_provenance is None
 
 
 def content_xml(*items: tuple[str, str]) -> bytes:
