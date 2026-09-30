@@ -67,11 +67,16 @@ _BLOCK_TAGS = frozenset(
     }
 )
 
-#: Elements whose *content* is not prose. ``script`` and ``style`` hold code. The rest are
-#: elements ``HTMLParser`` hands over as literal text, markup included — a ``<textarea>``
-#: holding ``<b>x</b>`` yields the string ``<b>x</b>``. feedparser's sanitizer strips most of
-#: them before a body gets here; ``textarea`` survives it.
-_OPAQUE_TAGS = frozenset({"script", "style", "textarea", "iframe", "noembed", "noframes", "xmp"})
+#: Elements whose *content* is code, not prose. A feed should never carry these; some do.
+_OPAQUE_TAGS = frozenset({"script", "style"})
+
+#: What a body skips as well: elements ``HTMLParser`` hands over as literal text, markup
+#: included — a ``<textarea>`` holding ``<b>x</b>`` yields the string ``<b>x</b>``.
+#: feedparser's sanitizer strips most of them before a body gets here; ``textarea`` survives.
+#:
+#: ⚠️ Not applied to the teaser. A teaser is read as HTML whatever type the feed declared, so a
+#: plain-text one that mentions ``<textarea>`` would lose everything after the word.
+_BODY_OPAQUE_TAGS = _OPAQUE_TAGS | {"textarea", "iframe", "noembed", "noframes", "xmp"}
 
 
 class _TextExtractor(HTMLParser):
@@ -82,20 +87,21 @@ class _TextExtractor(HTMLParser):
     whether a boundary is a space (a teaser) or a line break (a body).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, opaque_tags: frozenset[str]) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str | None] = []
+        self._opaque_tags = opaque_tags
         self._opaque = 0
 
     # `attrs` is unused: this is HTMLParser's signature, which it calls positionally.
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _OPAQUE_TAGS:
+        if tag in self._opaque_tags:
             self._opaque += 1
         elif tag in _BLOCK_TAGS:
             self.parts.append(None)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in _OPAQUE_TAGS:
+        if tag in self._opaque_tags:
             self._opaque = max(0, self._opaque - 1)
         elif tag in _BLOCK_TAGS:
             self.parts.append(None)
@@ -125,7 +131,7 @@ def strip_html(raw: str | None) -> str | None:
     """
     if raw is None:
         return None
-    parts = _text_parts(raw)
+    parts = _text_parts(raw, _OPAQUE_TAGS)
     text = _collapse_whitespace("".join(" " if part is None else part for part in parts))
     return text or None
 
@@ -153,7 +159,7 @@ def body_from_html(raw: str | None) -> str | None:
         return None
     blocks: list[str] = []
     run: list[str] = []
-    for part in [*_text_parts(raw), None]:
+    for part in [*_text_parts(raw, _BODY_OPAQUE_TAGS), None]:
         if part is not None:
             run.append(part)
             continue
@@ -182,19 +188,21 @@ _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 def body_from_feed(content: str | None, content_type: str | None) -> str | None:
     """A feed-shipped body as text, read according to the type the feed declared for it.
 
-    Markup is converted, plain text is only reflowed — an HTML parser would delete any text
-    between a ``<`` and a ``>`` in it. Any other type is not an article body: an Atom
-    ``<content>`` may carry any MIME type, an image included.
+    Markup is converted; any other text type is only reflowed — an HTML parser would delete
+    any text between a ``<`` and a ``>`` in it. A type that is not text is not an article
+    body: an Atom ``<content>`` may carry any MIME type, an image included. Parameters on the
+    type (``text/html; charset=utf-8``) do not change how it is read.
     """
-    if content_type in _HTML_TYPES:
+    media_type = content_type.split(";", 1)[0].strip().lower() if content_type else None
+    if media_type in _HTML_TYPES:
         return body_from_html(content)
-    if content_type == "text/plain":
+    if media_type is not None and media_type.startswith("text/"):
         return body_from_plain_text(content)
     return None
 
 
-def _text_parts(raw: str) -> list[str | None]:
-    parser = _TextExtractor()
+def _text_parts(raw: str, opaque_tags: frozenset[str]) -> list[str | None]:
+    parser = _TextExtractor(opaque_tags)
     parser.feed(raw)
     parser.close()
     return parser.parts
