@@ -71,12 +71,23 @@ _BLOCK_TAGS = frozenset(
 _OPAQUE_TAGS = frozenset({"script", "style"})
 
 #: What a body skips as well: elements ``HTMLParser`` hands over as literal text, markup
-#: included — a ``<textarea>`` holding ``<b>x</b>`` yields the string ``<b>x</b>``.
-#: feedparser's sanitizer strips most of them before a body gets here; ``textarea`` survives.
+#: included — a ``<textarea>`` holding ``<b>x</b>`` yields the string ``<b>x</b>``, and an
+#: unclosed ``<plaintext>`` the whole rest of the body. feedparser's sanitizer removes most of
+#: them, but only from content typed exactly ``text/html`` or ``application/xhtml+xml`` — not
+#: ``text/html; charset=utf-8`` — and never ``textarea``. A ``<title>`` in a body is an inline
+#: SVG icon's label ("Facebook logo").
 #:
 #: ⚠️ Not applied to the teaser. A teaser is read as HTML whatever type the feed declared, so a
 #: plain-text one that mentions ``<textarea>`` would lose everything after the word.
-_BODY_OPAQUE_TAGS = _OPAQUE_TAGS | {"textarea", "iframe", "noembed", "noframes", "xmp"}
+_BODY_OPAQUE_TAGS = _OPAQUE_TAGS | {
+    "textarea",
+    "iframe",
+    "noembed",
+    "noframes",
+    "xmp",
+    "title",
+    "plaintext",
+}
 
 
 class _TextExtractor(HTMLParser):
@@ -184,19 +195,23 @@ def body_from_plain_text(raw: str | None) -> str | None:
 #: Feed content types that are markup. RSS ``content:encoded`` is always ``text/html``.
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
+#: Feed content types that are prose as written. Not every other ``text/*``: ``text/xml`` can
+#: hold escaped HTML that feedparser hands back as markup.
+_PLAIN_TEXT_TYPES = frozenset({"text/plain", "text/markdown"})
+
 
 def body_from_feed(content: str | None, content_type: str | None) -> str | None:
     """A feed-shipped body as text, read according to the type the feed declared for it.
 
-    Markup is converted; any other text type is only reflowed — an HTML parser would delete
-    any text between a ``<`` and a ``>`` in it. A type that is not text is not an article
-    body: an Atom ``<content>`` may carry any MIME type, an image included. Parameters on the
-    type (``text/html; charset=utf-8``) do not change how it is read.
+    Markup is converted; plain text is only reflowed — an HTML parser would delete any text
+    between a ``<`` and a ``>`` in it. Any other type is not an article body: an Atom
+    ``<content>`` may carry any MIME type, an image included. Parameters on the type
+    (``text/html; charset=utf-8``) do not change how it is read.
     """
     media_type = content_type.split(";", 1)[0].strip().lower() if content_type else None
     if media_type in _HTML_TYPES:
         return body_from_html(content)
-    if media_type is not None and media_type.startswith("text/"):
+    if media_type in _PLAIN_TEXT_TYPES:
         return body_from_plain_text(content)
     return None
 

@@ -166,16 +166,20 @@ def test_script_content_is_not_body_text() -> None:
     assert body_from_html("<style>.a{color:red}</style><p>Real text</p>") == "Real text"
 
 
-@pytest.mark.parametrize("tag", ["textarea", "iframe", "noembed", "noframes", "xmp"])
+LITERAL_TEXT_ELEMENTS = ["textarea", "iframe", "noembed", "noframes", "xmp", "title", "plaintext"]
+
+
+@pytest.mark.parametrize("tag", LITERAL_TEXT_ELEMENTS)
 def test_an_element_parsed_as_literal_text_is_not_body_text(tag: str) -> None:
     """``HTMLParser`` returns these elements' contents as literal text, tags and all."""
     assert body_from_html(f"<p>Real text</p><{tag}><b>embed code</b></{tag}>") == "Real text"
 
 
-def test_a_teaser_mentioning_one_of_those_elements_keeps_the_rest_of_its_text() -> None:
+@pytest.mark.parametrize("tag", LITERAL_TEXT_ELEMENTS)
+def test_a_teaser_mentioning_one_of_those_elements_keeps_the_rest_of_its_text(tag: str) -> None:
     """The teaser is read as HTML even when the feed declared it plain text; skipping the
     element's contents there would delete everything after the word."""
-    assert strip_html("Use <textarea> for input. The rest.") == "Use for input. The rest."
+    assert strip_html(f"Use <{tag}> for input. The rest.") == "Use for input. The rest."
 
 
 def test_a_body_that_is_only_markup_is_absent() -> None:
@@ -255,19 +259,29 @@ def test_plain_text_breaks_on_blank_lines_not_on_wrapping() -> None:
 
 @pytest.mark.parametrize(
     "content_type",
-    ["text/html", "application/xhtml+xml", "text/html; charset=utf-8", "TEXT/HTML"],
+    [
+        "text/html",
+        "application/xhtml+xml",
+        "text/html; charset=utf-8",
+        "text/html ; charset=utf-8",
+        "TEXT/HTML",
+    ],
 )
 def test_markup_types_are_converted(content_type: str) -> None:
     assert body_from_feed("<p>One.</p><p>Two.</p>", content_type) == "One.\nTwo."
 
 
 @pytest.mark.parametrize("content_type", ["text/markdown", "text/plain; charset=utf-8"])
-def test_any_other_text_type_is_read_as_plain_text(content_type: str) -> None:
+def test_plain_text_types_are_read_as_written(content_type: str) -> None:
     assert body_from_feed("a<b and c>d", content_type) == "a<b and c>d"
 
 
-@pytest.mark.parametrize("content_type", ["image/png", "application/octet-stream", "", None])
-def test_content_of_a_type_that_is_not_text_is_no_body(content_type: str | None) -> None:
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/xml", "text/html-sandboxed", "image/png", "application/octet-stream", "", None],
+)
+def test_content_of_any_other_type_is_no_body(content_type: str | None) -> None:
+    """``text/xml`` included: it can hold escaped HTML, handed back as markup."""
     assert body_from_feed("hello", content_type) is None
 
 
