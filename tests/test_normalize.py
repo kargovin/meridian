@@ -3,16 +3,25 @@
 No database — these are pure functions, which is the point of them being in their own module.
 """
 
+from pathlib import Path
+
 import pytest
 
 from meridian.ingest.normalize import (
     LanguageVerdict,
     _is_latin_script,
+    body_from_feed,
+    body_from_html,
+    body_from_plain_text,
     content_hash,
     detect_language,
     language_input,
     strip_html,
 )
+
+GLOBAL_VOICES_BODY = (
+    Path(__file__).parent / "fixtures" / "global_voices_content_encoded.html"
+).read_text()
 
 # --------------------------------------------------------------------------- strip_html
 
@@ -101,6 +110,179 @@ def test_stripping_escaped_markup_is_NOT_a_fixpoint() -> None:
 def test_malformed_markup_still_yields_its_text() -> None:
     """Publishers ship unclosed tags; a teaser is not worth failing an article over."""
     assert strip_html("<p>Unclosed <b>bold text") == "Unclosed bold text"
+
+
+# --------------------------------------------------------------------------- body_from_html
+
+
+def test_a_body_keeps_each_block_on_its_own_line() -> None:
+    """Where ``strip_html`` puts a space, a body puts a line break: a tier-3 extraction keeps
+    paragraphs apart, and a tier-1 body should read the same way."""
+    assert body_from_html("<p>Ends here.</p><p>New sentence.</p>") == "Ends here.\nNew sentence."
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "<div>One.</div><div>Two.</div>",
+        "<ul><li>One.</li><li>Two.</li></ul>",
+        "One.<br>Two.",
+        "<h2>One.</h2>Two.",
+        "<table><tr><td>One.</td><td>Two.</td></tr></table>",
+    ],
+)
+def test_every_block_element_starts_a_line(raw: str) -> None:
+    assert body_from_html(raw) == "One.\nTwo."
+
+
+def test_an_inline_tag_does_not_split_a_body_line() -> None:
+    assert body_from_html("<p>Ferry operators have <b>sus</b>pended sailings.</p>") == (
+        "Ferry operators have suspended sailings."
+    )
+
+
+def test_a_newline_in_the_source_is_whitespace_not_a_line_break() -> None:
+    """⚠️ HTML source wraps long paragraphs, and to HTML a newline is a space. Breaking lines
+    on the newlines the text already holds, rather than on block boundaries, splits one
+    paragraph into several."""
+    assert body_from_html("<p>Ferry operators\n  have suspended\tsailings.</p>") == (
+        "Ferry operators have suspended sailings."
+    )
+
+
+def test_nested_and_empty_blocks_leave_no_empty_lines() -> None:
+    raw = "<div>\n<p>One.</p>\n</div>\n\n<div><p> &nbsp;</p></div><p>Two.</p>"
+    assert body_from_html(raw) == "One.\nTwo."
+
+
+def test_a_body_resolves_entities_and_non_breaking_spaces() -> None:
+    assert body_from_html("<p>Smith &amp;&nbsp;&nbsp;Sons said &quot;no&quot;</p>") == (
+        'Smith & Sons said "no"'
+    )
+
+
+def test_script_content_is_not_body_text() -> None:
+    assert body_from_html("<p>Real text</p><script>var x = 1;</script>") == "Real text"
+    assert body_from_html("<style>.a{color:red}</style><p>Real text</p>") == "Real text"
+
+
+LITERAL_TEXT_ELEMENTS = ["textarea", "iframe", "noembed", "noframes", "xmp", "title", "plaintext"]
+
+
+@pytest.mark.parametrize("tag", LITERAL_TEXT_ELEMENTS)
+def test_an_element_parsed_as_literal_text_is_not_body_text(tag: str) -> None:
+    """``HTMLParser`` returns these elements' contents as literal text, tags and all."""
+    assert body_from_html(f"<p>Real text</p><{tag}><b>embed code</b></{tag}>") == "Real text"
+
+
+@pytest.mark.parametrize("tag", LITERAL_TEXT_ELEMENTS)
+def test_a_teaser_mentioning_one_of_those_elements_keeps_the_rest_of_its_text(tag: str) -> None:
+    """The teaser is read as HTML even when the feed declared it plain text; skipping the
+    element's contents there would delete everything after the word."""
+    assert strip_html(f"Use <{tag}> for input. The rest.") == "Use for input. The rest."
+
+
+def test_a_body_that_is_only_markup_is_absent() -> None:
+    assert body_from_html('<div><img src="a.jpg"/></div>') is None
+    assert body_from_html("   ") is None
+    assert body_from_html(None) is None
+
+
+def test_a_real_feed_body_converts_block_for_block() -> None:
+    """Global Voices' own markup: a caption ``div`` round an image, italics nested round
+    links, a blockquote wrapping a paragraph, a byline built from spans."""
+    assert body_from_html(GLOBAL_VOICES_BODY) == "\n".join(
+        [
+            "Online vs offline protest, how effective it is?",
+            "Originally published on Global Voices",
+            "Image by Gerd Altmann from Pixabay. Used under a Pixabay license.",
+            "This post is part of Global Voices\u2019 September 2026 Spotlight series, “Protest in"
+            " Democracy.” With this Spotlight, we seek to explore the many forms of protest, the"
+            " tactics states use to delegitimize and suppress them, and the complex relationship"
+            " between protest and democracy. You can support this coverage by donating here.",
+            "The growing popularity and expanding use of social media have influenced the ways"
+            " people express themselves. While protests once involved taking to the streets with"
+            " banners and chants, such activities can now be carried out in the virtual realm."
+            " Messages and slogans are now conveyed through hashtags, digital posters, or videos"
+            " posted across various social media channels. Events such as the Arab Spring and the"
+            " Occupy Movement have further reinforced the phenomenon of online protest.",
+            "Both of them are effective, no?",
+            "I contend that, setting aside the issue of unequal access, digital networks are not"
+            " egalitarian networks where citizens have equal opportunities to participate in"
+            " public discourse. First and foremost, the internet is never inherently egalitarian."
+            " Instead, the structure of the internet exhibits the characteristics of a scale-free"
+            " network—a network in which the degree distribution follows a power law.",
+            "To address the disparity in internet access, CSOs must continue to conduct"
+            " face-to-face educational sessions and discussions that reach individuals with poor"
+            " internet connectivity. Ultimately, even if access remains unequal, both online and"
+            " offline activism can contribute meaningfully to a movement and complement each"
+            " other.",
+            "Written by Juliana Harsianti",
+        ]
+    )
+
+
+def test_line_breaks_do_not_move_the_exact_duplicate_hash() -> None:
+    """Dedup reads words, not layout: the body and the same HTML flattened to one run hash
+    alike, and the raw HTML does not."""
+    body = body_from_html(GLOBAL_VOICES_BODY)
+    flat = strip_html(GLOBAL_VOICES_BODY)
+    assert body is not None and flat is not None
+    assert "\n" in body and "\n" not in flat
+    assert content_hash(body) == content_hash(flat)
+    assert content_hash(body) != content_hash(GLOBAL_VOICES_BODY)
+
+
+# --------------------------------------------------------------------------- body_from_feed
+
+
+def test_plain_text_keeps_what_an_html_parser_would_delete() -> None:
+    """Atom ``type="text"`` arrives unescaped. Read as HTML, "<b and c>" is a tag and goes."""
+    assert body_from_feed("Para one.\n\nPara two: a<b and c>d, AT&T.", "text/plain") == (
+        "Para one.\nPara two: a<b and c>d, AT&T."
+    )
+
+
+def test_plain_text_breaks_on_a_blank_line_whatever_the_line_endings() -> None:
+    assert body_from_plain_text("P1\r\n\r\nP2") == "P1\nP2"
+
+
+def test_plain_text_breaks_on_a_line_holding_only_whitespace() -> None:
+    assert body_from_plain_text("P1\n \nP2") == "P1\nP2"
+
+
+def test_plain_text_breaks_on_blank_lines_not_on_wrapping() -> None:
+    assert body_from_plain_text("One line\nwrapped.\n \n\n  Two.  \n") == "One line wrapped.\nTwo."
+    assert body_from_plain_text(" \n\n ") is None
+    assert body_from_plain_text(None) is None
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "text/html",
+        "application/xhtml+xml",
+        "text/html; charset=utf-8",
+        "text/html ; charset=utf-8",
+        "TEXT/HTML",
+    ],
+)
+def test_markup_types_are_converted(content_type: str) -> None:
+    assert body_from_feed("<p>One.</p><p>Two.</p>", content_type) == "One.\nTwo."
+
+
+@pytest.mark.parametrize("content_type", ["text/markdown", "text/plain; charset=utf-8"])
+def test_plain_text_types_are_read_as_written(content_type: str) -> None:
+    assert body_from_feed("a<b and c>d", content_type) == "a<b and c>d"
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/xml", "text/html-sandboxed", "image/png", "application/octet-stream", "", None],
+)
+def test_content_of_any_other_type_is_no_body(content_type: str | None) -> None:
+    """``text/xml`` included: it can hold escaped HTML, handed back as markup."""
+    assert body_from_feed("hello", content_type) is None
 
 
 # --------------------------------------------------------------------------- detect_language

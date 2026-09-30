@@ -5,7 +5,8 @@ two fiddly judgements here (where a sentence ends, and whether this is English) 
 against fixtures rather than against a live poll.
 
 Discovery stores the teaser exactly as the publisher wrote it, markup included, because
-``parse`` records and does not judge. This is where it is judged.
+``parse`` records and does not judge. This is where it is judged. A tier-1 body is the
+exception: discovery converts it with ``body_from_feed`` before it is written.
 """
 
 import hashlib
@@ -69,25 +70,52 @@ _BLOCK_TAGS = frozenset(
 #: Elements whose *content* is code, not prose. A feed should never carry these; some do.
 _OPAQUE_TAGS = frozenset({"script", "style"})
 
+#: What a body skips as well: elements ``HTMLParser`` hands over as literal text, markup
+#: included — a ``<textarea>`` holding ``<b>x</b>`` yields the string ``<b>x</b>``, and an
+#: unclosed ``<plaintext>`` the whole rest of the body. feedparser's sanitizer removes most of
+#: them, but only from content typed exactly ``text/html`` or ``application/xhtml+xml`` — not
+#: ``text/html; charset=utf-8`` — and never ``textarea``. A ``<title>`` in a body is an inline
+#: SVG icon's label ("Facebook logo").
+#:
+#: ⚠️ Not applied to the teaser. A teaser is read as HTML whatever type the feed declared, so a
+#: plain-text one that mentions ``<textarea>`` would lose everything after the word.
+_BODY_OPAQUE_TAGS = _OPAQUE_TAGS | {
+    "textarea",
+    "iframe",
+    "noembed",
+    "noframes",
+    "xmp",
+    "title",
+    "plaintext",
+}
+
 
 class _TextExtractor(HTMLParser):
-    def __init__(self) -> None:
+    """Text runs in document order, with ``None`` wherever a block element opened or closed.
+
+    The boundary is a marker, not a character, because the text itself may hold newlines: a
+    newline inside ``<p>`` in the source is ordinary whitespace, and only the caller knows
+    whether a boundary is a space (a teaser) or a line break (a body).
+    """
+
+    def __init__(self, opaque_tags: frozenset[str]) -> None:
         super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
+        self.parts: list[str | None] = []
+        self._opaque_tags = opaque_tags
         self._opaque = 0
 
     # `attrs` is unused: this is HTMLParser's signature, which it calls positionally.
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _OPAQUE_TAGS:
+        if tag in self._opaque_tags:
             self._opaque += 1
         elif tag in _BLOCK_TAGS:
-            self.parts.append(" ")
+            self.parts.append(None)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in _OPAQUE_TAGS:
+        if tag in self._opaque_tags:
             self._opaque = max(0, self._opaque - 1)
         elif tag in _BLOCK_TAGS:
-            self.parts.append(" ")
+            self.parts.append(None)
 
     def handle_data(self, data: str) -> None:
         if not self._opaque:
@@ -114,14 +142,92 @@ def strip_html(raw: str | None) -> str | None:
     """
     if raw is None:
         return None
-    parser = _TextExtractor()
+    parts = _text_parts(raw, _OPAQUE_TAGS)
+    text = _collapse_whitespace("".join(" " if part is None else part for part in parts))
+    return text or None
+
+
+def body_from_html(raw: str | None) -> str | None:
+    """A feed-shipped article body as plain text: one line per block, markup gone.
+
+    What a tier-1 feed puts in ``<content:encoded>`` is HTML. The body is stored as text so
+    that ``content_hash`` and the SimHash fingerprint read words rather than tags and URLs,
+    and so that a tier-1 body has the shape a tier-3 extraction has — paragraphs on their own
+    lines, which ``strip_html`` would flatten into one run. Whitespace inside a block
+    collapses to single spaces, and a block holding no text leaves no empty line.
+
+    ``None`` in, ``None`` out, and markup with no text is ``None`` too, for the same reason as
+    ``strip_html``.
+
+    ⚠️ Removes markup and nothing else. Whatever page furniture a publisher puts inside the
+    element — share buttons, related-article lists, a donate block — is text and is kept.
+
+    ⚠️ Not a fixpoint, like ``strip_html``: an escaped ``&lt;tag&gt;`` in the body becomes a
+    literal ``<tag>`` here, and a second pass would delete it. Run it once, on what the
+    publisher sent — never on a stored body.
+    """
+    if raw is None:
+        return None
+    blocks: list[str] = []
+    run: list[str] = []
+    for part in [*_text_parts(raw, _BODY_OPAQUE_TAGS), None]:
+        if part is not None:
+            run.append(part)
+            continue
+        line = _collapse_whitespace("".join(run))
+        if line:
+            blocks.append(line)
+        run = []
+    return "\n".join(blocks) or None
+
+
+def body_from_plain_text(raw: str | None) -> str | None:
+    """A plain-text body in the shape ``body_from_html`` gives: one line per paragraph.
+
+    A blank line separates paragraphs; a single newline is wrapping, as it is in HTML source.
+    """
+    if raw is None:
+        return None
+    paragraphs = (_collapse_whitespace(p) for p in re.split(r"\n\s*\n", raw))
+    return "\n".join(p for p in paragraphs if p) or None
+
+
+#: Feed content types that are markup. RSS ``content:encoded`` is always ``text/html``.
+_HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+
+#: Feed content types that are prose as written. Not every other ``text/*``: ``text/xml`` can
+#: hold escaped HTML that feedparser hands back as markup.
+_PLAIN_TEXT_TYPES = frozenset({"text/plain", "text/markdown"})
+
+
+def body_from_feed(content: str | None, content_type: str | None) -> str | None:
+    """A feed-shipped body as text, read according to the type the feed declared for it.
+
+    Markup is converted; plain text is only reflowed — an HTML parser would delete any text
+    between a ``<`` and a ``>`` in it. Any other type is not an article body: an Atom
+    ``<content>`` may carry any MIME type, an image included. Parameters on the type
+    (``text/html; charset=utf-8``) do not change how it is read.
+    """
+    media_type = content_type.split(";", 1)[0].strip().lower() if content_type else None
+    if media_type in _HTML_TYPES:
+        return body_from_html(content)
+    if media_type in _PLAIN_TEXT_TYPES:
+        return body_from_plain_text(content)
+    return None
+
+
+def _text_parts(raw: str, opaque_tags: frozenset[str]) -> list[str | None]:
+    parser = _TextExtractor(opaque_tags)
     parser.feed(raw)
     parser.close()
+    return parser.parts
+
+
+def _collapse_whitespace(text: str) -> str:
     # \s matches non-breaking spaces here: the pattern is a str, so re is in Unicode mode and
-    # the \xa0 that &nbsp; becomes is whitespace. Without that, entity-heavy teasers keep a
+    # the \xa0 that &nbsp; becomes is whitespace. Without that, entity-heavy text keeps a
     # character that reads as a space and does not split as one.
-    text = re.sub(r"\s+", " ", "".join(parser.parts)).strip()
-    return text or None
+    return re.sub(r"\s+", " ", text).strip()
 
 
 # --------------------------------------------------------------------------- FR-I7

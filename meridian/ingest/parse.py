@@ -44,6 +44,11 @@ class FeedItem:
     summary: str | None
     #: The full article body, raw. ``None`` on all but a tier-1 feed.
     content: str | None
+    #: The MIME type feedparser reports for ``content``: ``text/html`` for RSS
+    #: ``content:encoded`` and Atom ``type="html"``, ``application/xhtml+xml`` for Atom
+    #: ``type="xhtml"``, ``text/plain`` for Atom ``type="text"`` — which arrives unescaped, so
+    #: reading it as HTML deletes any text between a ``<`` and a ``>``. ``None`` with no content.
+    content_type: str | None
 
 
 @dataclass(frozen=True)
@@ -73,8 +78,10 @@ def _published(entry: feedparser.util.FeedParserDict) -> dt.datetime | None:
     return None
 
 
-def _texts(entry: feedparser.util.FeedParserDict) -> tuple[str | None, str | None]:
-    """The teaser and the body, kept apart.
+def _texts(
+    entry: feedparser.util.FeedParserDict,
+) -> tuple[str | None, str | None, str | None]:
+    """The teaser, the body and the body's type, the first two kept apart.
 
     ⚠️ feedparser copies ``content`` into ``summary`` when an entry has content and no summary
     of its own — verified, not assumed. Read naively that yields a "teaser" holding the entire
@@ -83,11 +90,12 @@ def _texts(entry: feedparser.util.FeedParserDict) -> tuple[str | None, str | Non
     body into a second column.
     """
     contents = entry.get("content") or []
-    content = contents[0].get("value") if contents else None
+    content = (contents[0].get("value") if contents else None) or None
+    content_type = contents[0].get("type") if content is not None else None
     summary = entry.get("summary") or None
     if content is not None and summary == content:
         summary = None
-    return summary, content or None
+    return summary, content, content_type
 
 
 def _is_http(link: str) -> bool:
@@ -130,7 +138,7 @@ def parse(raw: bytes) -> ParsedFeed:
             skipped += 1
             continue
         link = canonicalize(link)
-        summary, content = _texts(entry)
+        summary, content, content_type = _texts(entry)
         items.append(
             FeedItem(
                 # RSS <guid> and Atom <id> both normalise to `id`. Falling back to the link is
@@ -144,6 +152,7 @@ def parse(raw: bytes) -> ParsedFeed:
                 published_at=_published(entry),
                 summary=summary,
                 content=content,
+                content_type=content_type,
             )
         )
     return ParsedFeed(items=tuple(items), skipped=skipped)

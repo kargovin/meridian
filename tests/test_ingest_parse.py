@@ -63,6 +63,51 @@ def test_a_feed_carrying_both_keeps_them_apart() -> None:
     assert "THE WHOLE ARTICLE" in item.content
 
 
+@pytest.mark.parametrize(
+    ("element", "content_type", "value"),
+    [
+        ('<content type="html">&lt;p&gt;One.&lt;/p&gt;</content>', "text/html", "<p>One.</p>"),
+        (
+            '<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>One.</p></div>'
+            "</content>",
+            "application/xhtml+xml",
+            "<p>One.</p>",
+        ),
+        # Unescaped on the way in: the body now holds a literal "<b and c>".
+        (
+            '<content type="text">Para one.\n\nPara two: a&lt;b and c&gt;d, AT&amp;T.</content>',
+            "text/plain",
+            "Para one.\n\nPara two: a<b and c>d, AT&T.",
+        ),
+    ],
+)
+def test_atom_content_carries_the_type_the_feed_declared(
+    element: str, content_type: str, value: str
+) -> None:
+    """The type decides how the body is read: plain text through an HTML parser loses every
+    run between a ``<`` and a ``>``."""
+    item = parse(ATOM.replace(b"<summary>Heavy rain overnight.</summary>", element.encode())).items[
+        0
+    ]
+    assert (item.content, item.content_type) == (value, content_type)
+
+
+def test_rss_content_encoded_is_html() -> None:
+    raw = RSS.replace(
+        b"</description>",
+        b"</description><content:encoded><![CDATA[<p>One.</p>]]></content:encoded>",
+    )
+    assert parse(raw).items[0].content_type == "text/html"
+
+
+def test_an_item_with_no_content_has_no_content_type() -> None:
+    assert parse(RSS).items[0].content_type is None
+    empty = ATOM.replace(
+        b"<summary>Heavy rain overnight.</summary>", b'<content type="html"></content>'
+    )
+    assert (parse(empty).items[0].content, parse(empty).items[0].content_type) == (None, None)
+
+
 def test_content_mirrored_into_summary_is_not_reported_as_a_teaser() -> None:
     """⚠️ feedparser copies content into summary when an entry has no summary of its own.
 
