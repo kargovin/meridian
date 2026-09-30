@@ -10,7 +10,9 @@ import pytest
 from meridian.ingest.normalize import (
     LanguageVerdict,
     _is_latin_script,
+    body_from_feed,
     body_from_html,
+    body_from_plain_text,
     content_hash,
     detect_language,
     language_input,
@@ -164,6 +166,12 @@ def test_script_content_is_not_body_text() -> None:
     assert body_from_html("<style>.a{color:red}</style><p>Real text</p>") == "Real text"
 
 
+def test_a_textarea_is_not_body_text() -> None:
+    """``HTMLParser`` returns a textarea's contents as literal text, tags and all, and
+    feedparser's sanitizer lets the element through."""
+    assert body_from_html("<p>Real text</p><textarea><b>embed code</b></textarea>") == ("Real text")
+
+
 def test_a_body_that_is_only_markup_is_absent() -> None:
     assert body_from_html('<div><img src="a.jpg"/></div>') is None
     assert body_from_html("   ") is None
@@ -213,6 +221,32 @@ def test_line_breaks_do_not_move_the_exact_duplicate_hash() -> None:
     assert "\n" in body and "\n" not in flat
     assert content_hash(body) == content_hash(flat)
     assert content_hash(body) != content_hash(GLOBAL_VOICES_BODY)
+
+
+# --------------------------------------------------------------------------- body_from_feed
+
+
+def test_plain_text_keeps_what_an_html_parser_would_delete() -> None:
+    """Atom ``type="text"`` arrives unescaped. Read as HTML, "<b and c>" is a tag and goes."""
+    assert body_from_feed("Para one.\n\nPara two: a<b and c>d, AT&T.", "text/plain") == (
+        "Para one.\nPara two: a<b and c>d, AT&T."
+    )
+
+
+def test_plain_text_breaks_on_blank_lines_not_on_wrapping() -> None:
+    assert body_from_plain_text("One line\nwrapped.\n \n\n  Two.  \n") == "One line wrapped.\nTwo."
+    assert body_from_plain_text(" \n\n ") is None
+    assert body_from_plain_text(None) is None
+
+
+@pytest.mark.parametrize("content_type", ["text/html", "application/xhtml+xml"])
+def test_markup_types_are_converted(content_type: str) -> None:
+    assert body_from_feed("<p>One.</p><p>Two.</p>", content_type) == "One.\nTwo."
+
+
+@pytest.mark.parametrize("content_type", ["image/png", "application/octet-stream", None])
+def test_content_of_any_other_type_is_no_body(content_type: str | None) -> None:
+    assert body_from_feed("hello", content_type) is None
 
 
 # --------------------------------------------------------------------------- detect_language

@@ -478,7 +478,7 @@ def test_a_tier_one_feed_stores_the_content_element_as_the_body(
 
 #: A real tier-1 body: Global Voices' ``<content:encoded>`` for
 #: https://globalvoices.org/2026/09/25/movement-from-behind-your-gadget/, as the dev stack's
-#: poll stored it in late September 2026, trimmed to 8 of its blocks. Kept real because
+#: poll stored it in late September 2026, trimmed to 9 of its blocks. Kept real because
 #: what a CMS emits — a caption ``div``, italics nested round links, a byline built from
 #: spans — is what a hand-written fixture leaves out.
 GLOBAL_VOICES_BODY = (FIXTURES / "global_voices_content_encoded.html").read_text()
@@ -513,12 +513,29 @@ def test_a_tier_one_body_is_stored_as_text_not_the_feeds_html(app_session: Sessi
     article = articles(app_session)[0]
     assert article.body_text is not None
     assert TAG.search(article.body_text) is None
-    assert "&amp;" not in article.body_text
     lines = article.body_text.split("\n")
     assert lines[0] == "Online vs offline protest, how effective it is?"
     assert lines[5] == "Both of them are effective, no?"
     assert lines[-1] == "Written by Juliana Harsianti"
     assert len(lines) == 9
+    assert article.body_provenance is BodyProvenance.TIER1_FEED
+
+
+def test_a_plain_text_body_is_not_read_as_html(app_session: Session) -> None:
+    """An Atom ``<content type="text">`` arrives unescaped; run through the HTML converter,
+    "<b and c>" would be taken for a tag and deleted."""
+    feed = _feed_with_source(app_session, acquisition_tier=AcquisitionTier.FULL_FEED)
+    atom = (
+        b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Ex</title>'
+        b'<entry><id>g1</id><title>One</title><link href="https://x.example/g1"/>'
+        b'<content type="text">Para one.\n\nPara two: a&lt;b and c&gt;d, AT&amp;T.</content>'
+        b"</entry></feed>"
+    )
+
+    _cycle(app_session, FakeFetcher({feed.url: atom}))
+
+    article = articles(app_session)[0]
+    assert article.body_text == "Para one.\nPara two: a<b and c>d, AT&T."
     assert article.body_provenance is BodyProvenance.TIER1_FEED
 
 

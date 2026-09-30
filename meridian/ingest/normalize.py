@@ -6,7 +6,7 @@ against fixtures rather than against a live poll.
 
 Discovery stores the teaser exactly as the publisher wrote it, markup included, because
 ``parse`` records and does not judge. This is where it is judged. A tier-1 body is the
-exception: discovery converts it with ``body_from_html`` before it is written.
+exception: discovery converts it with ``body_from_feed`` before it is written.
 """
 
 import hashlib
@@ -67,8 +67,11 @@ _BLOCK_TAGS = frozenset(
     }
 )
 
-#: Elements whose *content* is code, not prose. A feed should never carry these; some do.
-_OPAQUE_TAGS = frozenset({"script", "style"})
+#: Elements whose *content* is not prose. ``script`` and ``style`` hold code. The rest are
+#: elements ``HTMLParser`` hands over as literal text, markup included — a ``<textarea>``
+#: holding ``<b>x</b>`` yields the string ``<b>x</b>``. feedparser's sanitizer strips most of
+#: them before a body gets here; ``textarea`` survives it.
+_OPAQUE_TAGS = frozenset({"script", "style", "textarea", "iframe", "noembed", "noframes", "xmp"})
 
 
 class _TextExtractor(HTMLParser):
@@ -159,6 +162,35 @@ def body_from_html(raw: str | None) -> str | None:
             blocks.append(line)
         run = []
     return "\n".join(blocks) or None
+
+
+def body_from_plain_text(raw: str | None) -> str | None:
+    """A plain-text body in the shape ``body_from_html`` gives: one line per paragraph.
+
+    A blank line separates paragraphs; a single newline is wrapping, as it is in HTML source.
+    """
+    if raw is None:
+        return None
+    paragraphs = (_collapse_whitespace(p) for p in re.split(r"\n\s*\n", raw))
+    return "\n".join(p for p in paragraphs if p) or None
+
+
+#: Feed content types that are markup. RSS ``content:encoded`` is always ``text/html``.
+_HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+
+
+def body_from_feed(content: str | None, content_type: str | None) -> str | None:
+    """A feed-shipped body as text, read according to the type the feed declared for it.
+
+    Markup is converted, plain text is only reflowed — an HTML parser would delete any text
+    between a ``<`` and a ``>`` in it. Any other type is not an article body: an Atom
+    ``<content>`` may carry any MIME type, an image included.
+    """
+    if content_type in _HTML_TYPES:
+        return body_from_html(content)
+    if content_type == "text/plain":
+        return body_from_plain_text(content)
+    return None
 
 
 def _text_parts(raw: str) -> list[str | None]:
