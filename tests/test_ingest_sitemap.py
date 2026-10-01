@@ -235,3 +235,18 @@ def test_a_document_declaring_a_doctype_is_refused(raw: bytes) -> None:
     bomb or an external entity lives, and a sitemap has no use for one."""
     with pytest.raises(FeedUnreadable, match="DOCTYPE"):
         parse_sitemap(raw)
+
+
+@pytest.mark.parametrize("loc", ["https://x.example:80a/b", "http://[x/a"], ids=["port", "ipv6"])
+def test_a_loc_urlsplit_cannot_read_is_skipped_not_raised(loc: str) -> None:
+    """Raising would fail the whole poll, losing every other entry, every cycle the entry stays
+    listed — about 48 hours for a news sitemap."""
+    parsed = parse_sitemap(sitemap(entry(loc=loc), entry(loc="https://x.example/kept")))
+
+    assert [item.link for item in parsed.items] == ["https://x.example/kept"]
+    assert parsed.skipped == 1
+
+
+def test_an_upper_case_scheme_is_read() -> None:
+    (item,) = parse_sitemap(sitemap(entry(loc="HTTPS://X.example/a"))).items
+    assert item.link == "https://x.example/a"

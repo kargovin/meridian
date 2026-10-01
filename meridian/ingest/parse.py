@@ -99,7 +99,7 @@ def _texts(
 
 
 def _is_http(link: str) -> bool:
-    return link.startswith(("http://", "https://"))
+    return link.lower().startswith(("http://", "https://"))
 
 
 def parse(raw: bytes) -> ParsedFeed:
@@ -137,7 +137,13 @@ def parse(raw: bytes) -> ParsedFeed:
             # "urn:x:1" — which would then be stored as the article's URL and fetched later.
             skipped += 1
             continue
-        link = canonicalize(link)
+        try:
+            link = canonicalize(link)
+        except ValueError:
+            # ``urlsplit`` refuses a port that is not a number or a broken IPv6 literal. One
+            # such item is skipped; raising would fail the poll and lose the rest of the feed.
+            skipped += 1
+            continue
         summary, content, content_type = _texts(entry)
         items.append(
             FeedItem(

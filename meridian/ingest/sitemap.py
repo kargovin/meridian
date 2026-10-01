@@ -69,7 +69,17 @@ def _published(raw: str) -> dt.datetime | None:
 
 
 def _is_http(link: str) -> bool:
-    return link.startswith(("http://", "https://"))
+    return link.lower().startswith(("http://", "https://"))
+
+
+def _canonical(link: str) -> str | None:
+    """The canonical form, or ``None`` for a URL ``urlsplit`` cannot read — a port that is not
+    a number, a broken IPv6 literal. One such entry is skipped; raising would fail the poll and
+    lose every other entry, every cycle the entry stays listed."""
+    try:
+        return canonicalize(link)
+    except ValueError:
+        return None
 
 
 def parse_sitemap(raw: bytes) -> ParsedFeed:
@@ -128,10 +138,11 @@ def parse_sitemap(raw: bytes) -> ParsedFeed:
     for entry, element in news:
         link = _text(_child(entry, "loc"))
         title = _text(_child(element, "title")) if element is not None else ""
-        if not title or not _is_http(link):
+        canonical = _canonical(link) if title and _is_http(link) else None
+        if canonical is None:
             skipped += 1
             continue
-        link = canonicalize(link)
+        link = canonical
         items.append(
             FeedItem(
                 guid=link,

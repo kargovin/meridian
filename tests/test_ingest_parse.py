@@ -163,6 +163,22 @@ def test_an_opaque_guid_is_not_accepted_as_the_articles_url() -> None:
     assert parsed.skipped == 1
 
 
+@pytest.mark.parametrize("link", [b"https://x.example:80a/b", b"http://[x/a"], ids=["port", "ipv6"])
+def test_a_link_urlsplit_cannot_read_is_skipped_not_raised(link: bytes) -> None:
+    """Raising would fail the poll and lose the rest of the feed, every cycle the item stays."""
+    item = RSS[RSS.index(b"<item>") : RSS.index(b"</item>") + len(b"</item>")]
+    bad = item.replace(b"https://x.example/1?utm_source=rss", link).replace(b"urn:x:1", b"urn:x:2")
+    parsed = parse(RSS.replace(item, bad + item))
+
+    assert [i.link for i in parsed.items] == ["https://x.example/1"]
+    assert parsed.skipped == 1
+
+
+def test_an_upper_case_scheme_is_read() -> None:
+    (item,) = parse(RSS.replace(b"https://x.example/1", b"HTTPS://x.example/1")).items
+    assert item.link == "https://x.example/1"
+
+
 def test_a_slightly_invalid_feed_that_still_yields_entries_is_used() -> None:
     """Real publishers emit invalid XML routinely; refusing it drops working sources."""
     raw = RSS.replace(b"<title>Example</title>", b"<title>Example & Co</title>")
