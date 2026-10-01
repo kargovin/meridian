@@ -23,6 +23,13 @@
         "url": "https://globalvoices.org/feed/",
         "discovery_method": "rss",
         "acquisition_tier": "1_full_feed"
+      },
+      {
+        "name": "News sitemap",
+        "url": "https://globalvoices.org/sitemap-news.xml",
+        "discovery_method": "sitemap",
+        "acquisition_tier": "3_extraction",
+        "note": "Fetched 2026-10-01 (Meridian/0.1): 200, Google News markup, 3 entries. Catch-up for what scrolls out of the RSS feed; an article the feed also lists takes the feed's tier-1 body. The article page extracts (8,414 chars on a sample), so tier 3."
       }
     ]
   },
@@ -289,6 +296,13 @@
         "url": "https://feeds.npr.org/1019/rss.xml",
         "discovery_method": "rss",
         "acquisition_tier": "3_extraction"
+      },
+      {
+        "name": "News sitemap",
+        "url": "https://googlecrawl.npr.org/news/sitemap_news.xml",
+        "discovery_method": "sitemap",
+        "acquisition_tier": "3_extraction",
+        "note": "Fetched 2026-10-01 (Meridian/0.1): 200, Google News markup, 153 entries over ~48 h. Publisher-wide, so it widens NPR's ingest beyond the seven section feeds (30 Sep: 80 of 120 entries in none of them). Served from googlecrawl.npr.org, whose robots.txt answers 403 (open). Lists member stations' articles on their own sites (11 of 153); those are not stored under NPR."
       }
     ]
   },
@@ -346,6 +360,34 @@
         "discovery_method": "rss",
         "acquisition_tier": "1_full_feed",
         "note": "Atom feed."
+      },
+      {
+        "name": "News sitemap (AU edition)",
+        "url": "https://theconversation.com/au/sitemap_news.xml",
+        "discovery_method": "sitemap",
+        "acquisition_tier": "3_extraction",
+        "note": "Fetched 2026-10-01 (Meridian/0.1): 200, Google News markup, 35 entries. One per edition: /sitemap_news.xml answers 403 and /global/ is empty. The article page extracts (5,093 chars on a sample), so tier 3; no body is fetched while the rights are headline_only."
+      },
+      {
+        "name": "News sitemap (CA edition)",
+        "url": "https://theconversation.com/ca/sitemap_news.xml",
+        "discovery_method": "sitemap",
+        "acquisition_tier": "3_extraction",
+        "note": "Fetched 2026-10-01 (Meridian/0.1): 200, Google News markup, 8 entries. One per edition: /sitemap_news.xml answers 403 and /global/ is empty. The article page extracts (5,093 chars on a sample), so tier 3; no body is fetched while the rights are headline_only."
+      },
+      {
+        "name": "News sitemap (UK edition)",
+        "url": "https://theconversation.com/uk/sitemap_news.xml",
+        "discovery_method": "sitemap",
+        "acquisition_tier": "3_extraction",
+        "note": "Fetched 2026-10-01 (Meridian/0.1): 200, Google News markup, 31 entries. One per edition: /sitemap_news.xml answers 403 and /global/ is empty. The article page extracts (5,093 chars on a sample), so tier 3; no body is fetched while the rights are headline_only."
+      },
+      {
+        "name": "News sitemap (US edition)",
+        "url": "https://theconversation.com/us/sitemap_news.xml",
+        "discovery_method": "sitemap",
+        "acquisition_tier": "3_extraction",
+        "note": "Fetched 2026-10-01 (Meridian/0.1): 200, Google News markup, 24 entries. One per edition: /sitemap_news.xml answers 403 and /global/ is empty. The article page extracts (5,093 chars on a sample), so tier 3; no body is fetched while the rights are headline_only."
       }
     ]
   },
@@ -458,6 +500,20 @@
         "discovery_method": "rss",
         "acquisition_tier": "3_extraction",
         "note": "Recorded for the record; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "News sitemap 1",
+        "url": "https://www.bbc.co.uk/sitemaps/https-sitemap-uk-news-1.xml",
+        "discovery_method": "sitemap",
+        "acquisition_tier": "3_extraction",
+        "note": "A child of https://www.bbc.co.uk/sitemaps/https-index-uk-news.xml, which is a sitemap index and is not followed. Fetched 2026-10-01 (Meridian/0.1): 200, 972 news entries, all on www.bbc.co.uk. Recorded for the v1 showcase; unreachable while permitted_to_ingest is false."
+      },
+      {
+        "name": "News sitemap 2",
+        "url": "https://www.bbc.co.uk/sitemaps/https-sitemap-uk-news-2.xml",
+        "discovery_method": "sitemap",
+        "acquisition_tier": "3_extraction",
+        "note": "A child of https://www.bbc.co.uk/sitemaps/https-index-uk-news.xml, which is a sitemap index and is not followed. Fetched 2026-10-01 (Meridian/0.1): 200, 311 news entries, all on www.bbc.co.uk. Recorded for the v1 showcase; unreachable while permitted_to_ingest is false."
       }
     ]
   },

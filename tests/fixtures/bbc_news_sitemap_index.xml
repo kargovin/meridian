@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Captured from https://www.bbc.co.uk/sitemaps/https-index-uk-news.xml on 2026-10-01 with User-Agent Meridian/0.1, as served. -->
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9" xmlns:video="http://www.google.com/schemas/sitemap-video/1.1">
+    <sitemap>
+        <loc>https://www.bbc.co.uk/sitemaps/https-sitemap-uk-news-1.xml</loc>
+        <lastmod>2026-10-01T11:57:01Z</lastmod>
+    </sitemap>
+    <sitemap>
+        <loc>https://www.bbc.co.uk/sitemaps/https-sitemap-uk-news-2.xml</loc>
+        <lastmod>2026-10-01T11:59:17Z</lastmod>
+    </sitemap>
+</sitemapindex>

@@ -1,5 +1,10 @@
 """One discovery cycle: poll every pollable feed, record what is new (FR-I1).
 
+Two routes, read by the feed's ``discovery_method``: RSS/Atom (``parse``) and Google News
+sitemaps (``parse_sitemap``). Both yield the same items and pass the same guards — the registry
+gates, ``robots.txt`` for the URL requested, the publisher's pacing, conditional GET — so a
+sitemap differs only in what its items lack: a teaser and a body.
+
 ⚠️ Unlike the repositories, this owns its transaction and commits per feed. That is what makes
 a dead feed survivable: a failure mid-feed rolls that feed back and the next one starts clean,
 where a single cycle-wide transaction would lose the whole cycle's work to one bad publisher.
@@ -34,7 +39,9 @@ from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher
 from meridian.ingest.network import Network
 from meridian.ingest.normalize import body_from_feed
 from meridian.ingest.pacing import round_robin
-from meridian.ingest.parse import FeedItem, FeedUnreadable, parse
+from meridian.ingest.parse import FeedItem, FeedUnreadable, ParsedFeed, parse
+from meridian.ingest.sitemap import parse_sitemap
+from meridian.ingest.urls import on_site
 
 log = logging.getLogger(__name__)
 
@@ -48,11 +55,26 @@ class CycleReport:
     failed: int = 0
     #: Records created. Steady state is a handful; zero is normal and not a fault.
     discovered: int = 0
+    #: The part of ``discovered`` a sitemap created — the denominator ``late_sightings`` is read
+    #: against.
+    sitemap_discovered: int = 0
     #: Feed entries with no usable title or link.
     skipped_items: int = 0
     #: Feeds the registry permits but this cycle cannot read — a discovery method we do not
     #: implement yet. Not a failure and not a success; it must not read as either.
     skipped_feeds: int = 0
+    #: Sitemap entries for an article on another site than the publisher's — a member station
+    #: in NPR's. Not stored: the record would carry this publisher's rights for another's text.
+    off_site_items: int = 0
+    #: Records a sitemap created that a feed then rewrote as its own item would have made them
+    #: (``_adopt``). Each record is adopted at most once.
+    adopted: int = 0
+    #: Feed items whose record a sitemap created and acquire has already taken, so it keeps the
+    #: sitemap's empty lede (``_adopt``). Sightings, not records: one record counts once per
+    #: feed listing it, on every poll that reads the feed (a 304 reads nothing). Each is also
+    #: logged with its article id; the rate that matters is distinct records over
+    #: ``sitemap_discovered`` across a window.
+    late_sightings: int = 0
     #: Feeds whose host's ``robots.txt`` disallows the feed URL for our User-Agent. Not polled,
     #: and recorded in the feed's poll state so the admin surface says why it has stopped.
     robots_blocked: int = 0
@@ -67,11 +89,23 @@ class CycleReport:
             not_modified=self.not_modified + other.not_modified,
             failed=self.failed + other.failed,
             discovered=self.discovered + other.discovered,
+            sitemap_discovered=self.sitemap_discovered + other.sitemap_discovered,
             skipped_items=self.skipped_items + other.skipped_items,
             skipped_feeds=self.skipped_feeds + other.skipped_feeds,
+            off_site_items=self.off_site_items + other.off_site_items,
+            adopted=self.adopted + other.adopted,
+            late_sightings=self.late_sightings + other.late_sightings,
             robots_blocked=self.robots_blocked + other.robots_blocked,
             duration_seconds=self.duration_seconds + other.duration_seconds,
         )
+
+
+#: How each discovery method's response is read. A method absent here is registered but not
+#: polled, and is counted in ``skipped_feeds``.
+_PARSERS: dict[DiscoveryMethod, Callable[[bytes], ParsedFeed]] = {
+    DiscoveryMethod.RSS: parse,
+    DiscoveryMethod.SITEMAP: parse_sitemap,
+}
 
 
 def _body_text(source: Source, feed: Feed, item: FeedItem) -> str | None:
@@ -128,7 +162,20 @@ def _collapsed_already(session: Session, feed: Feed, item: FeedItem) -> bool:
     )
 
 
-def _insert(session: Session, source: Source, feed: Feed, item: FeedItem) -> bool:
+def _store(session: Session, source: Source, feed: Feed, item: FeedItem) -> CycleReport:
+    """Record one item: a new record, an adopted one, or nothing."""
+    if _collapsed_already(session, feed, item):
+        return CycleReport()
+    body_text = _body_text(source, feed, item)
+    if _insert(session, feed, item, body_text):
+        from_sitemap = feed.discovery_method is DiscoveryMethod.SITEMAP
+        return CycleReport(discovered=1, sitemap_discovered=int(from_sitemap))
+    if feed.discovery_method is DiscoveryMethod.SITEMAP:
+        return CycleReport()
+    return _adopt(session, feed, item, body_text)
+
+
+def _insert(session: Session, feed: Feed, item: FeedItem, body_text: str | None) -> bool:
     """Create the record and its work row, or do nothing. True if it was new.
 
     Idempotency is the schema's, not this function's: ``UNIQUE(source_id, guid)`` and
@@ -144,9 +191,6 @@ def _insert(session: Session, source: Source, feed: Feed, item: FeedItem) -> boo
     A copy dedup collapsed has left ``canonical_record``, so the constraints cannot see it;
     ``_collapsed_already`` is the lookup that stands in for them.
     """
-    if _collapsed_already(session, feed, item):
-        return False
-    body_text = _body_text(source, feed, item)
     article_id = session.scalar(
         insert(CanonicalRecord)
         .values(
@@ -175,6 +219,108 @@ def _insert(session: Session, source: Source, feed: Feed, item: FeedItem) -> boo
         raise RuntimeError(f"{ENTRY_STATE} owes no stage; the article chain is empty")
     session.add(PipelineWork(article_id=article_id, stage=stage))
     return True
+
+
+def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) -> CycleReport:
+    """Rewrite a record a sitemap created as this feed's item would have created it. Reports
+    ``adopted`` if it did, ``late_sightings`` if acquire has already taken the record.
+
+    ⚠️ Without this, the route an article arrives by decides the record it becomes. DO NOTHING
+    keeps whichever insert came first, and a sitemap entry has no teaser and no body: an article
+    the sitemap lists before its feed does keeps a NULL lede for good — on a headline-only
+    publisher the lede is half of what we hold — and on a tier-1 publisher acquire fetches a
+    page whose text the feed item already carried.
+
+    Everything discovery writes is rewritten, the feed included, so acquire takes the feed's
+    route. ``published_at`` is kept when the item has none, and the guid when another record of
+    the publisher already holds the item's — one write must not fail the feed's whole poll.
+
+    ⚠️ Only while nothing downstream has read the record: still at the entry state, and its work
+    row neither claimed nor locked. Acquire cleans the lede and decides the language from what
+    is on the record, and a rewrite under a claimed row lands a raw teaser on a record acquire is
+    about to advance, or a feed body under a page it is fetching. Past that point the record
+    stays as the sitemap made it. ``run_cycle`` polls a publisher's feeds before its sitemaps,
+    so what is left is an article the feed lists a cycle or more after its sitemap — the feed
+    lagging, or down when the sitemap was read: acquire runs ten times in a discovery interval
+    at the defaults and takes the record first. That case is counted and logged, not repaired.
+    Holding a sitemap's records from acquire for a cycle would repair the lagging feed, at a
+    cycle of freshness on every article only a sitemap lists — most of them, on the roster — so
+    it waits on the count saying the case is real.
+
+    Record, then work row — the lock order every writer that takes both follows (see
+    ``work_queue._lock_article``). ``SKIP LOCKED`` on both: a held lock means a worker or the
+    reconciler is on the article now, which is the case this declines anyway, and waiting would
+    stall the cycle behind it. The record takes ``FOR UPDATE``, not ``FOR NO KEY UPDATE``: the
+    rewrite usually changes the guid, a column of a unique key, and PostgreSQL takes
+    ``FOR UPDATE`` for that — taken at the UPDATE instead, it waits on any ``FOR KEY SHARE``
+    holder, which ``SKIP LOCKED`` on the weaker lock does not skip.
+    """
+    sitemap_feeds = sa.select(Feed.feed_id).where(Feed.discovery_method == DiscoveryMethod.SITEMAP)
+    found = session.execute(
+        sa.select(CanonicalRecord.article_id, CanonicalRecord.pipeline_state).where(
+            CanonicalRecord.url_canonical == item.link,
+            CanonicalRecord.source_id == feed.source_id,
+            CanonicalRecord.feed_id.in_(sitemap_feeds),
+        )
+    ).first()
+    if found is None:
+        return CycleReport()
+    if found.pipeline_state is not ENTRY_STATE:
+        log.info(
+            "late sighting: feed %d lists article %d, made by a sitemap and already %s",
+            feed.feed_id,
+            found.article_id,
+            found.pipeline_state,
+        )
+        return CycleReport(late_sightings=1)
+    # Read again under the lock: acquire may have advanced it since.
+    article_id = session.scalar(
+        sa.select(CanonicalRecord.article_id)
+        .where(
+            CanonicalRecord.article_id == found.article_id,
+            CanonicalRecord.pipeline_state == ENTRY_STATE,
+        )
+        .with_for_update(skip_locked=True)
+    )
+    if article_id is None:
+        return CycleReport()
+    unclaimed = session.scalar(
+        sa.select(PipelineWork.work_id)
+        .where(
+            PipelineWork.article_id == article_id,
+            PipelineWork.claimed_at.is_(None),
+            PipelineWork.dead_lettered_at.is_(None),
+        )
+        .with_for_update(skip_locked=True)
+    )
+    if unclaimed is None:
+        return CycleReport()
+
+    values: dict[str, object] = {
+        "feed_id": feed.feed_id,
+        "title": item.title,
+        "lede": item.summary,
+        "body_text": body_text,
+        "body_provenance": BodyProvenance.TIER1_FEED if body_text is not None else None,
+    }
+    if item.published_at is not None:
+        values["published_at"] = item.published_at
+    guid_taken = session.scalar(
+        sa.select(
+            sa.exists().where(
+                CanonicalRecord.source_id == feed.source_id,
+                CanonicalRecord.guid == item.guid,
+                CanonicalRecord.article_id != article_id,
+            )
+        )
+    )
+    if not guid_taken:
+        values["guid"] = item.guid
+    session.execute(
+        sa.update(CanonicalRecord).where(CanonicalRecord.article_id == article_id).values(**values),
+        execution_options={"synchronize_session": False},
+    )
+    return CycleReport(adopted=1)
 
 
 def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) -> CycleReport:
@@ -214,14 +360,22 @@ def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) ->
         return CycleReport(polled=1, failed=1)
 
     try:
-        parsed = parse(body)
+        parsed = _PARSERS[feed.discovery_method](body)
     except FeedUnreadable as exc:
         poll_state.record(session, feed.feed_id, status=result.status, error=f"unreadable: {exc}")
         session.commit()
         log.warning("feed %d (%s) is unreadable: %s", feed.feed_id, feed.url, exc)
         return CycleReport(polled=1, failed=1)
 
-    discovered = sum(_insert(session, source, feed, item) for item in parsed.items)
+    items = parsed.items
+    if feed.discovery_method is DiscoveryMethod.SITEMAP:
+        # ⚠️ A news sitemap lists what its operator wants crawled, which is not always the
+        # operator's own: NPR's carries member stations' articles on the stations' own sites.
+        # A record is the publisher's — its rights are read through ``source_id`` — so an
+        # article on another site is not stored under this one. A feed is the publisher's own
+        # selection and is not filtered.
+        items = tuple(item for item in items if on_site(item.link, source.home_url))
+    stored = sum((_store(session, source, feed, item) for item in items), CycleReport())
     poll_state.record(
         session,
         feed.feed_id,
@@ -230,7 +384,11 @@ def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) ->
         last_modified=result.last_modified,
     )
     session.commit()
-    return CycleReport(polled=1, discovered=discovered, skipped_items=parsed.skipped)
+    return stored + CycleReport(
+        polled=1,
+        skipped_items=parsed.skipped,
+        off_site_items=len(parsed.items) - len(items),
+    )
 
 
 def run_cycle(
@@ -252,16 +410,22 @@ def run_cycle(
     host rather than about each job separately.
     """
     pollable = feeds_repo.pollable(session)
-    due = [pair for pair in pollable if pair[0].discovery_method is DiscoveryMethod.RSS]
+    # A publisher's feeds before its sitemaps: an article both list is then created from the
+    # feed's item, with its teaser and any body, and the sitemap's sighting does nothing. The
+    # sort is stable and ``round_robin`` keeps each publisher's own order.
+    due = sorted(
+        (pair for pair in pollable if pair[0].discovery_method in _PARSERS),
+        key=lambda pair: pair[0].discovery_method is DiscoveryMethod.SITEMAP,
+    )
     # ⚠️ The read above opened a transaction; end it before the first request of the cycle.
     # ``_poll_one`` commits before its own fetch for the same reason (VACUUM and the oldest
     # xmin), but the robots lookup below comes first and would otherwise carry this one.
     session.commit()
 
     # A feed the registry permits but this cycle cannot read. Counted rather than dropped
-    # silently: a sitemap source is registered correctly and is simply not implemented yet, and
-    # without this it appears in no count, no log line and no poll-state row — indistinguishable
-    # from a publisher nobody added.
+    # silently: a WebSub or section-scrape feed is registered correctly and is simply not
+    # implemented yet, and without this it appears in no count, no log line and no poll-state
+    # row — indistinguishable from a publisher nobody added.
     skipped = len(pollable) - len(due)
     report = CycleReport(skipped_feeds=skipped)
     if skipped:

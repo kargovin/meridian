@@ -92,3 +92,16 @@ def canonicalize(url: str) -> str:
     query = urlencode(sorted(kept))
 
     return urlunsplit((scheme, netloc, parts.path, query, ""))
+
+
+def on_site(url: str, home_url: str) -> bool:
+    """Whether ``url`` is on the site ``home_url`` names: the same host, or a subdomain of it.
+
+    A leading ``www.`` on the home host is ignored, so ``https://www.npr.org`` covers
+    ``npr.org`` and every ``*.npr.org``. Nothing else is folded: a publisher whose articles live
+    on a sibling domain (``bbc.com`` beside ``bbc.co.uk``) is not on its home site by this test,
+    and the fix is the registry's ``home_url``, not a list here.
+    """
+    home = (urlsplit(home_url).hostname or "").removeprefix("www.")
+    host = urlsplit(url).hostname or ""
+    return bool(home) and (host == home or host.endswith(f".{home}"))

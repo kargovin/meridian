@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Captured from https://theconversation.com/ca/sitemap_news.xml on 2026-10-01 with User-Agent Meridian/0.1; trimmed to 3 of its 8 entries, otherwise as served. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://theconversation.com/standardized-tests-needed-to-boost-student-achievement-saskatchewan-begs-to-differ-292179</loc>
+    <priority>1.0</priority>
+    <news:news>
+      <news:publication>
+        <news:name>The Conversation Canada</news:name>
+        <news:language>en</news:language>
+      </news:publication>
+      <news:publication_date>2026-09-30T19:37:12Z</news:publication_date>
+      <news:title>Standardized tests needed to boost student achievement? Saskatchewan begs to differ</news:title>
+      <news:keywords>Literacy, Numeracy, PISA, Standardized testing, Saskatchewan education, student academic achievement</news:keywords>
+    </news:news>
+    <image:image>
+      <image:loc>https://images.theconversation.com/files/762356/original/file-20260925-50-xqh8q.jpg?ixlib=rb-4.1.1&amp;rect=0%2C452%2C8660%2C4871&amp;q=45&amp;auto=format&amp;w=496&amp;fit=clip</image:loc>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://theconversation.com/canada-promised-a-new-citizenship-guide-that-better-addresses-reconciliation-a-decade-ago-it-still-hasnt-arrived-292725</loc>
+    <priority>1.0</priority>
+    <news:news>
+      <news:publication>
+        <news:name>The Conversation Canada</news:name>
+        <news:language>en</news:language>
+      </news:publication>
+      <news:publication_date>2026-09-30T16:11:01Z</news:publication_date>
+      <news:title>Canada promised a new citizenship guide that better addresses reconciliation a decade ago. It still hasn't arrived</news:title>
+      <news:keywords>Genocide, Reconciliation, Truth and reconciliation, Citizenship test, Indigenous peoples, missing and murdered Indigenous women and girls, Settler colonialism, Discover Canada, Citizenship study guide</news:keywords>
+    </news:news>
+    <image:image>
+      <image:loc>https://images.theconversation.com/files/762899/original/file-20260929-50-2214xf.JPG?ixlib=rb-4.1.1&amp;rect=0%2C254%2C4711%2C2649&amp;q=45&amp;auto=format&amp;w=496&amp;fit=clip</image:loc>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://theconversation.com/scientists-predicted-friday-13-november-2026-will-be-doomsday-should-you-be-worried-290354</loc>
+    <priority>1.0</priority>
+    <news:news>
+      <news:publication>
+        <news:name>The Conversation Canada</news:name>
+        <news:language>en</news:language>
+      </news:publication>
+      <news:publication_date>2026-09-30T15:55:21Z</news:publication_date>
+      <news:title>Scientists predicted Friday 13 November 2026 will be 'Doomsday.' Should you be worried?</news:title>
+      <news:keywords>Science, Population growth, Birth rate, Doomsday, Infinity, Malthusianism, exponential growth</news:keywords>
+    </news:news>
+    <image:image>
+      <image:loc>https://images.theconversation.com/files/757113/original/file-20260901-50-u96wjd.jpg?ixlib=rb-4.1.1&amp;rect=0%2C337%2C6454%2C3630&amp;q=45&amp;auto=format&amp;w=496&amp;fit=clip</image:loc>
+    </image:image>
+  </url>
+</urlset>
