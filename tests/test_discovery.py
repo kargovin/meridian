@@ -31,6 +31,7 @@ from meridian.db.models import (
     PipelineWork,
     Source,
 )
+from meridian.ingest.acquire import run_batch
 from meridian.ingest.discovery import CycleReport, run_cycle
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher, FetchResult
 from meridian.ingest.network import Network
@@ -1433,7 +1434,8 @@ def test_the_route_an_article_arrives_by_does_not_change_its_record(
     app_session: Session, first: str
 ) -> None:
     """AC4's falsifier. The sitemap sees the article a cycle before the feed does — the order a
-    within-cycle sort cannot fix — and the record still ends with the feed's teaser and body."""
+    within-cycle sort cannot fix — and while acquire has not reached the record, it still ends
+    with the feed's teaser and body. Once acquire has, it does not: see the next test."""
     feed, sm = _publisher_with_feed_and_sitemap(app_session)
     if first == "sitemap":
         _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
@@ -1451,7 +1453,37 @@ def test_the_route_an_article_arrives_by_does_not_change_its_record(
         dt.datetime(2026, 8, 25, 9, 14, 2, tzinfo=dt.UTC),
     )
     assert report.adopted == (1 if first == "sitemap" else 0)
+    assert report.late_sightings == 0
     assert app_session.scalar(sa.select(sa.func.count()).select_from(PipelineWork)) == 1
+
+
+def test_a_record_acquire_has_taken_is_counted_as_a_late_sighting(app_session: Session) -> None:
+    """The limit of AC4, stated as a test. Acquire runs ten times in a discovery interval, so an
+    article a feed lists a cycle after its sitemap has usually been acquired already and keeps
+    the sitemap's empty lede. Counted every cycle the feed lists it: the number that says
+    whether holding a sitemap's records for the feed is worth a cycle of freshness."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session, rights_level=RightsLevel.HEADLINE_ONLY)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    clock = SimClock(fetch_cost=0.0)
+    pacer = Pacer(sleep=clock.sleep, clock=clock)
+    fetcher = FakeFetcher({})
+    acquired = run_batch(
+        app_session,
+        network=Network(
+            fetcher=fetcher, robots=RobotsCache(fetcher, pacer, clock=clock), pacer=pacer
+        ),
+        lease=dt.timedelta(minutes=5),
+    )
+
+    reports = [
+        _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
+        for _ in range(2)
+    ]
+
+    assert acquired.acquired == 1
+    assert [(r.adopted, r.late_sightings) for r in reports] == [(0, 1), (0, 1)]
+    (article,) = articles(app_session)
+    assert (article.feed_id, article.lede) == (sm.feed_id, None)
 
 
 def test_adoption_respects_body_rights(app_session: Session) -> None:
@@ -1478,7 +1510,7 @@ def test_a_record_already_claimed_by_acquire_is_not_adopted(app_session: Session
 
     report = _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
 
-    assert report.adopted == 0
+    assert (report.adopted, report.late_sightings) == (0, 0)
     (article,) = articles(app_session)
     assert (article.feed_id, article.lede, article.body_text) == (sm.feed_id, None, None)
 
@@ -1494,7 +1526,7 @@ def test_a_record_past_acquire_is_not_adopted(app_session: Session) -> None:
 
     report = _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
 
-    assert report.adopted == 0
+    assert (report.adopted, report.late_sightings) == (0, 1)
     (article,) = articles(app_session)
     assert article.pipeline_state is PipelineState.ACQUIRED
     assert (article.feed_id, article.lede) == (sm.feed_id, None)

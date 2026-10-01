@@ -66,6 +66,10 @@ class CycleReport:
     #: Records a sitemap created that a feed then rewrote as its own item would have made them
     #: (``_adopt``). Each record is adopted at most once.
     adopted: int = 0
+    #: Feed items whose record a sitemap created and acquire has already taken, so it keeps the
+    #: sitemap's empty lede. A gauge, not events: a record counts every cycle the feed lists it.
+    #: Zero is the expectation; a steady count says feeds lag their sitemaps by a cycle or more.
+    late_sightings: int = 0
     #: Feeds whose host's ``robots.txt`` disallows the feed URL for our User-Agent. Not polled,
     #: and recorded in the feed's poll state so the admin surface says why it has stopped.
     robots_blocked: int = 0
@@ -84,6 +88,7 @@ class CycleReport:
             skipped_feeds=self.skipped_feeds + other.skipped_feeds,
             off_site_items=self.off_site_items + other.off_site_items,
             adopted=self.adopted + other.adopted,
+            late_sightings=self.late_sightings + other.late_sightings,
             robots_blocked=self.robots_blocked + other.robots_blocked,
             duration_seconds=self.duration_seconds + other.duration_seconds,
         )
@@ -158,11 +163,9 @@ def _store(session: Session, source: Source, feed: Feed, item: FeedItem) -> Cycl
     body_text = _body_text(source, feed, item)
     if _insert(session, feed, item, body_text):
         return CycleReport(discovered=1)
-    if feed.discovery_method is not DiscoveryMethod.SITEMAP and _adopt(
-        session, feed, item, body_text
-    ):
-        return CycleReport(adopted=1)
-    return CycleReport()
+    if feed.discovery_method is DiscoveryMethod.SITEMAP:
+        return CycleReport()
+    return _adopt(session, feed, item, body_text)
 
 
 def _insert(session: Session, feed: Feed, item: FeedItem, body_text: str | None) -> bool:
@@ -211,9 +214,9 @@ def _insert(session: Session, feed: Feed, item: FeedItem, body_text: str | None)
     return True
 
 
-def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) -> bool:
-    """Rewrite a record a sitemap created as this feed's item would have created it. True if
-    it did.
+def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) -> CycleReport:
+    """Rewrite a record a sitemap created as this feed's item would have created it. Reports
+    ``adopted`` if it did, ``late_sightings`` if acquire has already taken the record.
 
     ⚠️ Without this, the route an article arrives by decides the record it becomes. DO NOTHING
     keeps whichever insert came first, and a sitemap entry has no teaser and no body: an article
@@ -230,8 +233,11 @@ def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) 
     is on the record, and a rewrite under a claimed row lands a raw teaser on a record acquire is
     about to advance, or a feed body under a page it is fetching. Past that point the record
     stays as the sitemap made it. ``run_cycle`` polls a publisher's feeds before its sitemaps,
-    so what is left is an article the feed lists a cycle later than the sitemap, taken by
-    acquire in between.
+    so what is left is an article the feed lists a cycle or more after its sitemap: acquire runs
+    ten times in a discovery interval at the defaults and takes the record first. That case is
+    counted, not repaired. Holding a sitemap's records from acquire for a cycle would repair
+    it, at a cycle of freshness on every article only a sitemap lists — most of them, on the
+    roster — so it waits on the count saying the case is real.
 
     Record, then work row — the lock order every writer that takes both follows (see
     ``work_queue._lock_article``). ``SKIP LOCKED`` on both: a held lock means a worker or the
@@ -239,18 +245,28 @@ def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) 
     stall the cycle behind it.
     """
     sitemap_feeds = sa.select(Feed.feed_id).where(Feed.discovery_method == DiscoveryMethod.SITEMAP)
+    found = session.execute(
+        sa.select(CanonicalRecord.article_id, CanonicalRecord.pipeline_state).where(
+            CanonicalRecord.url_canonical == item.link,
+            CanonicalRecord.source_id == feed.source_id,
+            CanonicalRecord.feed_id.in_(sitemap_feeds),
+        )
+    ).first()
+    if found is None:
+        return CycleReport()
+    if found.pipeline_state is not ENTRY_STATE:
+        return CycleReport(late_sightings=1)
+    # Read again under the lock: acquire may have advanced it since.
     article_id = session.scalar(
         sa.select(CanonicalRecord.article_id)
         .where(
-            CanonicalRecord.url_canonical == item.link,
-            CanonicalRecord.source_id == feed.source_id,
+            CanonicalRecord.article_id == found.article_id,
             CanonicalRecord.pipeline_state == ENTRY_STATE,
-            CanonicalRecord.feed_id.in_(sitemap_feeds),
         )
         .with_for_update(key_share=True, skip_locked=True)
     )
     if article_id is None:
-        return False
+        return CycleReport()
     unclaimed = session.scalar(
         sa.select(PipelineWork.work_id)
         .where(
@@ -261,7 +277,7 @@ def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) 
         .with_for_update(skip_locked=True)
     )
     if unclaimed is None:
-        return False
+        return CycleReport()
 
     values: dict[str, object] = {
         "feed_id": feed.feed_id,
@@ -287,7 +303,7 @@ def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) 
         sa.update(CanonicalRecord).where(CanonicalRecord.article_id == article_id).values(**values),
         execution_options={"synchronize_session": False},
     )
-    return True
+    return CycleReport(adopted=1)
 
 
 def _poll_one(session: Session, feed: Feed, source: Source, fetcher: Fetcher) -> CycleReport:
