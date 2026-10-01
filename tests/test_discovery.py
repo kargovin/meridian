@@ -4,6 +4,7 @@ No network: ``run_cycle`` takes its fetcher as an argument, so these drive the r
 against feeds we author here.
 """
 
+import datetime as dt
 import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -28,6 +29,7 @@ from meridian.db.models import (
     Feed,
     FeedPollState,
     PipelineWork,
+    Source,
 )
 from meridian.ingest.discovery import CycleReport, run_cycle
 from meridian.ingest.fetch import DEFAULT_USER_AGENT, Fetcher, FetchResult
@@ -322,12 +324,15 @@ def test_a_crashing_feed_does_not_lose_another_feeds_work(app_session: Session) 
     assert poll_state.get(app_session, bad.feed_id) is not None
 
 
-def test_a_feed_we_cannot_read_yet_is_counted_not_dropped(app_session: Session) -> None:
-    """A sitemap source is registered correctly and simply not implemented here. Without a
-    count it appears in no report, no log line and no poll-state row — indistinguishable from a
-    publisher nobody added. One is on the live roster.
+@pytest.mark.parametrize("method", [DiscoveryMethod.WEBSUB, DiscoveryMethod.SECTION_SCRAPE])
+def test_a_feed_we_cannot_read_yet_is_counted_not_dropped(
+    app_session: Session, method: DiscoveryMethod
+) -> None:
+    """A WebSub or section-scrape feed is registered correctly and simply not implemented here.
+    Without a count it appears in no report, no log line and no poll-state row —
+    indistinguishable from a publisher nobody added.
     """
-    feed = _feed_with_source(app_session, discovery_method=DiscoveryMethod.SITEMAP)
+    feed = _feed_with_source(app_session, discovery_method=method)
     fetcher = FakeFetcher({feed.url: ONE_ITEM})
 
     report = _cycle(app_session, fetcher)
@@ -383,9 +388,11 @@ def test_a_gated_feed_is_not_polled(
     assert articles(app_session) == []
 
 
-def test_a_non_rss_feed_is_not_polled(app_session: Session) -> None:
-    """Sitemap discovery is a later story; this one reads RSS and Atom."""
-    feed = _feed_with_source(app_session, discovery_method=DiscoveryMethod.SITEMAP)
+@pytest.mark.parametrize("method", [DiscoveryMethod.WEBSUB, DiscoveryMethod.SECTION_SCRAPE])
+def test_a_feed_of_an_unimplemented_method_is_not_polled(
+    app_session: Session, method: DiscoveryMethod
+) -> None:
+    feed = _feed_with_source(app_session, discovery_method=method)
     fetcher = FakeFetcher({feed.url: ONE_ITEM})
 
     _cycle(app_session, fetcher)
@@ -1102,3 +1109,555 @@ def test_another_publishers_note_with_the_same_guid_does_not_hide_an_item(
 
     assert report.discovered == 1
     assert sorted(a.guid for a in articles(app_session)) == ["g1", "rep"]
+
+
+# --------------------------------------------------------------------------- news sitemaps
+
+SITE = "https://x.example"
+NEWS_NS = (
+    'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
+    'xmlns:news="http://www.google.com/schemas/sitemap-news/0.9"'
+)
+
+
+def news_sitemap(*entries: tuple[str, str]) -> bytes:
+    """A news sitemap listing ``(url, title)`` pairs."""
+    urls = "".join(
+        f"<url><loc>{url}</loc><news:news>"
+        "<news:publication_date>2026-10-01T07:50:02-04:00</news:publication_date>"
+        f"<news:title>{title}</news:title></news:news></url>"
+        for url, title in entries
+    )
+    return f'<?xml version="1.0"?><urlset {NEWS_NS}>{urls}</urlset>'.encode()
+
+
+def rss_item_with_body(guid: str = "g1", *, link: str = f"{SITE}/g1") -> bytes:
+    return (
+        '<?xml version="1.0"?>'
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        "<channel><title>Ex</title><item><title>Floods displace thousands</title>"
+        f"<link>{link}</link><guid>{guid}</guid>"
+        "<pubDate>Tue, 25 Aug 2026 09:14:02 GMT</pubDate>"
+        "<description>A teaser.</description>"
+        "<content:encoded><![CDATA[<p>THE WHOLE ARTICLE</p>]]></content:encoded>"
+        "</item></channel></rss>"
+    ).encode()
+
+
+EMPTY_RSS = feed_xml()
+# A headline of its own: the sitemap and the feed spell one article's title differently, which
+# is what makes the record's title say which route it was made from.
+G1_SITEMAP = news_sitemap((f"{SITE}/g1", "Thousands displaced as floods hit"))
+
+
+def _publisher_with_feed_and_sitemap(
+    session: Session, *, sitemap_first: bool = True, **source_kw: Any
+) -> tuple[Feed, Feed]:
+    """One publisher with an RSS feed and a news sitemap. The sitemap gets the lower id by
+    default, so feed-id order alone would poll it first."""
+    source = make_source(session, home_url=SITE, **source_kw)
+
+    def sitemap() -> Feed:
+        return make_feed(
+            session,
+            source,
+            url="https://sitemaps.example/news.xml",
+            discovery_method=DiscoveryMethod.SITEMAP,
+            acquisition_tier=AcquisitionTier.EXTRACTION,
+        )
+
+    def rss() -> Feed:
+        return make_feed(session, source, url="https://feeds.example/a.xml")
+
+    if sitemap_first:
+        sm, feed = sitemap(), rss()
+    else:
+        feed, sm = rss(), sitemap()
+    session.commit()
+    return feed, sm
+
+
+def _sitemap_feed(session: Session, url: str = "https://sitemaps.example/news.xml") -> Feed:
+    return _feed_with_source(
+        session,
+        url=url,
+        discovery_method=DiscoveryMethod.SITEMAP,
+        acquisition_tier=AcquisitionTier.EXTRACTION,
+        source={"home_url": SITE},
+    )
+
+
+def test_a_sitemap_feed_is_polled_and_produces_records_and_work(app_session: Session) -> None:
+    """AC1. One record and one acquire row per entry, created in the feed's transaction exactly
+    as an RSS item's are; and the feed is no longer counted as unreadable."""
+    feed = _sitemap_feed(app_session)
+    raw = news_sitemap((f"{SITE}/a", "One"), (f"{SITE}/b", "Two"))
+
+    report = _cycle(app_session, FakeFetcher({feed.url: raw}))
+
+    assert (report.polled, report.discovered, report.skipped_feeds) == (1, 2, 0)
+    stored = articles(app_session)
+    assert [(a.url_canonical, a.guid, a.title) for a in stored] == [
+        (f"{SITE}/a", f"{SITE}/a", "One"),
+        (f"{SITE}/b", f"{SITE}/b", "Two"),
+    ]
+    assert all(a.lede is None and a.body_text is None for a in stored)
+    assert all(a.feed_id == feed.feed_id for a in stored)
+    work = app_session.scalars(sa.select(PipelineWork)).all()
+    assert {w.article_id for w in work} == {a.article_id for a in stored}
+    assert len(work) == len(stored)
+    assert {w.stage for w in work} == {Stage.ACQUIRE}
+
+
+def test_repolling_a_sitemap_creates_each_entry_once(app_session: Session) -> None:
+    feed = _sitemap_feed(app_session)
+    fetcher = FakeFetcher({feed.url: G1_SITEMAP})
+
+    reports = [_cycle(app_session, fetcher) for _ in range(3)]
+
+    assert [r.discovered for r in reports] == [1, 0, 0]
+    assert [r.adopted for r in reports] == [0, 0, 0]
+    assert len(articles(app_session)) == 1
+    assert app_session.scalar(sa.select(sa.func.count()).select_from(PipelineWork)) == 1
+
+
+def test_a_sitemap_entry_on_another_site_is_not_stored_and_is_counted(
+    app_session: Session,
+) -> None:
+    """NPR's news sitemap lists member stations' articles on the stations' own sites. Stored
+    under NPR, a station's article would be held on NPR's rights determination."""
+    feed = _sitemap_feed(app_session)
+    raw = news_sitemap(
+        (f"{SITE}/ours", "Ours"),
+        ("https://sub.x.example/also-ours", "Also ours"),
+        ("https://www.station.example/theirs", "Theirs"),
+    )
+
+    report = _cycle(app_session, FakeFetcher({feed.url: raw}))
+
+    assert sorted(a.url_canonical for a in articles(app_session)) == [
+        "https://sub.x.example/also-ours",
+        f"{SITE}/ours",
+    ]
+    assert (report.discovered, report.off_site_items, report.skipped_items) == (2, 1, 0)
+
+
+def test_an_rss_item_on_another_site_is_still_stored(app_session: Session) -> None:
+    """The site filter is the sitemap's alone: a feed is the publisher's own selection."""
+    feed = _feed_with_source(app_session, source={"home_url": "https://elsewhere.example"})
+
+    report = _cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}))
+
+    assert (report.discovered, report.off_site_items) == (1, 0)
+
+
+def test_the_npr_capture_keeps_npr_org_and_drops_the_station(app_session: Session) -> None:
+    """AC2 end to end, on the real capture: served from googlecrawl.npr.org, read against the
+    registry's home_url."""
+    feed = _feed_with_source(
+        app_session,
+        url="https://googlecrawl.npr.org/news/sitemap_news.xml",
+        discovery_method=DiscoveryMethod.SITEMAP,
+        acquisition_tier=AcquisitionTier.EXTRACTION,
+        source={"home_url": "https://www.npr.org"},
+    )
+    raw = (FIXTURES / "npr_sitemap_news.xml").read_bytes()
+
+    report = _cycle(app_session, FakeFetcher({feed.url: raw}))
+
+    assert (report.discovered, report.off_site_items) == (4, 1)
+    assert all(a.url_canonical.startswith("https://www.npr.org/") for a in articles(app_session))
+
+
+# ------------------------------------------------- sitemaps: the guards (AC3)
+
+
+def test_robots_is_read_for_the_sitemaps_own_host(app_session: Session) -> None:
+    """NPR's sitemap is on googlecrawl.npr.org. The rule that binds is that host's, and a
+    disallow on the publisher's home host says nothing about it."""
+    feed = _sitemap_feed(app_session, url="https://sitemaps.example/news.xml")
+    fetcher = FakeFetcher(
+        {
+            "https://sitemaps.example/robots.txt": FetchResult(
+                status=200, body=b"User-agent: *\nDisallow: /news.xml\n"
+            ),
+            f"{SITE}/robots.txt": FetchResult(status=200, body=b"User-agent: *\nAllow: /\n"),
+            feed.url: G1_SITEMAP,
+        }
+    )
+
+    report = _cycle(app_session, fetcher)
+
+    assert fetcher.feeds == []
+    assert report.robots_blocked == 1
+    app_session.expire_all()
+    state = poll_state.get(app_session, feed.feed_id)
+    assert state is not None and state.last_error == "robots: disallowed"
+
+
+def test_a_home_host_disallow_does_not_block_a_sitemap_elsewhere(app_session: Session) -> None:
+    feed = _sitemap_feed(app_session, url="https://sitemaps.example/news.xml")
+    fetcher = FakeFetcher(
+        {
+            f"{SITE}/robots.txt": FetchResult(status=200, body=b"User-agent: *\nDisallow: /\n"),
+            feed.url: G1_SITEMAP,
+        }
+    )
+
+    report = _cycle(app_session, fetcher)
+
+    assert report.discovered == 1
+    assert f"{SITE}/robots.txt" not in [url for url, _, _ in fetcher.calls]
+
+
+@pytest.mark.parametrize(
+    ("feed_kw", "source_kw"),
+    [
+        ({"enabled": False}, {}),
+        ({}, {"enabled": False}),
+        ({}, {"permitted_to_ingest": False}),
+    ],
+    ids=["feed disabled", "publisher disabled", "publisher not permitted"],
+)
+def test_a_gated_sitemap_is_not_polled(
+    app_session: Session, feed_kw: dict[str, Any], source_kw: dict[str, Any]
+) -> None:
+    """AP's news sitemap is registered at ``permitted_to_ingest: false``; this is that case."""
+    feed = _feed_with_source(
+        app_session,
+        url="https://sitemaps.example/news.xml",
+        discovery_method=DiscoveryMethod.SITEMAP,
+        source={"home_url": SITE, **source_kw},
+        **feed_kw,
+    )
+    fetcher = FakeFetcher({feed.url: G1_SITEMAP})
+
+    report = _cycle(app_session, fetcher)
+
+    assert fetcher.calls == []
+    assert report.polled == 0
+
+
+def test_a_feed_and_a_sitemap_of_one_publisher_share_its_rate_budget(
+    app_session: Session,
+) -> None:
+    feed, sm = _publisher_with_feed_and_sitemap(app_session, rate_limit_per_min=60)
+    clock = SimClock(fetch_cost=0.0)
+
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}), clock=clock)
+
+    # Four requests to one publisher — a robots.txt per host, then each feed — one gap apart.
+    assert clock.slept == [1.0, 1.0, 1.0]
+
+
+def test_a_sitemap_poll_carries_the_validator_it_was_given(app_session: Session) -> None:
+    feed = _sitemap_feed(app_session)
+    fetcher = FakeFetcher({feed.url: G1_SITEMAP}, etag='"v1"')
+
+    _cycle(app_session, fetcher)
+    report = _cycle(app_session, fetcher)
+
+    assert fetcher.feeds[-1][2].get("If-None-Match") == '"v1"'
+    assert report.not_modified == 1
+
+
+def test_a_refused_sitemap_is_recorded_as_a_failed_poll(app_session: Session) -> None:
+    """AP's news sitemap answered 403 with a Cloudflare challenge on 15 and 30 Sep 2026."""
+    feed = _sitemap_feed(app_session)
+
+    report = _cycle(
+        app_session, FakeFetcher({feed.url: FetchResult(status=403, error="Forbidden")})
+    )
+
+    assert (report.polled, report.failed) == (1, 1)
+    app_session.expire_all()
+    state = poll_state.get(app_session, feed.feed_id)
+    assert state is not None
+    assert (state.last_status, state.consecutive_failures) == (403, 1)
+
+
+def test_a_sitemap_index_is_recorded_as_unreadable_with_the_reason(app_session: Session) -> None:
+    feed = _sitemap_feed(app_session)
+    raw = (FIXTURES / "bbc_news_sitemap_index.xml").read_bytes()
+
+    report = _cycle(app_session, FakeFetcher({feed.url: raw}))
+
+    assert report.failed == 1
+    app_session.expire_all()
+    state = poll_state.get(app_session, feed.feed_id)
+    assert state is not None and state.last_error is not None
+    assert "sitemap index" in state.last_error
+
+
+def test_an_rss_feed_registered_as_a_sitemap_is_unreadable_not_misread(
+    app_session: Session,
+) -> None:
+    """The method is the registry's statement about the URL, and a mismatch is reported rather
+    than guessed past — the same as a feed URL that has rotted into an HTML page."""
+    feed = _sitemap_feed(app_session)
+
+    report = _cycle(app_session, FakeFetcher({feed.url: ONE_ITEM}))
+
+    assert (report.failed, report.discovered) == (1, 0)
+
+
+# ------------------------------------------------- sitemaps: one article, two routes (AC4)
+
+
+def test_a_publishers_feeds_are_polled_before_its_sitemaps(app_session: Session) -> None:
+    feed, sm = _publisher_with_feed_and_sitemap(app_session, sitemap_first=True)
+    fetcher = FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP})
+
+    report = _cycle(app_session, fetcher)
+
+    assert [url for url, _, _ in fetcher.feeds] == [feed.url, sm.url]
+    assert (report.discovered, report.adopted) == (1, 0)
+
+
+def _the_record(session: Session) -> tuple[object, ...]:
+    (article,) = articles(session)
+    return (
+        article.feed_id,
+        article.guid,
+        article.url_canonical,
+        article.title,
+        article.lede,
+        article.body_text,
+        article.body_provenance,
+        article.published_at,
+    )
+
+
+@pytest.mark.parametrize("first", ["feed", "sitemap"])
+def test_the_route_an_article_arrives_by_does_not_change_its_record(
+    app_session: Session, first: str
+) -> None:
+    """AC4's falsifier. The sitemap sees the article a cycle before the feed does — the order a
+    within-cycle sort cannot fix — and the record still ends with the feed's teaser and body."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    if first == "sitemap":
+        _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+        assert articles(app_session)[0].lede is None
+    report = _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
+
+    assert _the_record(app_session) == (
+        feed.feed_id,
+        "g1",
+        f"{SITE}/g1",
+        "Floods displace thousands",
+        "A teaser.",
+        "THE WHOLE ARTICLE",
+        BodyProvenance.TIER1_FEED,
+        dt.datetime(2026, 8, 25, 9, 14, 2, tzinfo=dt.UTC),
+    )
+    assert report.adopted == (1 if first == "sitemap" else 0)
+    assert app_session.scalar(sa.select(sa.func.count()).select_from(PipelineWork)) == 1
+
+
+def test_adoption_respects_body_rights(app_session: Session) -> None:
+    """The adopted body is the one the feed would have stored: none, for a headline-only
+    publisher, whatever the item carries."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session, rights_level=RightsLevel.HEADLINE_ONLY)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+
+    _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
+
+    (article,) = articles(app_session)
+    assert (article.lede, article.body_text, article.body_provenance) == ("A teaser.", None, None)
+    assert article.feed_id == feed.feed_id
+
+
+def test_a_record_already_claimed_by_acquire_is_not_adopted(app_session: Session) -> None:
+    """Acquire is reading the record: a raw teaser written under it would be advanced
+    uncleaned, and a feed body would land under a page being fetched."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    work_queue.claim(
+        app_session, stage=Stage.ACQUIRE, worker="acquire-1", lease=dt.timedelta(minutes=5)
+    )
+
+    report = _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
+
+    assert report.adopted == 0
+    (article,) = articles(app_session)
+    assert (article.feed_id, article.lede, article.body_text) == (sm.feed_id, None, None)
+
+
+def test_a_record_past_acquire_is_not_adopted(app_session: Session) -> None:
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    (work,) = work_queue.claim(
+        app_session, stage=Stage.ACQUIRE, worker="acquire-1", lease=dt.timedelta(minutes=5)
+    )
+    work_queue.advance(app_session, work)
+    app_session.commit()
+
+    report = _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
+
+    assert report.adopted == 0
+    (article,) = articles(app_session)
+    assert article.pipeline_state is PipelineState.ACQUIRED
+    assert (article.feed_id, article.lede) == (sm.feed_id, None)
+
+
+def test_a_dead_lettered_record_is_not_adopted(app_session: Session) -> None:
+    """Dead-lettering clears the claim, so an unclaimed row is not enough. The record is the
+    evidence a human reads to decide what went wrong; it stays as the failure left it."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    (work,) = work_queue.claim(
+        app_session, stage=Stage.ACQUIRE, worker="acquire-1", lease=dt.timedelta(minutes=5)
+    )
+    work_queue.dead_letter(app_session, work, error="boom")
+    app_session.commit()
+
+    report = _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
+
+    assert report.adopted == 0
+    assert articles(app_session)[0].lede is None
+
+
+def test_one_article_in_two_sitemaps_stays_with_the_first(app_session: Session) -> None:
+    """The Conversation's editions list one article in several sitemaps. A sitemap's sighting
+    adopts nothing, or the record would move between them on every poll."""
+    source = make_source(app_session, home_url=SITE)
+    first, second = (
+        make_feed(
+            app_session,
+            source,
+            url=f"https://sitemaps.example/{name}.xml",
+            discovery_method=DiscoveryMethod.SITEMAP,
+            acquisition_tier=AcquisitionTier.EXTRACTION,
+        )
+        for name in ("first", "second")
+    )
+    app_session.commit()
+
+    reports = [
+        _cycle(app_session, FakeFetcher({first.url: G1_SITEMAP, second.url: G1_SITEMAP}))
+        for _ in range(2)
+    ]
+
+    assert [r.adopted for r in reports] == [0, 0]
+    assert articles(app_session)[0].feed_id == first.feed_id
+
+
+def _fail_rather_than_wait(session: Session) -> None:
+    """Every transaction the session begins gives up on a lock after two seconds, so a cycle
+    that waits on a held lock fails the test instead of hanging it.
+
+    ⚠️ ``SET LOCAL`` on each begin, not one ``SET``: the session goes back to the pool at each
+    commit and may begin its next transaction on another connection, which never saw a
+    session-level setting — and the wait is then unbounded.
+    """
+
+    @sa.event.listens_for(session, "after_begin")
+    def _lock_timeout(_session: Session, _transaction: object, connection: sa.Connection) -> None:
+        connection.exec_driver_sql("SET LOCAL lock_timeout = '2s'")
+
+
+def test_a_locked_record_is_skipped_not_waited_on(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """A worker or the reconciler holding the article: the cycle moves on rather than queue
+    behind it. ``lock_timeout`` turns a wait into a failure here instead of a hang."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    article_id = articles(app_session)[0].article_id
+    _fail_rather_than_wait(app_session)
+
+    with Session(app_migrated) as other:
+        other.execute(
+            sa.select(CanonicalRecord.article_id)
+            .where(CanonicalRecord.article_id == article_id)
+            .with_for_update()
+        )
+        report = _cycle(
+            app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP})
+        )
+        other.rollback()
+
+    assert (report.adopted, report.failed) == (0, 0)
+
+
+def test_a_locked_work_row_is_skipped_not_waited_on(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """Acquire's claim locks the row before it commits; the record is free by then."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    _fail_rather_than_wait(app_session)
+
+    with Session(app_migrated) as other:
+        other.execute(sa.select(PipelineWork.work_id).with_for_update())
+        report = _cycle(
+            app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP})
+        )
+        other.rollback()
+
+    assert (report.adopted, report.failed) == (0, 0)
+    assert articles(app_session)[0].lede is None
+
+
+def test_another_publishers_record_at_the_url_is_not_adopted(app_session: Session) -> None:
+    """A URL two publishers both list is a collision, not a second sighting."""
+    _, other_sm = _publisher_with_feed_and_sitemap(app_session)
+    mine = _feed_with_source(app_session, url="https://feeds.example/mine.xml")
+    _cycle(app_session, FakeFetcher({other_sm.url: G1_SITEMAP}))
+
+    report = _cycle(app_session, FakeFetcher({mine.url: rss_item_with_body()}))
+
+    assert report.adopted == 0
+    (article,) = articles(app_session)
+    assert (article.feed_id, article.lede) == (other_sm.feed_id, None)
+
+
+def test_an_rss_sighting_does_not_adopt_another_feeds_record(app_session: Session) -> None:
+    """Only a sitemap's record is rewritten: between two feeds the first still wins, as before."""
+    source = make_source(app_session, home_url=SITE)
+    first = make_feed(app_session, source, url="https://feeds.example/first.xml")
+    second = make_feed(app_session, source, url="https://feeds.example/second.xml")
+    app_session.commit()
+    _cycle(app_session, FakeFetcher({first.url: feed_xml(("g1", "One"), description="")}))
+
+    report = _cycle(
+        app_session,
+        FakeFetcher(
+            {first.url: EMPTY_RSS, second.url: rss_item_with_body(link="https://x.example/g1")}
+        ),
+    )
+
+    assert report.adopted == 0
+    assert articles(app_session)[0].feed_id == first.feed_id
+
+
+def test_adoption_keeps_the_guid_another_record_already_holds(app_session: Session) -> None:
+    """One write must not fail the feed's whole poll: the guid is the one column whose new
+    value can collide, under ``UNIQUE(source_id, guid)``."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    source = app_session.get(Source, feed.source_id)
+    assert source is not None
+    make_article(app_session, source, guid="g1", url=f"{SITE}/older")
+    app_session.commit()
+
+    report = _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
+
+    assert (report.adopted, report.failed) == (1, 0)
+    adopted = app_session.scalar(
+        sa.select(CanonicalRecord).where(CanonicalRecord.url_canonical == f"{SITE}/g1")
+    )
+    assert adopted is not None
+    assert (adopted.guid, adopted.lede) == (f"{SITE}/g1", "A teaser.")
+
+
+def test_adoption_keeps_the_sitemaps_date_when_the_item_has_none(app_session: Session) -> None:
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    undated = rss_item_with_body().replace(b"<pubDate>Tue, 25 Aug 2026 09:14:02 GMT</pubDate>", b"")
+
+    _cycle(app_session, FakeFetcher({feed.url: undated, sm.url: G1_SITEMAP}))
+
+    assert articles(app_session)[0].published_at == dt.datetime(
+        2026, 10, 1, 11, 50, 2, tzinfo=dt.UTC
+    )

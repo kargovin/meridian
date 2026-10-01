@@ -2,7 +2,7 @@
 
 import pytest
 
-from meridian.ingest.urls import canonicalize
+from meridian.ingest.urls import canonicalize, on_site
 
 
 @pytest.mark.parametrize(
@@ -66,3 +66,28 @@ def test_a_trailing_slash_is_left_alone() -> None:
 
 def test_a_url_with_nothing_to_strip_is_unchanged() -> None:
     assert canonicalize("https://x.example/a/b") == "https://x.example/a/b"
+
+
+# --------------------------------------------------------------------------- on_site
+
+
+@pytest.mark.parametrize(
+    ("url", "home_url", "expected"),
+    [
+        ("https://www.npr.org/2026/10/01/x", "https://www.npr.org", True),
+        ("https://npr.org/x", "https://www.npr.org", True),
+        ("https://text.npr.org/x", "https://www.npr.org", True),
+        ("https://www.wshu.org/x", "https://www.npr.org", False),
+        # A suffix that is not a label boundary is another site.
+        ("https://notnpr.org/x", "https://www.npr.org", False),
+        ("https://npr.org.evil.example/x", "https://www.npr.org", False),
+        ("https://fr.globalvoices.org/x", "https://globalvoices.org", True),
+        ("https://WWW.NPR.ORG/x", "https://www.npr.org/", True),
+        ("https://www.bbc.com/news/x", "https://www.bbc.co.uk", False),
+        ("https://x.example/a", "", False),
+        # Neither has a host: two empty strings must not read as one site.
+        ("https:///a", "", False),
+    ],
+)
+def test_on_site(url: str, home_url: str, expected: bool) -> None:
+    assert on_site(url, home_url) is expected
