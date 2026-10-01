@@ -173,15 +173,18 @@ class DiscoveryScheduler(_CadencedJob[CycleReport]):
     def _run_once(self, session: Session) -> CycleReport:
         report = self._run(session, self._network)
         log.info(
-            "discovery cycle: polled=%d unchanged=%d failed=%d discovered=%d adopted=%d "
-            "late=%d off_site=%d skipped=%d robots_blocked=%d in %.1fs",
+            "discovery cycle: polled=%d unchanged=%d failed=%d discovered=%d (from_sitemaps=%d) "
+            "adopted=%d late=%d off_site=%d skipped_items=%d skipped_feeds=%d robots_blocked=%d "
+            "in %.1fs",
             report.polled,
             report.not_modified,
             report.failed,
             report.discovered,
+            report.sitemap_discovered,
             report.adopted,
             report.late_sightings,
             report.off_site_items,
+            report.skipped_items,
             report.skipped_feeds,
             report.robots_blocked,
             report.duration_seconds,

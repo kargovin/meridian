@@ -55,6 +55,9 @@ class CycleReport:
     failed: int = 0
     #: Records created. Steady state is a handful; zero is normal and not a fault.
     discovered: int = 0
+    #: The part of ``discovered`` a sitemap created — the denominator ``late_sightings`` is read
+    #: against.
+    sitemap_discovered: int = 0
     #: Feed entries with no usable title or link.
     skipped_items: int = 0
     #: Feeds the registry permits but this cycle cannot read — a discovery method we do not
@@ -67,8 +70,10 @@ class CycleReport:
     #: (``_adopt``). Each record is adopted at most once.
     adopted: int = 0
     #: Feed items whose record a sitemap created and acquire has already taken, so it keeps the
-    #: sitemap's empty lede. A gauge, not events: a record counts every cycle the feed lists it.
-    #: Zero is the expectation; a steady count says feeds lag their sitemaps by a cycle or more.
+    #: sitemap's empty lede (``_adopt``). Sightings, not records: one record counts once per
+    #: feed listing it, on every poll that reads the feed (a 304 reads nothing). Each is also
+    #: logged with its article id; the rate that matters is distinct records over
+    #: ``sitemap_discovered`` across a window.
     late_sightings: int = 0
     #: Feeds whose host's ``robots.txt`` disallows the feed URL for our User-Agent. Not polled,
     #: and recorded in the feed's poll state so the admin surface says why it has stopped.
@@ -84,6 +89,7 @@ class CycleReport:
             not_modified=self.not_modified + other.not_modified,
             failed=self.failed + other.failed,
             discovered=self.discovered + other.discovered,
+            sitemap_discovered=self.sitemap_discovered + other.sitemap_discovered,
             skipped_items=self.skipped_items + other.skipped_items,
             skipped_feeds=self.skipped_feeds + other.skipped_feeds,
             off_site_items=self.off_site_items + other.off_site_items,
@@ -162,7 +168,8 @@ def _store(session: Session, source: Source, feed: Feed, item: FeedItem) -> Cycl
         return CycleReport()
     body_text = _body_text(source, feed, item)
     if _insert(session, feed, item, body_text):
-        return CycleReport(discovered=1)
+        from_sitemap = feed.discovery_method is DiscoveryMethod.SITEMAP
+        return CycleReport(discovered=1, sitemap_discovered=int(from_sitemap))
     if feed.discovery_method is DiscoveryMethod.SITEMAP:
         return CycleReport()
     return _adopt(session, feed, item, body_text)
@@ -233,16 +240,20 @@ def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) 
     is on the record, and a rewrite under a claimed row lands a raw teaser on a record acquire is
     about to advance, or a feed body under a page it is fetching. Past that point the record
     stays as the sitemap made it. ``run_cycle`` polls a publisher's feeds before its sitemaps,
-    so what is left is an article the feed lists a cycle or more after its sitemap: acquire runs
-    ten times in a discovery interval at the defaults and takes the record first. That case is
-    counted, not repaired. Holding a sitemap's records from acquire for a cycle would repair
-    it, at a cycle of freshness on every article only a sitemap lists — most of them, on the
-    roster — so it waits on the count saying the case is real.
+    so what is left is an article the feed lists a cycle or more after its sitemap — the feed
+    lagging, or down when the sitemap was read: acquire runs ten times in a discovery interval
+    at the defaults and takes the record first. That case is counted and logged, not repaired.
+    Holding a sitemap's records from acquire for a cycle would repair the lagging feed, at a
+    cycle of freshness on every article only a sitemap lists — most of them, on the roster — so
+    it waits on the count saying the case is real.
 
     Record, then work row — the lock order every writer that takes both follows (see
     ``work_queue._lock_article``). ``SKIP LOCKED`` on both: a held lock means a worker or the
     reconciler is on the article now, which is the case this declines anyway, and waiting would
-    stall the cycle behind it.
+    stall the cycle behind it. The record takes ``FOR UPDATE``, not ``FOR NO KEY UPDATE``: the
+    rewrite usually changes the guid, a column of a unique key, and PostgreSQL takes
+    ``FOR UPDATE`` for that — taken at the UPDATE instead, it waits on any ``FOR KEY SHARE``
+    holder, which ``SKIP LOCKED`` on the weaker lock does not skip.
     """
     sitemap_feeds = sa.select(Feed.feed_id).where(Feed.discovery_method == DiscoveryMethod.SITEMAP)
     found = session.execute(
@@ -255,6 +266,12 @@ def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) 
     if found is None:
         return CycleReport()
     if found.pipeline_state is not ENTRY_STATE:
+        log.info(
+            "late sighting: feed %d lists article %d, made by a sitemap and already %s",
+            feed.feed_id,
+            found.article_id,
+            found.pipeline_state,
+        )
         return CycleReport(late_sightings=1)
     # Read again under the lock: acquire may have advanced it since.
     article_id = session.scalar(
@@ -263,7 +280,7 @@ def _adopt(session: Session, feed: Feed, item: FeedItem, body_text: str | None) 
             CanonicalRecord.article_id == found.article_id,
             CanonicalRecord.pipeline_state == ENTRY_STATE,
         )
-        .with_for_update(key_share=True, skip_locked=True)
+        .with_for_update(skip_locked=True)
     )
     if article_id is None:
         return CycleReport()

@@ -1693,3 +1693,102 @@ def test_adoption_keeps_the_sitemaps_date_when_the_item_has_none(app_session: Se
     assert articles(app_session)[0].published_at == dt.datetime(
         2026, 10, 1, 11, 50, 2, tzinfo=dt.UTC
     )
+
+
+def test_a_record_acquire_advances_between_the_lookup_and_the_lock_is_not_adopted(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """The race the locked re-read exists for, made deterministic: acquire claims and advances
+    the record after the plain lookup saw it at the entry state and before the lock. Its new
+    dedup row is unclaimed, so only the re-read's state test stands between the feed and a raw
+    teaser on an acquired record."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    fired = False
+
+    def acquire_in_between(_conn: object, _cursor: object, statement: str, *_args: object) -> None:
+        nonlocal fired
+        if fired or "canonical_record.pipeline_state" not in statement or "FOR" in statement:
+            return
+        if "canonical_record.article_id, canonical_record.pipeline_state" not in statement:
+            return
+        fired = True
+        with Session(app_migrated, expire_on_commit=False) as acquire:
+            (work,) = work_queue.claim(
+                acquire, stage=Stage.ACQUIRE, worker="acquire-1", lease=dt.timedelta(minutes=5)
+            )
+            work_queue.advance(acquire, work)
+            acquire.commit()
+
+    sa.event.listen(app_migrated, "after_cursor_execute", acquire_in_between)
+    try:
+        report = _cycle(
+            app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP})
+        )
+    finally:
+        sa.event.remove(app_migrated, "after_cursor_execute", acquire_in_between)
+
+    assert fired
+    assert (report.adopted, report.failed) == (0, 0)
+    (article,) = articles(app_session)
+    assert article.pipeline_state is PipelineState.ACQUIRED
+    assert (article.feed_id, article.lede) == (sm.feed_id, None)
+
+
+def test_a_key_share_holder_on_the_record_is_skipped_not_waited_on(
+    app_session: Session, app_migrated: sa.Engine
+) -> None:
+    """A foreign-key child insert holds ``FOR KEY SHARE`` on its parent. The rewrite changes the
+    guid, a unique key, which needs ``FOR UPDATE``: taken up front, ``SKIP LOCKED`` passes the
+    holder by; taken at the UPDATE, the cycle waits on it."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    article_id = articles(app_session)[0].article_id
+    _fail_rather_than_wait(app_session)
+
+    with Session(app_migrated) as other:
+        other.execute(
+            sa.select(CanonicalRecord.article_id)
+            .where(CanonicalRecord.article_id == article_id)
+            .with_for_update(key_share=True, read=True)
+        )
+        report = _cycle(
+            app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP})
+        )
+        other.rollback()
+
+    assert (report.adopted, report.failed) == (0, 0)
+
+
+def test_a_late_sighting_is_logged_with_its_article_and_feed(
+    app_session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The count alone cannot say how many distinct records are late: one counts once per feed
+    per cycle. The log line can."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    _cycle(app_session, FakeFetcher({feed.url: EMPTY_RSS, sm.url: G1_SITEMAP}))
+    (work,) = work_queue.claim(
+        app_session, stage=Stage.ACQUIRE, worker="acquire-1", lease=dt.timedelta(minutes=5)
+    )
+    work_queue.advance(app_session, work)
+    app_session.commit()
+    article_id = articles(app_session)[0].article_id
+
+    with caplog.at_level("INFO", logger="meridian.ingest.discovery"):
+        _cycle(app_session, FakeFetcher({feed.url: rss_item_with_body(), sm.url: G1_SITEMAP}))
+
+    assert (
+        f"late sighting: feed {feed.feed_id} lists article {article_id}, made by a sitemap and "
+        "already acquired"
+    ) in caplog.messages
+
+
+def test_records_a_sitemap_creates_are_counted_apart(app_session: Session) -> None:
+    """The denominator for late sightings: what the sitemap made, not what discovery made."""
+    feed, sm = _publisher_with_feed_and_sitemap(app_session)
+    raw_feed = feed_xml(("g7", "Seven"))
+    raw_sm = news_sitemap((f"{SITE}/a", "A"), (f"{SITE}/b", "B"))
+
+    report = _cycle(app_session, FakeFetcher({feed.url: raw_feed, sm.url: raw_sm}))
+
+    assert (report.discovered, report.sitemap_discovered) == (3, 2)
