@@ -25,6 +25,9 @@ dependencies = [
     # path prefix only and reads a wildcard rule as matching nothing.
     "trafilatura>=2.2.0",
     "protego>=0.6.2",
+    # News sitemaps. feedparser cannot read one; lxml is already here under trafilatura, and
+    # is named directly because discovery parses untrusted XML with it.
+    "lxml>=6.0",
 ]
 
 [dependency-groups]
@@ -80,7 +83,7 @@ no_implicit_optional = true
 
 # Neither ships stubs or a py.typed marker.
 [[tool.mypy.overrides]]
-module = ["feedparser.*", "apscheduler.*", "mlflow.*"]
+module = ["feedparser.*", "apscheduler.*", "mlflow.*", "lxml.*"]
 ignore_missing_imports = true
 
 # A2's seams are "typed interfaces, no shared mutable state" — strict where that claim lives.

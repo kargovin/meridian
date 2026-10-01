@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Captured from https://googlecrawl.npr.org/news/sitemap_news.xml on 2026-10-01 with User-Agent Meridian/0.1; trimmed to 5 of its 153 entries, otherwise as served. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+	<url>
+		<loc>https://www.wshu.org/connecticut-news/2026-10-01/voters-assured-ct-election-system-is-secure</loc>
+		<news:news>
+			<news:publication_date>2026-10-01T07:50:02-04:00</news:publication_date>
+			<news:keywords>Connecticut News, News</news:keywords>
+			<news:publication>
+				<news:name>WSHU</news:name>
+				<news:language>en</news:language>
+			</news:publication>
+			<news:title>Voters assured CT election system is secure</news:title>
+		</news:news>
+		<image:image>
+			<image:loc>https://npr.brightspotcdn.com/dims3/default/strip/false/crop/8640x5760+0+0/resize/8640x5760!/?url=http%253A%252F%252Fnpr-brightspot.s3.amazonaws.com%252Fe8%252F9d%252Fbd6a25844ead8e16745594aef099%252Fvoting-booths-inside-combined-polling-place-zion-lutheran-church-in-grand-rapids-minnesota-on-election-day-53317086671.jpg</image:loc>
+		</image:image>
+	</url>
+	<url>
+		<loc>https://www.npr.org/2026/10/01/g-s1-145879/up-first-newsletter-tel-aviv-flight-passengers-fbi-employee-data-hack</loc>
+		<news:news>
+			<news:publication_date>2026-10-01T07:37:10-04:00</news:publication_date>
+			<news:keywords>Apple News, News, World</news:keywords>
+			<news:publication>
+				<news:name>NPR</news:name>
+				<news:language>en</news:language>
+			</news:publication>
+			<news:title>Passengers recount chaos on Tel Aviv flight. And, FBI probes employee-data hack</news:title>
+		</news:news>
+		<image:image>
+			<image:loc>https://npr.brightspotcdn.com/dims3/default/strip/false/crop/2736x1539+0+142/resize/2736x1539!/?url=http%253A%252F%252Fnpr-brightspot.s3.amazonaws.com%252F72%252F5f%252F7fc0b4b24c3893ab85cb97f865b0%252Fgettyimages-2297341992.jpg</image:loc>
+			<image:loc>https://npr.brightspotcdn.com/dims3/default/strip/false/crop/5280x2970+0+493/resize/5280x2970!/?url=http%253A%252F%252Fnpr-brightspot.s3.amazonaws.com%252F63%252F0a%252F41e0e8a0421882d549898cf146fc%252Fgettyimages-1434808195.jpg</image:loc>
+			<image:loc>https://npr.brightspotcdn.com/dims3/default/strip/false/crop/6200x3488+0+581/resize/6200x3488!/?url=http%253A%252F%252Fnpr-brightspot.s3.amazonaws.com%252F35%252F6b%252F4d5113474763a720386f439bd345%252Fgettyimages-2294331667.jpg</image:loc>
+			<image:loc>https://npr.brightspotcdn.com/dims3/default/strip/false/crop/2000x1125+0+152/resize/2000x1125!/?url=http%253A%252F%252Fnpr-brightspot.s3.amazonaws.com%252Fd7%252F06%252F92fb3d454823b47041801337f49b%252F03-clariden-mhuss.jpg</image:loc>
+		</image:image>
+	</url>
+	<url>
+		<loc>https://www.npr.org/2026/10/01/nx-s1-5986255/israels-pm-says-a-pilot-tried-to-crash-a-plane-traveling-to-tel-aviv</loc>
+		<news:news>
+			<news:publication_date>2026-10-01T07:35:04-04:00</news:publication_date>
+			<news:keywords>Middle East</news:keywords>
+			<news:publication>
+				<news:name>NPR</news:name>
+				<news:language>en</news:language>
+			</news:publication>
+			<news:title>Israel&apos;s PM says a pilot tried to crash a plane traveling to Tel Aviv</news:title>
+		</news:news>
+		<image:image>
+			<image:loc>https://media.npr.org/include/images/facebook-default-wide.jpg</image:loc>
+		</image:image>
+	</url>
+	<url>
+		<loc>https://www.npr.org/2026/10/01/nx-s1-5986027/after-flydubai-incident-a-look-at-how-pilots-train-to-avert-cockpit-interference</loc>
+		<news:news>
+			<news:publication_date>2026-10-01T07:36:25-04:00</news:publication_date>
+			<news:keywords>Middle East</news:keywords>
+			<news:publication>
+				<news:name>NPR</news:name>
+				<news:language>en</news:language>
+			</news:publication>
+			<news:title>After flydubai incident, a look at how pilots train to avert cockpit interference</news:title>
+		</news:news>
+		<image:image>
+			<image:loc>https://media.npr.org/include/images/facebook-default-wide.jpg</image:loc>
+		</image:image>
+	</url>
+	<url>
+		<loc>https://www.npr.org/2026/10/01/nx-s1-5986313/california-gubernatorial-candidates-face-off-in-debate</loc>
+		<news:news>
+			<news:publication_date>2026-10-01T07:37:00-04:00</news:publication_date>
+			<news:keywords>Politics</news:keywords>
+			<news:publication>
+				<news:name>KQED</news:name>
+				<news:language>en</news:language>
+			</news:publication>
+			<news:title>California gubernatorial candidates face off in debate</news:title>
+		</news:news>
+		<image:image>
+			<image:loc>https://media.npr.org/include/images/facebook-default-wide.jpg</image:loc>
+		</image:image>
+	</url>
+</urlset>
