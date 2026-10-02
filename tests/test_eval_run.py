@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from eval import run as run_module
+from eval.annotation import cut, open_workspace, write_cut
 from eval.evalset import DEFAULT_ROOT, EvalSetError, load
 from eval.metrics import score_classification
 from eval.predictors import Oracle, SeededStub, TopicClassifier, build
@@ -28,6 +29,7 @@ from eval.run import (
 )
 
 FIXTURE = "classification/v2"
+FIXTURE_WORKSPACE = Path(__file__).resolve().parents[1] / "eval" / "fixtures" / "classification-v2"
 
 
 def _write_config(path: Path, body: str) -> Path:
@@ -571,13 +573,20 @@ def test_the_report_carries_the_drop_rate_by_cause(tmp_path: Path) -> None:
 
 
 def test_a_cause_under_the_trigger_is_not_marked(tmp_path: Path) -> None:
+    """Cut from the fixture workspace with both drops ruled to gold instead, so the set has
+    no drops and every file agrees — built by the tool, not by editing a manifest."""
+    workspace = tmp_path / "ws"
+    shutil.copytree(FIXTURE_WORKSPACE, workspace)
+    rulings = workspace / "adjudication.jsonl"
+    lines = [json.loads(line) for line in rulings.read_text().splitlines()]
+    for line in lines:
+        if line["outcome"] == "drop":
+            line.update(outcome="gold", gold="world")
+            del line["cause"]
+    rulings.write_text("".join(json.dumps(line) + "\n" for line in lines))
     root = tmp_path / "sets"
-    shutil.copytree(DEFAULT_ROOT, root)
-    manifest_path = root / FIXTURE / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["drops"] = {"genuine_disagreement": 0, "unrecoverable_record": 0}
-    manifest["candidates"] = 10
-    manifest_path.write_text(json.dumps(manifest))
+    write_cut(cut(open_workspace(workspace), FIXTURE), root, mlflow_run=None)
+
     path = _write_config(
         tmp_path / "run.toml",
         f'eval_set = "{FIXTURE}"\nexperiment = "t"\njira = "MER-28"\nsets_root = "{root}"\n'

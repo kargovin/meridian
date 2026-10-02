@@ -222,7 +222,6 @@ def test_a_set_is_never_cut_over_an_existing_one(tmp_path: Path) -> None:
     write_cut(result, tmp_path, mlflow_run=None)
     with pytest.raises(CutRefused, match="already exists"):
         write_cut(result, tmp_path, mlflow_run=None)
-    assert not list((tmp_path / "classification").glob(".*partial")), "staging left behind"
 
 
 # --------------------------------------------------------------------------- the files
@@ -384,14 +383,14 @@ def test_a_ruling_task_carries_the_labels_and_the_origin(ws: Path) -> None:
 # --------------------------------------------------------------------------- the command line
 
 
-def test_check_exits_zero_when_ready_two_when_work_is_left_one_when_broken(
+def test_check_exits_zero_when_ready_three_when_work_is_left_one_when_broken(
     ws: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert annotate.main(["check", str(ws)]) == 0
     assert "ready to cut" in capsys.readouterr().out
 
     _drop_line(ws / "adjudication.jsonl", "fx-005")
-    assert annotate.main(["check", str(ws)]) == 2
+    assert annotate.main(["check", str(ws)]) == 3
     assert "awaiting ruling  1" in capsys.readouterr().out
 
     _edit(ws / "labels" / "agent-a.jsonl", "fx-001", label="politics")
@@ -491,3 +490,142 @@ def test_fetch_on_a_set_cut_without_upload_says_where_its_rows_are(
 ) -> None:
     assert annotate.main(["fetch", FIXTURE_SET]) == 1
     assert "names no MLflow run" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- who rules
+
+
+def test_an_agent_cannot_rule(ws: Path) -> None:
+    """Agents annotate and a person adjudicates (rubric §7.3)."""
+    _edit(ws / "adjudication.jsonl", "fx-010", by="agent-b")
+    assert "'by' 'agent-b' is an agent; rulings are made by a person" in _problems(ws)
+
+
+def test_an_annotator_cannot_rule_on_an_item_it_labelled(ws: Path) -> None:
+    """A person who also labelled the item would settle its disagreement in their own
+    favour, and the set would record it as adjudicated."""
+    raw = json.loads((ws / "participants.json").read_text())
+    raw["participants"][1] = {"id": "agent-b", "kind": "human"}
+    (ws / "participants.json").write_text(json.dumps(raw))
+    _edit(ws / "adjudication.jsonl", "fx-005", by="agent-b")
+    assert "'agent-b' labelled 'fx-005' and cannot also rule on it" in _problems(ws)
+
+
+# --------------------------------------------------------------------------- overrides
+
+
+def test_a_ruling_that_repeats_the_agreed_label_is_not_an_override(ws: Path) -> None:
+    path = ws / "adjudication.jsonl"
+    _write_lines(path, [*_lines(path), {"id": "fx-002", "by": "adjudicator", "outcome": "gold",
+                                        "gold": "nation_politics"}])  # fmt: skip
+    workspace = open_workspace(ws)
+    assert {i.id: i for i in workspace.items}["fx-002"].state is State.ADJUDICATED
+    assert workspace.overrides == 1  # fx-010 only
+
+
+def test_dropping_an_agreed_item_is_an_override(ws: Path) -> None:
+    path = ws / "adjudication.jsonl"
+    _write_lines(path, [*_lines(path), {"id": "fx-002", "by": "adjudicator", "outcome": "drop",
+                                        "cause": "unrecoverable_record"}])  # fmt: skip
+    assert open_workspace(ws).overrides == 2
+
+
+def test_a_ruling_made_before_every_label_is_in_is_flagged(ws: Path) -> None:
+    """Kept, because an unrecoverable record may be dropped early, but the adjudicator
+    ruled without the label still owed, and it stands whatever that label says."""
+    _drop_line(ws / "labels" / "agent-b.jsonl", "fx-005")
+    (warning,) = open_workspace(ws).warnings()
+    assert warning.startswith("fx-005 is ruled on but still owed a label from agent-b")
+
+
+# --------------------------------------------------------------------------- malformed input
+
+
+def test_a_file_that_is_not_utf8_is_a_problem_not_a_traceback(ws: Path) -> None:
+    path = ws / "labels" / "agent-b.jsonl"
+    path.write_bytes(path.read_bytes() + b'{"id": "fx-001", "label": "\xff"}\n')
+    assert "labels/agent-b.jsonl: not UTF-8" in _problems(ws)
+    (ws / "workspace.json").write_bytes(b"\xff\xfe")
+    assert "workspace.json: not UTF-8" in _problems(ws)
+
+
+@pytest.mark.parametrize("value", [True, 1.0, "1"])
+def test_the_format_must_be_the_integer_one(ws: Path, value: object) -> None:
+    """True == 1 and 1.0 == 1 in Python; neither is a format version."""
+    meta = json.loads((ws / "workspace.json").read_text())
+    meta["format"] = value
+    (ws / "workspace.json").write_text(json.dumps(meta))
+    assert "'format' is" in _problems(ws)
+
+
+def test_a_labels_file_where_the_directory_belongs_is_a_problem(ws: Path) -> None:
+    shutil.rmtree(ws / "labels")
+    (ws / "labels").write_text("")
+    assert "labels: must be a directory" in _problems(ws)
+
+
+# --------------------------------------------------------------------------- write and fetch safety
+
+
+def test_a_failed_write_leaves_no_staging_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted cut must leave nothing for the harness, or the next cut, to find."""
+    def fail(*args: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("eval.annotation.os.rename", fail)
+    with pytest.raises(OSError, match="disk full"):
+        write_cut(cut(open_workspace(FIXTURE_WORKSPACE), "classification/v3"), tmp_path,
+                  mlflow_run=None)  # fmt: skip
+    assert list((tmp_path / "classification").iterdir()) == []
+
+
+def test_no_upload_is_refused_outside_the_fixtures(
+    ws: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Any other set's rows are git-ignored; without the upload they exist nowhere else."""
+    root = tmp_path / "sets"
+    assert annotate.main(["cut", str(ws), "classification/v3", "--root", str(root),
+                          "--no-upload"]) == 1  # fmt: skip
+    assert "--no-upload is for hand-built fixtures" in capsys.readouterr().err
+    assert not root.exists()
+
+    args = ["cut", str(FIXTURE_WORKSPACE), "classification/v3", "--root", str(root), "--no-upload"]
+    assert annotate.main(args) == 0
+    assert load("classification/v3", root=root).candidates == 12
+
+
+def test_fetch_will_not_replace_a_different_local_file(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path / 'mlflow.db'}")
+    root = tmp_path / "sets"
+    name = "classification/v3"
+    assert annotate.main(["cut", str(ws), name, "--root", str(root), "--jira", "MER-28"]) == 0
+    (root / name / "raw_labels.jsonl").unlink()
+    (root / name / "rows.jsonl").write_text("someone's edit\n")
+    capsys.readouterr()
+
+    assert annotate.main(["fetch", name, "--root", str(root)]) == 1
+    assert "a different rows.jsonl is already in" in capsys.readouterr().err
+    assert (root / name / "rows.jsonl").read_text() == "someone's edit\n"
+    assert not (root / name / "raw_labels.jsonl").exists()
+
+
+def test_fetch_reports_a_broken_manifest_and_a_missing_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path / 'mlflow.db'}")
+    base = tmp_path / "sets" / "classification" / "v3"
+    base.mkdir(parents=True)
+    (base / "manifest.json").write_text("{not json")
+    args = ["fetch", "classification/v3", "--root", str(tmp_path / "sets")]
+    assert annotate.main(args) == 1
+    assert "manifest.json is not valid JSON" in capsys.readouterr().err
+
+    (base / "manifest.json").write_text(json.dumps({"mlflow": {"run_id": "0" * 32}}))
+    assert annotate.main(args) == 1
+    assert "could not download rows.jsonl from run" in capsys.readouterr().err

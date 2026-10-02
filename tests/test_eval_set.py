@@ -43,8 +43,8 @@ def _rewrite(
 
     ``row_count`` defaults to the true length. Pass it explicitly to leave the manifest
     disagreeing — which is the only way to reach the count guard, since the hash otherwise
-    fires first on any change to the rows. The candidate count follows the rows, so the
-    drops still add up.
+    fires first on any change to the rows. The candidate count and the raw labels follow the
+    rows and the manifest's drops, so everything but the guard under test still agrees.
     """
     base = root / FIXTURE
     raw = (
@@ -58,6 +58,24 @@ def _rewrite(
     manifest["candidates"] = len(rows) + sum(drops.values())
     if refresh_hash:
         manifest["sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(root, manifest)
+    _sync_raw_labels(root, [str(r.get("id")) for r in rows])
+
+
+def _sync_raw_labels(root: Path, kept_ids: list[str]) -> None:
+    """Write raw labels recording ``kept_ids`` as kept and the manifest's drops as dropped,
+    and re-hash them, so a test that changes the rows or the drops reaches its own guard
+    rather than the raw-labels cross-check."""
+    manifest = _manifest(root)
+    drops = manifest["drops"]
+    assert isinstance(drops, dict)
+    lines = [{"id": i, "outcome": "agreed", "cause": None} for i in kept_ids]
+    for cause, count in drops.items():
+        lines += [{"id": f"drop-{cause}-{n}", "outcome": "dropped", "cause": cause}
+                  for n in range(count)]  # fmt: skip
+    raw = "".join(json.dumps(line, sort_keys=True) + "\n" for line in lines).encode()
+    (root / FIXTURE / "raw_labels.jsonl").write_bytes(raw)
+    manifest["raw_labels_sha256"] = hashlib.sha256(raw).hexdigest()
     _write_manifest(root, manifest)
 
 
@@ -240,6 +258,29 @@ def test_changed_raw_labels_are_refused(sets_root: Path) -> None:
     path.write_bytes(path.read_bytes().replace(b'"label": "world"', b'"label": "sports"', 1))
 
     with pytest.raises(EvalSetError, match=r"raw_labels\.jsonl does not match the manifest"):
+        load(FIXTURE, root=sets_root)
+
+
+def test_drops_must_match_what_the_raw_labels_record(sets_root: Path) -> None:
+    """The hash proves the raw labels are the cut's bytes; it says nothing about the
+    manifest. Zeroing the drops there alone must not report a set that dropped nothing."""
+    manifest = _manifest(sets_root)
+    manifest["drops"] = {"genuine_disagreement": 0, "unrecoverable_record": 0}
+    manifest["candidates"] = 10
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(
+        EvalSetError, match=r"raw_labels\.jsonl records \{'genuine_disagreement': 1"
+    ):
+        load(FIXTURE, root=sets_root)
+
+
+def test_the_kept_items_must_be_the_rows(sets_root: Path) -> None:
+    rows_path = sets_root / FIXTURE / "rows.jsonl"
+    ids = [json.loads(line)["id"] for line in rows_path.read_text().splitlines()]
+    _sync_raw_labels(sets_root, [*ids[:-1], "someone-else"])
+
+    with pytest.raises(EvalSetError, match=r"items raw_labels\.jsonl records as kept"):
         load(FIXTURE, root=sets_root)
 
 

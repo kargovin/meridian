@@ -173,8 +173,13 @@ class Item:
 
     @property
     def override(self) -> bool:
-        """A ruling on an item every annotator agreed on, none of them unsure."""
-        return self.ruling is not None and not self.contested and self.state is not State.UNLABELLED
+        """A ruling that changes the outcome of an item every annotator agreed on: a drop, or
+        a gold label other than the agreed one. A ruling that repeats the agreed label is a
+        confirmation and changes nothing, so it is not counted."""
+        if self.ruling is None or self.contested or self.state is State.UNLABELLED:
+            return False
+        # A drop carries no gold, so it always differs from the agreed label.
+        return self.ruling.gold != self.labels[0].value
 
     @property
     def gold(self) -> str | None:
@@ -379,6 +384,16 @@ class Workspace:
                     "hash: copies of one configuration are not independent annotators, and "
                     "agreement between them measures nothing"
                 )
+        for item in self.in_state(State.UNLABELLED):
+            if item.ruling is not None:
+                answered = {label.annotator for label in item.labels}
+                owed = ", ".join(a for a in item.annotators if a not in answered)
+                # Kept, not refused: an unrecoverable record may be dropped before every label
+                # is in. But a ruling made before the labels it rules on was made blind to them.
+                out.append(
+                    f"{item.id} is ruled on but still owed a label from {owed}; the ruling was "
+                    "made without it, and stands whatever it says"
+                )
         if self.items:
             share = self.double_labelled / len(self.items)
             if share < self.task.min_double_share:
@@ -397,6 +412,9 @@ def _read_json(path: Path, problems: Problems) -> object:
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        problems.add(where, f"not UTF-8 — {exc}")
+        return None
     except json.JSONDecodeError as exc:
         problems.add(where, f"not valid JSON — {exc}")
         return None
@@ -409,8 +427,13 @@ def _read_jsonl(
         if required:
             problems.add(label, "missing")
         return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        problems.add(label, f"not UTF-8 — {exc}")
+        return []
     out: list[tuple[str, dict[str, object]]] = []
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         where = f"{label} line {number}"
@@ -452,7 +475,8 @@ def _read_meta(path: Path, problems: Problems) -> tuple[Task | None, dict[str, o
     if not isinstance(raw, dict):
         problems.add(WORKSPACE_FILE, "expected a JSON object")
         return None, {}
-    if raw.get("format") != FORMAT:
+    # `type is`, not `==`: True == 1 and 1.0 == 1 in Python, and neither is a format version.
+    if type(raw.get("format")) is not int or raw.get("format") != FORMAT:
         problems.add(WORKSPACE_FILE, f"'format' is {raw.get('format')!r}; this tool reads {FORMAT}")
     name = raw.get("task")
     task = TASKS.get(name) if isinstance(name, str) else None
@@ -598,7 +622,10 @@ def _read_labels(
     """Labels by item, then by annotator."""
     out: dict[str, dict[str, Label]] = {}
     directory = path / LABELS_DIR
+    if not directory.exists():
+        return out
     if not directory.is_dir():
+        problems.add(LABELS_DIR, "must be a directory of <participant>.jsonl files")
         return out
     for file in sorted(directory.iterdir()):
         label_where = f"{LABELS_DIR}/{file.name}"
@@ -661,6 +688,7 @@ def _read_rulings(
     task: Task,
     pool: Mapping[str, object],
     participants: Mapping[str, Participant],
+    assignments: Mapping[str, tuple[str, ...]],
     problems: Problems,
 ) -> dict[str, Ruling]:
     out: dict[str, Ruling] = {}
@@ -697,6 +725,15 @@ def _read_rulings(
             continue
         if not isinstance(by, str) or by not in participants:
             problems.add(where, f"'by' {by!r} is not a declared participant")
+            continue
+        # Agents annotate and a person adjudicates (rubric §7.3). An agent's ruling, or an
+        # annotator's ruling on an item it labelled, would turn a disagreement into whichever
+        # side the ruler was already on, and the set would record it as adjudicated.
+        if participants[by].kind != "human":
+            problems.add(where, f"'by' {by!r} is an agent; rulings are made by a person")
+            continue
+        if by in assignments.get(item_id, ()):
+            problems.add(where, f"{by!r} labelled {item_id!r} and cannot also rule on it")
             continue
         if note is not None and not isinstance(note, str):
             problems.add(where, "'note' must be a string")
@@ -738,7 +775,7 @@ def open_workspace(path: Path) -> Workspace:
     pool = _read_pool(path, task, problems)
     assignments = _read_assignments(path, pool, participants, problems)
     labels = _read_labels(path, task, assignments, participants, problems)
-    rulings = _read_rulings(path, task, pool, participants, problems)
+    rulings = _read_rulings(path, task, pool, participants, assignments, problems)
     if problems.found:
         raise WorkspaceError(problems.found)
 

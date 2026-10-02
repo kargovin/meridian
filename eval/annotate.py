@@ -5,13 +5,15 @@
     python -m eval.annotate cut    <workspace> <task>/v<N> --jira MER-nn [--no-upload]
     python -m eval.annotate fetch  <task>/v<N>
 
-``check`` exits 0 when the workspace is ready to cut, 2 when it is valid but labelling or
-adjudication is left, and 1 when a file is malformed.
+``check`` exits 0 when the workspace is ready to cut, 3 when it is valid but labelling or
+adjudication is left, and 1 when a file is malformed. (2 is argparse's usage error, so a
+mistyped command never reads as work left.)
 
 A real set's rows and raw labels are annotated corpus text: ``cut`` uploads them to MLflow
 and only the manifest is committed. ``fetch`` restores them on another checkout, verified
-against the manifest's hashes. ``--no-upload`` is for a hand-built fixture, which ships
-whole.
+against the manifest's hashes. ``--no-upload`` is for a hand-built fixture under
+``eval/fixtures/``, which ships whole; any other workspace is refused it, because its rows
+would be git-ignored and recorded nowhere else.
 """
 
 from __future__ import annotations
@@ -48,6 +50,12 @@ from eval.evalset import (
 from eval.run import provenance, require_tracking_uri, without_credentials
 
 DEFAULT_EXPERIMENT = "meridian-eval-sets"
+
+#: Workspaces whose cut may skip MLflow: hand-built fixtures, whose set is committed whole.
+FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures"
+
+#: ``check``'s exit status for a valid workspace with labelling or adjudication left.
+EXIT_WORK_LEFT = 3
 
 #: Where a cut set's files sit inside its MLflow run.
 SET_ARTIFACTS = "set"
@@ -210,12 +218,15 @@ def fetch(name: str, root: Path) -> Path:
     manifest_path = base / MANIFEST_FILE
     if not manifest_path.is_file():
         raise EvalSetError(f"{name}: {manifest_path} does not exist")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    run = manifest.get("mlflow")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvalSetError(f"{name}: {MANIFEST_FILE} is not valid JSON — {exc}") from exc
+    run = manifest.get("mlflow") if isinstance(manifest, dict) else None
     if not isinstance(run, dict) or not isinstance(run.get("run_id"), str):
         raise EvalSetError(
-            f"{name}: the manifest names no MLflow run. A set cut with --no-upload ships "
-            "its rows in the repository."
+            f"{name}: the manifest names no MLflow run, so there is nothing to fetch. Only a "
+            "hand-built fixture is cut that way, and its rows are committed."
         )
     require_tracking_uri()
     expected = {
@@ -225,13 +236,18 @@ def fetch(name: str, root: Path) -> Path:
     with tempfile.TemporaryDirectory() as tmp:
         fetched: dict[str, Path] = {}
         for filename, digest in expected.items():
-            local = Path(
-                mlflow.artifacts.download_artifacts(
-                    run_id=run["run_id"],
-                    artifact_path=f"{SET_ARTIFACTS}/{filename}",
-                    dst_path=tmp,
+            try:
+                local = Path(
+                    mlflow.artifacts.download_artifacts(
+                        run_id=run["run_id"],
+                        artifact_path=f"{SET_ARTIFACTS}/{filename}",
+                        dst_path=tmp,
+                    )
                 )
-            )
+            except mlflow.exceptions.MlflowException as exc:
+                raise EvalSetError(
+                    f"{name}: could not download {filename} from run {run['run_id']} — {exc}"
+                ) from exc
             actual = hashlib.sha256(local.read_bytes()).hexdigest()
             if actual != digest:
                 raise EvalSetError(
@@ -288,7 +304,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "check":
             print(summary(workspace))
-            return 0 if workspace.ready else 2
+            return 0 if workspace.ready else EXIT_WORK_LEFT
 
         if args.command == "queue":
             entries = queue_entries(workspace)
@@ -305,6 +321,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             # orphan run behind in MLflow.
             raise CutRefused(f"{args.root / args.set} already exists; cut a new version")
         run = None
+        if args.no_upload and not args.workspace.resolve().is_relative_to(FIXTURES_ROOT):
+            raise CutRefused(
+                f"--no-upload is for hand-built fixtures under {FIXTURES_ROOT}. Any other set's "
+                "rows are git-ignored, so without the upload they would exist nowhere else."
+            )
         if not args.no_upload:
             if not args.jira:
                 raise CutRefused("--jira is required to upload: a run nobody can attribute is lost")

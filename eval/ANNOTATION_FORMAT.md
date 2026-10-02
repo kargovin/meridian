@@ -67,7 +67,7 @@ One item per line. For classification:
 - An agent declares the model it ran and the SHA-256 of the instructions it was given.
   `check` warns when two agents share both: two copies of one configuration are one
   annotator run twice, and agreement between them measures nothing.
-- Adjudicators are declared here too, because a ruling names who made it.
+- Adjudicators are declared here too, as `human`, because a ruling names who made it.
 
 ## assignments.jsonl
 
@@ -109,7 +109,10 @@ given, and they are what agreement is computed on.
 {"id": "c-0003", "by": "adjudicator", "outcome": "drop", "cause": "genuine_disagreement"}
 ```
 
-- `by` is a declared participant. One adjudicator is enough for any ruling, drops included.
+- `by` is a declared `human` participant, and not one of the item's annotators. Agents
+  annotate and a person adjudicates (rubric §7.3); an annotator ruling on its own item would
+  settle every disagreement in its own favour. One adjudicator is enough for any ruling,
+  drops included.
 - `outcome: gold` sets the gold label. It is never `unsure`.
 - `outcome: drop` takes the item out of the set, with a `cause` from the task's closed set.
   For classification (rubric §7.5):
@@ -132,16 +135,22 @@ go stale.
 | `adjudicated` | It is ruled to a gold label. |
 | `dropped` | It is ruled out of the set, with a cause. |
 
-A ruling on an uncontested item is an **override**. It is allowed, because the adjudicator
-may see what every annotator missed. It is also counted, because a set where many agreed
-labels were rewritten measures the adjudicator, not the annotators.
+A ruling that changes the outcome of an uncontested item, a drop or a gold label other than
+the agreed one, is an **override**. It is allowed, because the adjudicator may see what every
+annotator missed. It is also counted, because a set where many agreed labels were rewritten
+measures the adjudicator, not the annotators. A ruling that repeats the agreed label is a
+confirmation and is not counted.
+
+A ruling on an item that is still owed a label is kept, because an unrecoverable record may
+be dropped early, but `check` warns: the ruling was made without that label, and it stands
+whatever the label says.
 
 ## Commands
 
 ```sh
-python -m eval.annotate check <workspace>      # 0 ready · 2 work left · 1 malformed
+python -m eval.annotate check <workspace>      # 0 ready · 3 work left · 1 malformed
 python -m eval.annotate queue <workspace>      # labels and rulings owed; --json for one task per line
-python -m eval.annotate cut   <workspace> classification/v3 --jira MER-30
+python -m eval.annotate cut   <workspace> classification/v3 --jira MER-nn
 python -m eval.annotate fetch classification/v3
 ```
 
@@ -162,13 +171,15 @@ annotator's answer and no origin, so the annotator labels blind and from the rec
 By default the cut also records an MLflow run with the two set files and the workspace, and
 it needs `MLFLOW_TRACKING_URI` and `--jira`. Only the manifest is committed. On another
 checkout, `fetch` downloads the rows and raw labels from that run, verifies each against the
-manifest's hash, and puts them in place. `--no-upload` is for hand-built fixtures, which
-ship whole.
+manifest's hash, and puts them in place. `--no-upload` is refused for any workspace outside
+`eval/fixtures/`: a hand-built fixture's set ships whole, but any other set's rows are
+git-ignored, and without the upload they would exist nowhere else.
 
 ## What the harness does with a cut set
 
 `eval/run.py` refuses a set whose rows still carry `unsure`, a manifest without drop counts,
-and a candidate count that does not equal the rows plus the drops. On every run it reports
+a candidate count that does not equal the rows plus the drops, and raw labels that disagree
+with either: their hash, their drops by cause, or the items they record as kept. On every run it reports
 and logs the drop rate by cause beside KR3, and the rows it excluded from KR3 by reason. A
 cause above 3% is tagged `drop_rate_review` on the run. The run is not failed: the harness
 reports, it never asserts.

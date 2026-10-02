@@ -210,6 +210,46 @@ def _parse_drops(manifest: dict[str, object], *, name: str) -> dict[str, int]:
     return {cause: drops[cause] for cause in CLASSIFICATION_DROP_CAUSES}
 
 
+def _check_raw_labels(path: Path, *, ids: set[str], drops: dict[str, int], name: str) -> None:
+    """Hold the manifest's counts to the per-item record the cut wrote beside them.
+
+    The hash proves the raw labels are the bytes the cut wrote; it says nothing about the
+    manifest, which is the file a hand edit would reach for. Zeroing the drops in the
+    manifest alone would otherwise report a set that dropped nothing while its own raw
+    labels record every drop.
+    """
+    kept: set[str] = set()
+    dropped = dict.fromkeys(drops, 0)
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        where = f"{name} {RAW_LABELS_FILE} line {number}"
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise EvalSetError(f"{where}: not valid JSON — {exc}") from exc
+        if not isinstance(obj, dict) or not isinstance(obj.get("id"), str):
+            raise EvalSetError(f"{where}: expected an object with a string 'id'")
+        outcome, cause = obj.get("outcome"), obj.get("cause")
+        if outcome == "dropped":
+            if cause not in dropped:
+                raise EvalSetError(f"{where}: dropped with unknown cause {cause!r}")
+            dropped[cause] += 1
+        elif outcome in ("agreed", "adjudicated"):
+            kept.add(obj["id"])
+        else:
+            raise EvalSetError(f"{where}: outcome {outcome!r} is not a finished item's")
+    if dropped != drops:
+        raise EvalSetError(
+            f"{name}: the manifest records drops {drops}, its {RAW_LABELS_FILE} records {dropped}"
+        )
+    if kept != ids:
+        raise EvalSetError(
+            f"{name}: the rows and the items {RAW_LABELS_FILE} records as kept are not the same "
+            f"{len(ids)} vs {len(kept)}"
+        )
+
+
 def _parse_row(line: str, *, where: str) -> ClassificationRow:
     try:
         obj = json.loads(line)
@@ -323,6 +363,8 @@ def load(name: str, *, root: Path | None = None) -> EvalSet:
     ids = [row.id for row in rows]
     if len(set(ids)) != len(ids):
         raise EvalSetError(f"{name}: duplicate row ids")
+
+    _check_raw_labels(raw_labels_path, ids=set(ids), drops=drops, name=name)
 
     return EvalSet(name=name, rows=rows, sha256=digest, drops=drops)
 
