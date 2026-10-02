@@ -175,7 +175,8 @@ it needs `MLFLOW_TRACKING_URI` and `--jira`. Only the manifest is committed. On 
 checkout, `fetch` downloads the rows and raw labels from that run, verifies each against the
 manifest's hash, and moves them into place one file at a time. If the set then fails to load,
 the fetched files are removed. `--no-upload` needs two things: a workspace under
-`eval/fixtures/`, and a set name whose rows `.gitignore` exempts, which git is asked. Any
+`eval/fixtures/`, and a set name whose `rows.jsonl` and `raw_labels.jsonl` `.gitignore` both
+exempts, which git is asked. Any
 other set's rows are git-ignored, and without the upload they would exist nowhere else.
 
 ## What the harness does with a cut set

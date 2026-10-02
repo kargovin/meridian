@@ -356,6 +356,17 @@ def test_an_unhashable_drop_cause_is_refused_not_raised(sets_root: Path) -> None
         load(FIXTURE, root=sets_root)
 
 
+def test_a_set_with_no_rows_is_refused(sets_root: Path) -> None:
+    """A drop rate over zero candidates is a division by zero, and there is nothing to score."""
+    manifest = _manifest(sets_root)
+    manifest["drops"] = {"genuine_disagreement": 0, "unrecoverable_record": 0}
+    _write_manifest(sets_root, manifest)
+    _rewrite(sets_root, [], refresh_hash=True)
+
+    with pytest.raises(EvalSetError, match="the set holds no rows"):
+        load(FIXTURE, root=sets_root)
+
+
 def test_a_set_without_its_rows_points_at_fetch(sets_root: Path) -> None:
     """A real set commits only its manifest; the refusal says how to get the rest."""
     (sets_root / FIXTURE / "raw_labels.jsonl").unlink()

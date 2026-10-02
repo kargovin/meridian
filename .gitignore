@@ -53,4 +53,6 @@ eval/sets/**/rows.jsonl
 eval/sets/**/raw_labels.jsonl
 !eval/sets/classification/v2/rows.jsonl
 !eval/sets/classification/v2/raw_labels.jsonl
+# A fetch interrupted mid-copy leaves one of these, holding corpus text.
+eval/sets/**/.*.partial
 eval/workspaces/

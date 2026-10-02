@@ -396,6 +396,10 @@ def load(name: str, *, root: Path | None = None) -> EvalSet:
             f"and drops add up to {candidates}"
         )
 
+    if not rows:
+        # Nothing to score, and a drop rate over zero candidates is a division by zero.
+        raise EvalSetError(f"{name}: the set holds no rows")
+
     ids = [row.id for row in rows]
     if len(set(ids)) != len(ids):
         raise EvalSetError(f"{name}: duplicate row ids")

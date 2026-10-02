@@ -593,15 +593,22 @@ def test_no_upload_is_refused_outside_the_fixtures(
     assert not root.exists()
 
 
-def test_no_upload_is_refused_for_a_set_whose_rows_git_ignores(
+@pytest.mark.parametrize("ignored", ["rows.jsonl", "raw_labels.jsonl"])
+def test_no_upload_is_refused_when_git_ignores_either_set_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    ignored: str,
 ) -> None:
-    """The fixture workspace cut to a name .gitignore does not exempt: its rows would be
-    ignored, and the manifest would claim they ship with it."""
-    args = ["cut", str(FIXTURE_WORKSPACE), "classification/v3", "--no-upload"]
+    """The harness needs both files, and with no MLflow run neither can be fetched. Git's
+    answer is stubbed per file, so the cut never touches the real eval/sets/ tree;
+    ``git_ignores`` itself is tested against the real checkout in test_eval_run.py."""
+    monkeypatch.setattr(annotate, "git_ignores", lambda path: path.name == ignored)
+    root = tmp_path / "sets"
+    args = ["cut", str(FIXTURE_WORKSPACE), "classification/v3", "--root", str(root), "--no-upload"]
     assert annotate.main(args) == 1
-    assert "is git-ignored or outside this checkout" in capsys.readouterr().err
-    assert not (DEFAULT_ROOT / "classification" / "v3").exists()
+    assert f"{ignored} is git-ignored or outside this checkout" in capsys.readouterr().err
+    assert not root.exists()
 
 
 def test_no_upload_is_refused_when_git_cannot_say(

@@ -340,18 +340,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             # Both, because the workspace decides what the set holds and the set's name
             # decides whether git keeps its rows: a fixture cut to an ignored name would
             # exist nowhere but this disk.
-            rows = (args.root / args.set / ROWS_FILE).resolve()
             if not args.workspace.resolve().is_relative_to(FIXTURES_ROOT):
                 raise CutRefused(
                     f"--no-upload is for hand-built fixtures under {FIXTURES_ROOT}; any other "
                     "set's rows would exist nowhere but this disk."
                 )
-            if git_ignores(rows) is not False:
-                raise CutRefused(
-                    f"--no-upload needs a set whose rows the repository commits, and {rows} "
-                    "is git-ignored or outside this checkout. Add the set to .gitignore's "
-                    "fixture exceptions, or upload it."
-                )
+            # Both files: the harness refuses a set without its raw labels, and with no
+            # MLflow run there is nowhere to fetch either from.
+            for filename in (ROWS_FILE, RAW_LABELS_FILE):
+                path = (args.root / args.set / filename).resolve()
+                if git_ignores(path) is not False:
+                    raise CutRefused(
+                        f"--no-upload needs a set whose {ROWS_FILE} and {RAW_LABELS_FILE} the "
+                        f"repository commits, and {path} is git-ignored or outside this "
+                        "checkout. Add both to .gitignore's fixture exceptions, or upload it."
+                    )
         if not args.no_upload:
             if not args.jira:
                 raise CutRefused("--jira is required to upload: a run nobody can attribute is lost")
