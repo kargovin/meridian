@@ -13,12 +13,13 @@ KR3 is a pair (PRD §9, FR-C3), and neither half means anything alone:
   alone by never answering.
 
 Both are computed over the same population: rows whose *gold* label is a real topic.
-``Other`` and ``unsure`` rows are excluded from the numerator and the denominator of both.
-That population is load-bearing. Counting genuinely-uncategorisable articles in the
-denominator makes the metric move when the *source roster* changes — reporting a regression
-in a classifier that did not change. Folding ``unsure`` in is worse: those rows cluster on
-exactly the ambiguous articles a classifier finds hardest, so including them inflates
-apparent coverage precisely where the truth matters most.
+``Other`` rows are excluded from the numerator and the denominator of both, and counted
+(``excluded_other``) so the population a number covers is visible beside it. That
+population is load-bearing. Counting genuinely-uncategorisable articles in the denominator
+makes the metric move when the *source roster* changes — reporting a regression in a
+classifier that did not change. ``unsure`` never reaches this module: a set still carrying
+it is refused at load, because those rows cluster on exactly the ambiguous articles a
+classifier finds hardest, and leaving them out quietly inflates both numbers.
 
 The population choice is also what makes the two floors compose: coverage x accuracy is
 then the fraction of classifiable articles carrying a correct real topic (0.90 x 0.85 =
@@ -104,6 +105,9 @@ class ClassificationMetrics:
     #: model or a moved threshold; confident-but-wrong Other is a taxonomy or label problem.
     #: assigned + fallback + confident_other == scorable_rows.
     fallback: int
+    #: Rows outside the scored population, by reason. Gold ``Other`` is the only reason a
+    #: finished set can hold; ``unsure`` is refused before scoring.
+    excluded_other: int
     body_coverage: float
     median_text_chars: float
     misassigned_other: int
@@ -134,6 +138,7 @@ class ClassificationMetrics:
             "fallback": float(self.fallback),
             "fallback_rate": self.fallback_rate,
             "confident_other": float(self.confident_other),
+            "excluded_other": float(self.excluded_other),
             "body_coverage": self.body_coverage,
             "median_text_chars": self.median_text_chars,
             "misassigned_other": float(self.misassigned_other),
@@ -158,7 +163,7 @@ def score_classification(
     if not scorable:
         raise ValueError(
             "no rows whose gold label is a real topic — nothing to measure. "
-            "A set of only Other/unsure rows cannot produce a KR3 number."
+            "A set of only Other rows cannot produce a KR3 number."
         )
 
     missing = [row.id for row in rows if row.id not in predictions]
@@ -187,6 +192,7 @@ def score_classification(
         assigned=len(assigned),
         correct=len(correct),
         fallback=len(fallback),
+        excluded_other=len(gold_other),
         body_coverage=with_body / len(scorable),
         median_text_chars=float(statistics.median(lengths)),
         misassigned_other=len(misassigned),

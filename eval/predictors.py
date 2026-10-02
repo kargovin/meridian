@@ -84,19 +84,10 @@ class Oracle:
     which is otherwise a very hard failure to notice, because a plausible-looking number is
     indistinguishable from a correct one.
 
-    Rows with no real topic (``Other``, ``unsure``) get ``Other``: there is no right answer
-    to return, and abstaining is the honest output.
     """
 
     def predict(self, rows: Sequence[ClassificationRow]) -> Predictions:
-        return {
-            row.id: Prediction(
-                topic=row.gold if isinstance(row.gold, Topic) else Topic.OTHER,
-                confidence=1.0,
-                fallback=False,
-            )
-            for row in rows
-        }
+        return {row.id: Prediction(topic=row.gold, confidence=1.0, fallback=False) for row in rows}
 
 
 def build(name: str, **params: object) -> TopicClassifier:

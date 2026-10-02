@@ -46,6 +46,6 @@ TAXONOMY_VERSION = "v1"
 #:
 #: ⚠ Membership alone is not a type check. ``Topic`` is a ``StrEnum``, so the bare string
 #: ``"sports"`` satisfies ``in`` here. Where the value may not be a ``Topic`` already — a
-#: gold label that can hold the unsure sentinel, a prediction arriving from a model adapter
+#: label read from an annotator's file, a prediction arriving from a model adapter
 #: — test the type first and use this for the ``Other`` question only.
 REAL_TOPICS = frozenset(topic for topic in Topic if topic is not Topic.OTHER)

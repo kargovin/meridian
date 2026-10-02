@@ -44,3 +44,13 @@ Thumbs.db
 # by accident — an untracked file here would make every run report git_dirty=true.
 mlflow.db
 mlruns/
+
+# A real eval set's rows and raw labels are annotated corpus text. They are uploaded to
+# MLflow when the set is cut, and only its manifest is committed; `python -m eval.annotate
+# fetch` restores them. The hand-built fixture ships whole. Real annotation workspaces live
+# under eval/workspaces/ and are never committed.
+eval/sets/**/rows.jsonl
+eval/sets/**/raw_labels.jsonl
+!eval/sets/classification/v2/rows.jsonl
+!eval/sets/classification/v2/raw_labels.jsonl
+eval/workspaces/

@@ -76,12 +76,12 @@ platform/              # the stateless Platform service
 libs/
   contract/            # shared Pydantic schema — source of the published contract
   config/              # process bootstrap: database URLs, credentials, API limits
-eval/                  # model evaluation harness
+eval/                  # model evaluation harness and annotation tooling
 migrations/            # Alembic
 tools/                 # Confluence authoring toolchain
 ```
 
-`eval/` is separate from the test suite: it measures model quality and reports numbers, where the tests under `pytest` assert on behaviour.
+`eval/` is separate from the test suite: it measures model quality and reports numbers, where the tests under `pytest` assert on behaviour. Its sets are cut from an annotation workspace by `python -m eval.annotate`, which refuses while any item is unlabelled or awaiting a ruling and records what adjudication dropped, by cause; the harness reports that drop rate beside every score. A real set's rows live in MLflow and only its manifest is committed. The file format is `eval/ANNOTATION_FORMAT.md`.
 
 Deployment manifests are not in this repository. They live in `kargovin/govindappa-k8s-config` and are reconciled by Flux onto a single-node k3s cluster.
 

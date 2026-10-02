@@ -1,0 +1,38 @@
+{
+  "set": "classification/v2",
+  "format": 1,
+  "task": "classification",
+  "taxonomy": "v1",
+  "rubric_rev": 2,
+  "sha256": "2d1ff3e1c5c75d7968488c93c97da8745500167083f87a8fff4f8ddfd6d167af",
+  "row_count": 10,
+  "raw_labels_sha256": "e8c9bb761f1dac95b6b6a8e96d28703806de048c18be9912259fdff8a030cc6c",
+  "candidates": 12,
+  "drops": {
+    "genuine_disagreement": 1,
+    "unrecoverable_record": 1
+  },
+  "adjudicated": 2,
+  "overrides": 1,
+  "double_labelled": 5,
+  "participants": [
+    {
+      "id": "agent-a",
+      "kind": "agent",
+      "model": "fixture-a",
+      "instructions_sha256": "cd670d434eb788046a37e2eeb1e8e391e3f62e791384b7aed860e5e0ebc216a6"
+    },
+    {
+      "id": "agent-b",
+      "kind": "agent",
+      "model": "fixture-b",
+      "instructions_sha256": "cd670d434eb788046a37e2eeb1e8e391e3f62e791384b7aed860e5e0ebc216a6"
+    },
+    {
+      "id": "adjudicator",
+      "kind": "human"
+    }
+  ],
+  "description": "Hand-built fixture, not a sample of production. Its job is to prove the harness and the annotation lifecycle compute correctly, on a population small enough to verify by hand: 12 candidates, of which 8 rows have a real topic, 2 are genuine Other, and 2 were dropped, one per cause. One contested item is adjudicated and one agreed label is overridden. Two of the 8 carry a body. The labels and rulings are ours, not an annotator's, and no model decision may rest on them.",
+  "mlflow": null
+}

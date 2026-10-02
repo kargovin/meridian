@@ -1,0 +1,20 @@
+{
+  "participants": [
+    {
+      "id": "agent-a",
+      "kind": "agent",
+      "model": "fixture-a",
+      "instructions_sha256": "cd670d434eb788046a37e2eeb1e8e391e3f62e791384b7aed860e5e0ebc216a6"
+    },
+    {
+      "id": "agent-b",
+      "kind": "agent",
+      "model": "fixture-b",
+      "instructions_sha256": "cd670d434eb788046a37e2eeb1e8e391e3f62e791384b7aed860e5e0ebc216a6"
+    },
+    {
+      "id": "adjudicator",
+      "kind": "human"
+    }
+  ]
+}

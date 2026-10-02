@@ -1,0 +1,12 @@
+{"id": "fx-001", "label": "world"}
+{"id": "fx-002", "label": "nation_politics"}
+{"id": "fx-003", "label": "business"}
+{"id": "fx-004", "label": "technology"}
+{"id": "fx-005", "label": "science"}
+{"id": "fx-006", "label": "health"}
+{"id": "fx-007", "label": "sports"}
+{"id": "fx-008", "label": "entertainment"}
+{"id": "fx-009", "label": "other"}
+{"id": "fx-010", "label": "sports"}
+{"detail": {"candidates": ["world", "nation_politics"]}, "id": "fx-011", "label": "unsure", "unsure_reason": "collision_without_rule"}
+{"id": "fx-012", "label": "unsure", "unsure_reason": "unrecoverable_record"}
