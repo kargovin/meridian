@@ -571,6 +571,7 @@ def test_a_failed_write_leaves_no_staging_behind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An interrupted cut must leave nothing for the harness, or the next cut, to find."""
+
     def fail(*args: object) -> None:
         raise OSError("disk full")
 
@@ -591,9 +592,56 @@ def test_no_upload_is_refused_outside_the_fixtures(
     assert "--no-upload is for hand-built fixtures" in capsys.readouterr().err
     assert not root.exists()
 
+
+def test_no_upload_is_refused_for_a_set_whose_rows_git_ignores(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The fixture workspace cut to a name .gitignore does not exempt: its rows would be
+    ignored, and the manifest would claim they ship with it."""
+    args = ["cut", str(FIXTURE_WORKSPACE), "classification/v3", "--no-upload"]
+    assert annotate.main(args) == 1
+    assert "is git-ignored or outside this checkout" in capsys.readouterr().err
+    assert not (DEFAULT_ROOT / "classification" / "v3").exists()
+
+
+def test_no_upload_is_refused_when_git_cannot_say(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A root outside the checkout: git has no answer, and no answer is not a yes."""
+    root = tmp_path / "sets"
+    args = ["cut", str(FIXTURE_WORKSPACE), "classification/v3", "--root", str(root), "--no-upload"]
+    assert annotate.main(args) == 1
+    assert "is git-ignored or outside this checkout" in capsys.readouterr().err
+    assert not root.exists()
+
+
+def test_no_upload_cuts_a_fixture_to_a_committed_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The allowed case. Git is asked about the real tree; here the answer is stubbed so the
+    cut can land in a temporary root rather than in the repository."""
+    monkeypatch.setattr(annotate, "git_ignores", lambda path: False)
+    root = tmp_path / "sets"
     args = ["cut", str(FIXTURE_WORKSPACE), "classification/v3", "--root", str(root), "--no-upload"]
     assert annotate.main(args) == 0
     assert load("classification/v3", root=root).candidates == 12
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85"])
+def test_a_line_separator_inside_text_survives_the_cut_and_the_load(
+    ws: Path, tmp_path: Path, separator: str
+) -> None:
+    """``str.splitlines()`` splits on these too, and JSON written with ensure_ascii=False
+    carries them raw inside a string. Scraped news text contains them."""
+    _edit(ws / "pool.jsonl", "fx-001", body=f"First paragraph.{separator}Second paragraph.")
+    path = ws / "labels" / "agent-a.jsonl"
+    rows = _lines(path)
+    rows[1]["detail"] = {"note": f"one{separator}two"}
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+
+    write_cut(cut(open_workspace(ws), "classification/v3"), tmp_path, mlflow_run=None)
+    row = {r.id: r for r in load("classification/v3", root=tmp_path).rows}["fx-001"]
+    assert row.body == f"First paragraph.{separator}Second paragraph."
 
 
 def test_fetch_will_not_replace_a_different_local_file(
@@ -612,6 +660,29 @@ def test_fetch_will_not_replace_a_different_local_file(
     assert "a different rows.jsonl is already in" in capsys.readouterr().err
     assert (root / name / "rows.jsonl").read_text() == "someone's edit\n"
     assert not (root / name / "raw_labels.jsonl").exists()
+
+
+def test_a_fetch_the_set_then_refuses_leaves_nothing_behind(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both files download and match their hashes, but the set does not load (here, the
+    manifest's drops no longer match the raw labels). Nothing fetched may stay in place."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path / 'mlflow.db'}")
+    root = tmp_path / "sets"
+    name = "classification/v3"
+    assert annotate.main(["cut", str(ws), name, "--root", str(root), "--jira", "MER-28"]) == 0
+    base = root / name
+    (base / "rows.jsonl").unlink()
+    (base / "raw_labels.jsonl").unlink()
+    manifest = json.loads((base / "manifest.json").read_text())
+    manifest["drops"] = {"genuine_disagreement": 0, "unrecoverable_record": 2}
+    (base / "manifest.json").write_text(json.dumps(manifest))
+    capsys.readouterr()
+
+    assert annotate.main(["fetch", name, "--root", str(root)]) == 1
+    assert "raw_labels.jsonl records" in capsys.readouterr().err
+    assert sorted(p.name for p in base.iterdir()) == ["manifest.json"]
 
 
 def test_fetch_reports_a_broken_manifest_and_a_missing_run(

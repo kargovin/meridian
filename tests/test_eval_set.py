@@ -28,6 +28,11 @@ def _manifest(root: Path) -> dict[str, object]:
     return loaded
 
 
+def _rows(root: Path) -> list[dict[str, object]]:
+    text = (root / FIXTURE / "rows.jsonl").read_text()
+    return [json.loads(line) for line in text.split("\n") if line.strip()]
+
+
 def _write_manifest(root: Path, manifest: dict[str, object]) -> None:
     (root / FIXTURE / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -59,17 +64,17 @@ def _rewrite(
     if refresh_hash:
         manifest["sha256"] = hashlib.sha256(raw).hexdigest()
     _write_manifest(root, manifest)
-    _sync_raw_labels(root, [str(r.get("id")) for r in rows])
+    _sync_raw_labels(root, [(str(r.get("id")), r.get("gold")) for r in rows])
 
 
-def _sync_raw_labels(root: Path, kept_ids: list[str]) -> None:
-    """Write raw labels recording ``kept_ids`` as kept and the manifest's drops as dropped,
-    and re-hash them, so a test that changes the rows or the drops reaches its own guard
-    rather than the raw-labels cross-check."""
+def _sync_raw_labels(root: Path, kept: list[tuple[str, object]]) -> None:
+    """Write raw labels recording ``kept`` (id, gold) as kept and the manifest's drops as
+    dropped, and re-hash them, so a test that changes the rows or the drops reaches its own
+    guard rather than the raw-labels cross-check."""
     manifest = _manifest(root)
     drops = manifest["drops"]
     assert isinstance(drops, dict)
-    lines = [{"id": i, "outcome": "agreed", "cause": None} for i in kept_ids]
+    lines = [{"id": i, "outcome": "agreed", "cause": None, "gold": g} for i, g in kept]
     for cause, count in drops.items():
         lines += [{"id": f"drop-{cause}-{n}", "outcome": "dropped", "cause": cause}
                   for n in range(count)]  # fmt: skip
@@ -276,11 +281,78 @@ def test_drops_must_match_what_the_raw_labels_record(sets_root: Path) -> None:
 
 
 def test_the_kept_items_must_be_the_rows(sets_root: Path) -> None:
-    rows_path = sets_root / FIXTURE / "rows.jsonl"
-    ids = [json.loads(line)["id"] for line in rows_path.read_text().splitlines()]
-    _sync_raw_labels(sets_root, [*ids[:-1], "someone-else"])
+    rows = _rows(sets_root)
+    kept = [(str(r["id"]), r["gold"]) for r in rows]
+    _sync_raw_labels(sets_root, [*kept[:-1], ("someone-else", "world")])
 
-    with pytest.raises(EvalSetError, match=r"items raw_labels\.jsonl records as kept"):
+    with pytest.raises(EvalSetError, match=r"records as kept differ: fx-010, someone-else"):
+        load(FIXTURE, root=sets_root)
+
+
+def test_a_rows_gold_must_match_what_the_raw_labels_record(sets_root: Path) -> None:
+    """Editing a row's gold and re-hashing the rows is the hand edit the hash cannot see."""
+    rows = _rows(sets_root)
+    rows[0]["gold"] = "science"
+    raw = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in rows).encode()
+    (sets_root / FIXTURE / "rows.jsonl").write_bytes(raw)
+    manifest = _manifest(sets_root)
+    manifest["sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(
+        EvalSetError, match=r"gold in rows\.jsonl differs from raw_labels\.jsonl for fx-001"
+    ):
+        load(FIXTURE, root=sets_root)
+
+
+def test_an_item_recorded_twice_in_the_raw_labels_is_refused(sets_root: Path) -> None:
+    path = sets_root / FIXTURE / "raw_labels.jsonl"
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    (dropped,) = [line for line in lines if line["id"] == "fx-011"]
+    dropped["id"] = "fx-001"
+    raw = "".join(json.dumps(line, sort_keys=True) + "\n" for line in lines).encode()
+    path.write_bytes(raw)
+    manifest = _manifest(sets_root)
+    manifest["raw_labels_sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(EvalSetError, match="'fx-001' is recorded twice"):
+        load(FIXTURE, root=sets_root)
+
+
+@pytest.mark.parametrize(
+    ("file", "content", "message"),
+    [
+        ("manifest.json", b"[]", "must be a JSON object"),
+        ("manifest.json", b"\xff", "manifest.json is not UTF-8"),
+        ("rows.jsonl", b"\xff", "rows.jsonl is not UTF-8"),
+    ],
+)
+def test_malformed_files_are_refused_not_raised(
+    sets_root: Path, file: str, content: bytes, message: str
+) -> None:
+    path = sets_root / FIXTURE / file
+    path.write_bytes(content)
+    if file == "rows.jsonl":
+        manifest = _manifest(sets_root)
+        manifest["sha256"] = hashlib.sha256(content).hexdigest()
+        _write_manifest(sets_root, manifest)
+    with pytest.raises(EvalSetError, match=message):
+        load(FIXTURE, root=sets_root)
+
+
+def test_an_unhashable_drop_cause_is_refused_not_raised(sets_root: Path) -> None:
+    path = sets_root / FIXTURE / "raw_labels.jsonl"
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    (dropped,) = [line for line in lines if line["id"] == "fx-011"]
+    dropped["cause"] = ["genuine_disagreement"]
+    raw = "".join(json.dumps(line, sort_keys=True) + "\n" for line in lines).encode()
+    path.write_bytes(raw)
+    manifest = _manifest(sets_root)
+    manifest["raw_labels_sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(EvalSetError, match="dropped with unknown cause"):
         load(FIXTURE, root=sets_root)
 
 

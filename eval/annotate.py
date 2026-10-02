@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -47,7 +48,7 @@ from eval.evalset import (
     EvalSetError,
     load,
 )
-from eval.run import provenance, require_tracking_uri, without_credentials
+from eval.run import git_ignores, provenance, require_tracking_uri, without_credentials
 
 DEFAULT_EXPERIMENT = "meridian-eval-sets"
 
@@ -235,6 +236,7 @@ def fetch(name: str, root: Path) -> Path:
     }
     with tempfile.TemporaryDirectory() as tmp:
         fetched: dict[str, Path] = {}
+        placed: list[Path] = []
         for filename, digest in expected.items():
             try:
                 local = Path(
@@ -260,9 +262,22 @@ def fetch(name: str, root: Path) -> Path:
                     f"{name}: a different {filename} is already in {base}; move it aside first"
                 )
             fetched[filename] = local
-        for filename, local in fetched.items():
-            shutil.copyfile(local, base / filename)
-    load(name, root=root)
+        try:
+            for filename, local in fetched.items():
+                target = base / filename
+                if target.exists():
+                    continue
+                # Copied beside the target and renamed into place, so an interrupted fetch
+                # never leaves a partial file that the next fetch refuses as "different".
+                partial = base / f".{filename}.partial"
+                shutil.copyfile(local, partial)
+                os.replace(partial, target)
+                placed.append(target)
+            load(name, root=root)
+        except BaseException:
+            for path in (*placed, *(base / f".{f}.partial" for f in fetched)):
+                path.unlink(missing_ok=True)
+            raise
     return base
 
 
@@ -321,11 +336,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             # orphan run behind in MLflow.
             raise CutRefused(f"{args.root / args.set} already exists; cut a new version")
         run = None
-        if args.no_upload and not args.workspace.resolve().is_relative_to(FIXTURES_ROOT):
-            raise CutRefused(
-                f"--no-upload is for hand-built fixtures under {FIXTURES_ROOT}. Any other set's "
-                "rows are git-ignored, so without the upload they would exist nowhere else."
-            )
+        if args.no_upload:
+            # Both, because the workspace decides what the set holds and the set's name
+            # decides whether git keeps its rows: a fixture cut to an ignored name would
+            # exist nowhere but this disk.
+            rows = (args.root / args.set / ROWS_FILE).resolve()
+            if not args.workspace.resolve().is_relative_to(FIXTURES_ROOT):
+                raise CutRefused(
+                    f"--no-upload is for hand-built fixtures under {FIXTURES_ROOT}; any other "
+                    "set's rows would exist nowhere but this disk."
+                )
+            if git_ignores(rows) is not False:
+                raise CutRefused(
+                    f"--no-upload needs a set whose rows the repository commits, and {rows} "
+                    "is git-ignored or outside this checkout. Add the set to .gitignore's "
+                    "fixture exceptions, or upload it."
+                )
         if not args.no_upload:
             if not args.jira:
                 raise CutRefused("--jira is required to upload: a run nobody can attribute is lost")

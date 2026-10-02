@@ -20,7 +20,9 @@ hand-built fixture at `eval/fixtures/classification-v2/` is a complete worked ex
   adjudication.jsonl    the rulings
 ```
 
-Every file is UTF-8. A `.jsonl` file holds one JSON object per line. **Unknown keys are
+Every file is UTF-8. A `.jsonl` file holds one JSON object per line, and lines end at `\n`
+alone. U+2028, U+2029 and U+0085 inside a string are text, not line breaks, so a file
+written with `ensure_ascii=False` is read correctly. **Unknown keys are
 refused, not ignored**: a misspelled key that is dropped means the file says something
 other than what was meant, and nothing reports it.
 
@@ -171,15 +173,17 @@ annotator's answer and no origin, so the annotator labels blind and from the rec
 By default the cut also records an MLflow run with the two set files and the workspace, and
 it needs `MLFLOW_TRACKING_URI` and `--jira`. Only the manifest is committed. On another
 checkout, `fetch` downloads the rows and raw labels from that run, verifies each against the
-manifest's hash, and puts them in place. `--no-upload` is refused for any workspace outside
-`eval/fixtures/`: a hand-built fixture's set ships whole, but any other set's rows are
-git-ignored, and without the upload they would exist nowhere else.
+manifest's hash, and moves them into place one file at a time. If the set then fails to load,
+the fetched files are removed. `--no-upload` needs two things: a workspace under
+`eval/fixtures/`, and a set name whose rows `.gitignore` exempts, which git is asked. Any
+other set's rows are git-ignored, and without the upload they would exist nowhere else.
 
 ## What the harness does with a cut set
 
 `eval/run.py` refuses a set whose rows still carry `unsure`, a manifest without drop counts,
 a candidate count that does not equal the rows plus the drops, and raw labels that disagree
-with either: their hash, their drops by cause, or the items they record as kept. On every run it reports
+with either. That covers their hash, an item recorded twice, their drops by cause, the
+items they record as kept, and each kept item's gold label. On every run it reports
 and logs the drop rate by cause beside KR3, and the rows it excluded from KR3 by reason. A
 cause above 3% is tagged `drop_rate_review` on the run. The run is not failed: the harness
 reports, it never asserts.

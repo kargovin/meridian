@@ -55,6 +55,7 @@ from eval.evalset import (
     RAW_LABELS_FILE,
     ROWS_FILE,
     UNSURE,
+    jsonl_lines,
 )
 
 #: The version of the workspace layout this module reads. ``workspace.json`` must name it.
@@ -433,7 +434,7 @@ def _read_jsonl(
         problems.add(label, f"not UTF-8 — {exc}")
         return []
     out: list[tuple[str, dict[str, object]]] = []
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in enumerate(jsonl_lines(text), start=1):
         if not line.strip():
             continue
         where = f"{label} line {number}"

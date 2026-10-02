@@ -616,3 +616,12 @@ def test_a_recorded_run_carries_the_drop_rate_and_the_review_tag(
     assert run.data.metrics["drop_rate.unrecoverable_record"] == pytest.approx(1 / 12)
     assert run.data.metrics["excluded_other"] == 2.0
     assert run.data.tags["drop_rate_review"] == "genuine_disagreement,unrecoverable_record"
+
+
+def test_git_ignores_answers_for_this_checkout(tmp_path: Path) -> None:
+    """The committed fixture's rows are kept; any other set's are ignored; a path outside the
+    checkout has no answer, which a caller deciding what will be committed reads as no."""
+    sets = DEFAULT_ROOT / "classification"
+    assert run_module.git_ignores(sets / "v2" / "rows.jsonl") is False
+    assert run_module.git_ignores(sets / "v3" / "rows.jsonl") is True
+    assert run_module.git_ignores(tmp_path / "rows.jsonl") is None

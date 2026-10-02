@@ -143,6 +143,24 @@ def _git(*args: str) -> str | None:
     return done.stdout.strip() if done.returncode == 0 else None
 
 
+def git_ignores(path: Path) -> bool | None:
+    """Whether this checkout's ``.gitignore`` excludes ``path``.
+
+    ``None`` when git cannot say: no git, or a path outside the checkout. A caller deciding
+    whether something will be committed should treat ``None`` as "no".
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(_REPO), "check-ignore", "-q", str(path)],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {0: True, 1: False}.get(done.returncode)
+
+
 def provenance() -> dict[str, str]:
     """Tags identifying the code that produced a run.
 

@@ -74,6 +74,23 @@ class EvalSetError(Exception):
     """A set could not be loaded, or does not match its manifest."""
 
 
+def jsonl_lines(text: str) -> list[str]:
+    """Split JSONL into its lines, on ``\\n`` alone.
+
+    ⚠ Not ``str.splitlines()``: it also splits on U+2028, U+2029 and U+0085, which JSON
+    written with ``ensure_ascii=False`` carries raw inside strings, and which scraped news
+    text does contain. It would cut one valid row into two invalid halves.
+    """
+    return text.split("\n")
+
+
+def _read_text(path: Path, *, name: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise EvalSetError(f"{name}: {path.name} is not UTF-8 — {exc}") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class ClassificationRow:
     """One labelled article.
@@ -210,17 +227,19 @@ def _parse_drops(manifest: dict[str, object], *, name: str) -> dict[str, int]:
     return {cause: drops[cause] for cause in CLASSIFICATION_DROP_CAUSES}
 
 
-def _check_raw_labels(path: Path, *, ids: set[str], drops: dict[str, int], name: str) -> None:
-    """Hold the manifest's counts to the per-item record the cut wrote beside them.
+def _check_raw_labels(
+    path: Path, *, golds: dict[str, Topic], drops: dict[str, int], name: str
+) -> None:
+    """Hold the manifest and the rows to the per-item record the cut wrote beside them.
 
-    The hash proves the raw labels are the bytes the cut wrote; it says nothing about the
-    manifest, which is the file a hand edit would reach for. Zeroing the drops in the
-    manifest alone would otherwise report a set that dropped nothing while its own raw
-    labels record every drop.
+    Each file's hash proves only that the file is the bytes its manifest names, and a hand
+    edit can re-hash. So the files are also checked against each other: drops by cause
+    against the manifest, and every kept item, with its gold, against the rows.
     """
-    kept: set[str] = set()
+    kept: dict[str, object] = {}
+    seen: set[str] = set()
     dropped = dict.fromkeys(drops, 0)
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for number, line in enumerate(jsonl_lines(_read_text(path, name=name)), start=1):
         if not line.strip():
             continue
         where = f"{name} {RAW_LABELS_FILE} line {number}"
@@ -230,23 +249,34 @@ def _check_raw_labels(path: Path, *, ids: set[str], drops: dict[str, int], name:
             raise EvalSetError(f"{where}: not valid JSON — {exc}") from exc
         if not isinstance(obj, dict) or not isinstance(obj.get("id"), str):
             raise EvalSetError(f"{where}: expected an object with a string 'id'")
+        item_id = obj["id"]
+        if item_id in seen:
+            raise EvalSetError(f"{where}: {item_id!r} is recorded twice")
+        seen.add(item_id)
         outcome, cause = obj.get("outcome"), obj.get("cause")
         if outcome == "dropped":
-            if cause not in dropped:
+            if not isinstance(cause, str) or cause not in dropped:
                 raise EvalSetError(f"{where}: dropped with unknown cause {cause!r}")
             dropped[cause] += 1
         elif outcome in ("agreed", "adjudicated"):
-            kept.add(obj["id"])
+            kept[item_id] = obj.get("gold")
         else:
             raise EvalSetError(f"{where}: outcome {outcome!r} is not a finished item's")
     if dropped != drops:
         raise EvalSetError(
             f"{name}: the manifest records drops {drops}, its {RAW_LABELS_FILE} records {dropped}"
         )
-    if kept != ids:
+    if kept.keys() != golds.keys():
+        differ = sorted(kept.keys() ^ golds.keys())
         raise EvalSetError(
-            f"{name}: the rows and the items {RAW_LABELS_FILE} records as kept are not the same "
-            f"{len(ids)} vs {len(kept)}"
+            f"{name}: the rows and the items {RAW_LABELS_FILE} records as kept differ: "
+            f"{', '.join(differ[:5])}{' …' if len(differ) > 5 else ''}"
+        )
+    changed = sorted(i for i, gold in golds.items() if kept[i] != gold.value)
+    if changed:
+        raise EvalSetError(
+            f"{name}: gold in {ROWS_FILE} differs from {RAW_LABELS_FILE} for "
+            f"{', '.join(changed[:5])}{' …' if len(changed) > 5 else ''}"
         )
 
 
@@ -302,9 +332,11 @@ def load(name: str, *, root: Path | None = None) -> EvalSet:
     digest = hashlib.sha256(raw).hexdigest()
 
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(_read_text(manifest_path, name=name))
     except json.JSONDecodeError as exc:
         raise EvalSetError(f"{name}: {MANIFEST_FILE} is not valid JSON — {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise EvalSetError(f"{name}: {MANIFEST_FILE} must be a JSON object")
 
     declared_name = manifest.get("set")
     if declared_name != name:
@@ -330,7 +362,11 @@ def load(name: str, *, root: Path | None = None) -> EvalSet:
 
     drops = _parse_drops(manifest, name=name)
 
-    lines = [line for line in raw.decode("utf-8").splitlines() if line.strip()]
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EvalSetError(f"{name}: {ROWS_FILE} is not UTF-8 — {exc}") from exc
+    lines = [line for line in jsonl_lines(text) if line.strip()]
     # Counted before any row is parsed, so the refusal names every unmade decision rather
     # than stopping at the first.
     unsure = sum(1 for line in lines if _is_unsure(line))
@@ -364,7 +400,9 @@ def load(name: str, *, root: Path | None = None) -> EvalSet:
     if len(set(ids)) != len(ids):
         raise EvalSetError(f"{name}: duplicate row ids")
 
-    _check_raw_labels(raw_labels_path, ids=set(ids), drops=drops, name=name)
+    _check_raw_labels(
+        raw_labels_path, golds={row.id: row.gold for row in rows}, drops=drops, name=name
+    )
 
     return EvalSet(name=name, rows=rows, sha256=digest, drops=drops)
 
