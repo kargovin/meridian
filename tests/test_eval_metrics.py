@@ -1,11 +1,12 @@
 """KR3's arithmetic, measured against a fixture small enough to check by hand.
 
 The whole point of the fixture is that the expected numbers are derived on paper, not from
-running the code and writing down whatever came out. On ``classification/v1``:
+running the code and writing down whatever came out. On ``classification/v2``:
 
     8 rows whose gold label is a real topic   (fx-001 .. fx-008)
     2 genuine Other                           (fx-009, fx-010)
-    2 unsure                                  (fx-011, fx-012)
+
+(fx-011 and fx-012 were dropped at adjudication, so they are not rows at all.)
 
 ``SCRIPT`` below assigns a real topic to 7 of the 8, gets 6 of those right, and abstains on
 the eighth — so coverage is 7/8 and accuracy is 6/7, whatever the code does.
@@ -19,7 +20,7 @@ from meridian_contract.taxonomy import Topic
 from eval.evalset import ClassificationRow, load
 from eval.metrics import ClassificationMetrics, Prediction, Predictions, score_classification
 
-FIXTURE = "classification/v1"
+FIXTURE = "classification/v2"
 
 #: Chosen so both numbers are non-trivial and disagree with each other.
 SCRIPT: dict[str, Topic] = {
@@ -33,8 +34,6 @@ SCRIPT: dict[str, Topic] = {
     "fx-008": Topic.OTHER,  # abstained. Costs coverage, not accuracy.
     "fx-009": Topic.OTHER,  # gold Other, correctly left alone
     "fx-010": Topic.SPORTS,  # gold Other, wrongly assigned — the diagnostic
-    "fx-011": Topic.OTHER,  # unsure: outside both numbers entirely
-    "fx-012": Topic.SPORTS,  # unsure: outside both numbers entirely
 }
 
 
@@ -101,12 +100,18 @@ def test_genuine_other_rows_are_outside_both_numbers() -> None:
     assert widened.accuracy_on_assigned == baseline.accuracy_on_assigned
 
 
-def test_unsure_rows_are_outside_both_numbers(scored: ClassificationMetrics) -> None:
-    """Folding ``unsure`` into ``Other`` inflates coverage exactly where the classifier is
-    weakest, because those rows cluster on the ambiguous articles. The fixture holds two;
-    neither may appear in either denominator."""
-    assert scored.scorable_rows == 8  # not 10
-    assert scored.coverage == pytest.approx(7 / 8)  # not 7/10
+def test_excluded_rows_are_counted_by_reason(scored: ClassificationMetrics) -> None:
+    """Outside both numbers by design, and visible beside them: a reader can see what
+    population a KR3 number covers without opening the set."""
+    assert scored.excluded_other == 2
+    assert scored.as_mlflow_metrics()["excluded_other"] == 2.0
+
+
+def test_excluded_rows_are_counted_over_the_rows_given() -> None:
+    """Hard-coding the fixture's two passes the test above and fails this one."""
+    rows = [row for row in load(FIXTURE).rows if row.id != "fx-010"]
+    scored = score_classification(rows, _predictions(SCRIPT))
+    assert scored.excluded_other == 1
 
 
 def test_the_two_floors_compose_into_the_commitment(scored: ClassificationMetrics) -> None:

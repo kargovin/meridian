@@ -1,0 +1,7 @@
+{
+  "format": 1,
+  "task": "classification",
+  "taxonomy": "v1",
+  "rubric_rev": 2,
+  "description": "Hand-built fixture, not a sample of production. Its job is to prove the harness and the annotation lifecycle compute correctly, on a population small enough to verify by hand: 12 candidates, of which 8 rows have a real topic, 2 are genuine Other, and 2 were dropped, one per cause. One contested item is adjudicated and one agreed label is overridden. Two of the 8 carry a body. The labels and rulings are ours, not an annotator's, and no model decision may rest on them."
+}

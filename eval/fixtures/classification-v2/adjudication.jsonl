@@ -1,0 +1,4 @@
+{"by": "adjudicator", "gold": "science", "id": "fx-005", "note": "A finding about the natural world; nothing in it is about relations between states.", "outcome": "gold"}
+{"by": "adjudicator", "gold": "other", "id": "fx-010", "note": "A corrections column is genuine Other (rubric §5.1), not the topic of the story it corrects.", "outcome": "gold"}
+{"by": "adjudicator", "cause": "genuine_disagreement", "id": "fx-011", "note": "A round-up spans topics; no definition decides it.", "outcome": "drop"}
+{"by": "adjudicator", "cause": "unrecoverable_record", "id": "fx-012", "note": "The source page is gone; the title alone does not identify a subject.", "outcome": "drop"}

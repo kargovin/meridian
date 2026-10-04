@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from eval import run as run_module
+from eval.annotation import cut, open_workspace, write_cut
 from eval.evalset import DEFAULT_ROOT, EvalSetError, load
 from eval.metrics import score_classification
 from eval.predictors import Oracle, SeededStub, TopicClassifier, build
@@ -26,7 +28,8 @@ from eval.run import (
     without_credentials,
 )
 
-FIXTURE = "classification/v1"
+FIXTURE = "classification/v2"
+FIXTURE_WORKSPACE = Path(__file__).resolve().parents[1] / "eval" / "fixtures" / "classification-v2"
 
 
 def _write_config(path: Path, body: str) -> Path:
@@ -340,6 +343,7 @@ def test_the_report_says_not_applicable_rather_than_zero_accuracy(tmp_path: Path
         assigned=0,
         correct=0,
         fallback=0,
+        excluded_other=2,
         body_coverage=0.25,
         median_text_chars=61.5,
         misassigned_other=0,
@@ -554,3 +558,70 @@ def test_a_tracking_failure_is_reported_rather_than_raised(
     captured = capsys.readouterr()
     assert "coverage" in captured.out
     assert "could not record the run" in captured.err
+
+
+# --------------------------------------------------------------------------- drop rate
+
+
+def test_the_report_carries_the_drop_rate_by_cause(tmp_path: Path) -> None:
+    """Rubric §7.5: a KR3 number quoted without the drop rate behind it is incomplete."""
+    report = format_report(execute(load_config(_smoke_config(tmp_path))))
+    assert "excluded rows         2 gold Other" in report
+    assert "candidates            12  (10 in the set, 2 dropped)" in report
+    assert "drop rate             0.083  genuine_disagreement (1)  <- above 3%, review" in report
+    assert "drop rate             0.083  unrecoverable_record (1)  <- above 3%, review" in report
+
+
+def test_a_cause_under_the_trigger_is_not_marked(tmp_path: Path) -> None:
+    """Cut from the fixture workspace with both drops ruled to gold instead, so the set has
+    no drops and every file agrees — built by the tool, not by editing a manifest."""
+    workspace = tmp_path / "ws"
+    shutil.copytree(FIXTURE_WORKSPACE, workspace)
+    rulings = workspace / "adjudication.jsonl"
+    lines = [json.loads(line) for line in rulings.read_text().splitlines()]
+    for line in lines:
+        if line["outcome"] == "drop":
+            line.update(outcome="gold", gold="world")
+            del line["cause"]
+    rulings.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    root = tmp_path / "sets"
+    write_cut(cut(open_workspace(workspace), FIXTURE), root, mlflow_run=None)
+
+    path = _write_config(
+        tmp_path / "run.toml",
+        f'eval_set = "{FIXTURE}"\nexperiment = "t"\njira = "MER-28"\nsets_root = "{root}"\n'
+        '[predictor]\nname = "oracle"\n',
+    )
+    result = execute(load_config(path))
+    report = format_report(result)
+    assert "drop rate             0.000  genuine_disagreement (0)\n" in report
+    assert "review" not in report
+    assert run_module.drop_rate_review_tag(result.eval_set) == "none"
+
+
+def test_a_recorded_run_carries_the_drop_rate_and_the_review_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Against a real local tracking store, read back: what reached MLflow is the claim."""
+    import mlflow
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path / 'mlflow.db'}")
+    config = load_config(_smoke_config(tmp_path))
+    log_to_mlflow(config, execute(config))
+
+    (run,) = mlflow.search_runs(experiment_names=[config.experiment], output_format="list")
+    assert run.data.metrics["candidates"] == 12.0
+    assert run.data.metrics["drops.genuine_disagreement"] == 1.0
+    assert run.data.metrics["drop_rate.unrecoverable_record"] == pytest.approx(1 / 12)
+    assert run.data.metrics["excluded_other"] == 2.0
+    assert run.data.tags["drop_rate_review"] == "genuine_disagreement,unrecoverable_record"
+
+
+def test_git_ignores_answers_for_this_checkout(tmp_path: Path) -> None:
+    """The committed fixture's rows are kept; any other set's are ignored; a path outside the
+    checkout has no answer, which a caller deciding what will be committed reads as no."""
+    sets = DEFAULT_ROOT / "classification"
+    assert run_module.git_ignores(sets / "v2" / "rows.jsonl") is False
+    assert run_module.git_ignores(sets / "v3" / "rows.jsonl") is True
+    assert run_module.git_ignores(tmp_path / "rows.jsonl") is None

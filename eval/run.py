@@ -26,7 +26,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from meridian_contract.taxonomy import TAXONOMY_VERSION
 
-from eval.evalset import EvalSet, EvalSetError, load
+from eval.evalset import DROP_RATE_REVIEW_TRIGGER, EvalSet, EvalSetError, load
 from eval.metrics import ClassificationMetrics, score_classification
 from eval.predictors import build
 
@@ -143,6 +143,24 @@ def _git(*args: str) -> str | None:
     return done.stdout.strip() if done.returncode == 0 else None
 
 
+def git_ignores(path: Path) -> bool | None:
+    """Whether this checkout's ``.gitignore`` excludes ``path``.
+
+    ``None`` when git cannot say: no git, or a path outside the checkout. A caller deciding
+    whether something will be committed should treat ``None`` as "no".
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(_REPO), "check-ignore", "-q", str(path)],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {0: True, 1: False}.get(done.returncode)
+
+
 def provenance() -> dict[str, str]:
     """Tags identifying the code that produced a run.
 
@@ -184,14 +202,10 @@ def without_credentials(uri: str) -> str:
     return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
 
 
-def log_to_mlflow(config: RunConfig, result: RunResult) -> None:
-    """Record the run. The only part of the harness that talks to a tracking server.
-
-    Refuses to run unless ``MLFLOW_TRACKING_URI`` is set, for the reason above. A deliberate
-    local run is still available by saying so — ``MLFLOW_TRACKING_URI=sqlite:///mlflow.db``.
-    """
-    import mlflow
-
+def require_tracking_uri() -> None:
+    """Refuse to talk to MLflow unless ``MLFLOW_TRACKING_URI`` names where, for the reason
+    above. A deliberate local run is still available by saying so —
+    ``MLFLOW_TRACKING_URI=sqlite:///mlflow.db``."""
     if not os.environ.get(TRACKING_URI_ENV, "").strip():
         raise EvalSetError(
             f"{TRACKING_URI_ENV} is not set. Unset, MLflow writes to a local scratch file "
@@ -199,9 +213,43 @@ def log_to_mlflow(config: RunConfig, result: RunResult) -> None:
             "server. Name the server, or say sqlite:///mlflow.db to keep the run local."
         )
 
+
+def drop_rate_metrics(eval_set: EvalSet) -> dict[str, float]:
+    """The set's drop counts and rates, by cause, for logging beside KR3 (rubric §7.5).
+
+    A property of the set rather than the model, logged on every run anyway: a KR3 number
+    quoted without the drop rate behind it is incomplete.
+    """
+    out = {"candidates": float(eval_set.candidates)}
+    for cause, count in eval_set.drops.items():
+        out[f"drops.{cause}"] = float(count)
+        out[f"drop_rate.{cause}"] = eval_set.drop_rates[cause]
+    return out
+
+
+def drop_rate_review_tag(eval_set: EvalSet) -> str:
+    """The causes above the review trigger, or ``none``. Tagged, never asserted.
+
+    Always set, so a results table can filter on it without treating absence as a value.
+    """
+    return ",".join(eval_set.drop_rates_for_review) or "none"
+
+
+def log_to_mlflow(config: RunConfig, result: RunResult) -> None:
+    """Record the run. Refuses unless ``MLFLOW_TRACKING_URI`` names where to."""
+    import mlflow
+
+    require_tracking_uri()
+
     mlflow.set_experiment(config.experiment)
     with mlflow.start_run():
-        mlflow.set_tags({**provenance(), "jira": config.jira})
+        mlflow.set_tags(
+            {
+                **provenance(),
+                "jira": config.jira,
+                "drop_rate_review": drop_rate_review_tag(result.eval_set),
+            }
+        )
         mlflow.log_params(config.as_mlflow_params())
         # The set is identified by its hash as well as its name: two sets can share a name
         # across machines, but a number is only comparable against identical bytes.
@@ -217,7 +265,9 @@ def log_to_mlflow(config: RunConfig, result: RunResult) -> None:
                 file=sys.stderr,
             )
         mlflow.log_param("tracking_uri", without_credentials(tracking_uri))
-        mlflow.log_metrics(result.metrics.as_mlflow_metrics())
+        mlflow.log_metrics(
+            {**result.metrics.as_mlflow_metrics(), **drop_rate_metrics(result.eval_set)}
+        )
 
 
 def format_report(result: RunResult) -> str:
@@ -228,6 +278,7 @@ def format_report(result: RunResult) -> str:
         if m.accuracy_on_assigned is None
         else f"{m.accuracy_on_assigned:.3f}"
     )
+    s = result.eval_set
     plural = "" if m.misassigned_other == 1 else "s"
     misassigned = (
         "n/a (no Other rows)"
@@ -252,6 +303,22 @@ def format_report(result: RunResult) -> str:
             f"body coverage         {m.body_coverage:.3f}",
             f"median text chars     {m.median_text_chars:.1f}",
             f"misassigned Other     {misassigned}",
+            "",
+            # Outside both KR3 numbers by design; shown so the population is visible.
+            f"excluded rows         {m.excluded_other} gold Other",
+            # The articles adjudication could not resolve. They are not in the set, so the
+            # set is easier than production by this much (rubric §7.5).
+            f"candidates            {s.candidates}  ({len(s)} in the set, "
+            f"{s.candidates - len(s)} dropped)",
+            *(
+                f"drop rate             {rate:.3f}  {cause} ({s.drops[cause]})"
+                + (
+                    f"  <- above {DROP_RATE_REVIEW_TRIGGER:.0%}, review"
+                    if cause in s.drop_rates_for_review
+                    else ""
+                )
+                for cause, rate in s.drop_rates.items()
+            ),
         ]
     )
 

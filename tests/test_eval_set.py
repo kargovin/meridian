@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 from meridian_contract.taxonomy import Topic
 
-from eval.evalset import DEFAULT_ROOT, UNSURE, EvalSetError, load
+from eval.evalset import DEFAULT_ROOT, EvalSetError, load
 
-FIXTURE = "classification/v1"
+FIXTURE = "classification/v2"
 
 
 @pytest.fixture
@@ -21,6 +21,20 @@ def sets_root(tmp_path: Path) -> Path:
     root = tmp_path / "sets"
     shutil.copytree(DEFAULT_ROOT, root)
     return root
+
+
+def _manifest(root: Path) -> dict[str, object]:
+    loaded: dict[str, object] = json.loads((root / FIXTURE / "manifest.json").read_text())
+    return loaded
+
+
+def _rows(root: Path) -> list[dict[str, object]]:
+    text = (root / FIXTURE / "rows.jsonl").read_text()
+    return [json.loads(line) for line in text.split("\n") if line.strip()]
+
+
+def _write_manifest(root: Path, manifest: dict[str, object]) -> None:
+    (root / FIXTURE / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
 def _rewrite(
@@ -34,42 +48,62 @@ def _rewrite(
 
     ``row_count`` defaults to the true length. Pass it explicitly to leave the manifest
     disagreeing — which is the only way to reach the count guard, since the hash otherwise
-    fires first on any change to the rows.
+    fires first on any change to the rows. The candidate count and the raw labels follow the
+    rows and the manifest's drops, so everything but the guard under test still agrees.
     """
     base = root / FIXTURE
     raw = (
         "\n".join(json.dumps(r, ensure_ascii=False, sort_keys=True) for r in rows) + "\n"
     ).encode()
     (base / "rows.jsonl").write_bytes(raw)
-    manifest = json.loads((base / "manifest.json").read_text())
+    manifest = _manifest(root)
     manifest["row_count"] = len(rows) if row_count is None else row_count
+    drops = manifest["drops"]
+    assert isinstance(drops, dict)
+    manifest["candidates"] = len(rows) + sum(drops.values())
     if refresh_hash:
         manifest["sha256"] = hashlib.sha256(raw).hexdigest()
-    (base / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    _write_manifest(root, manifest)
+    _sync_raw_labels(root, [(str(r.get("id")), r.get("gold")) for r in rows])
+
+
+def _sync_raw_labels(root: Path, kept: list[tuple[str, object]]) -> None:
+    """Write raw labels recording ``kept`` (id, gold) as kept and the manifest's drops as
+    dropped, and re-hash them, so a test that changes the rows or the drops reaches its own
+    guard rather than the raw-labels cross-check."""
+    manifest = _manifest(root)
+    drops = manifest["drops"]
+    assert isinstance(drops, dict)
+    lines = [{"id": i, "outcome": "agreed", "cause": None, "gold": g} for i, g in kept]
+    for cause, count in drops.items():
+        lines += [{"id": f"drop-{cause}-{n}", "outcome": "dropped", "cause": cause}
+                  for n in range(count)]  # fmt: skip
+    raw = "".join(json.dumps(line, sort_keys=True) + "\n" for line in lines).encode()
+    (root / FIXTURE / "raw_labels.jsonl").write_bytes(raw)
+    manifest["raw_labels_sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(root, manifest)
 
 
 def test_the_shipped_fixture_loads() -> None:
     """It is the calibration weight every metric test is measured against."""
     loaded = load(FIXTURE)
-    assert len(loaded) == 12
+    assert len(loaded) == 10
     assert len(loaded.scorable) == 8
     assert loaded.sha256
 
 
-def test_gold_labels_parse_into_topics_and_the_unsure_sentinel() -> None:
+def test_gold_labels_parse_into_topics() -> None:
     loaded = load(FIXTURE)
     by_id = {row.id: row for row in loaded.rows}
     assert by_id["fx-001"].gold is Topic.WORLD
     assert by_id["fx-009"].gold is Topic.OTHER
-    assert by_id["fx-011"].gold == UNSURE
 
 
-def test_scorable_excludes_other_and_unsure() -> None:
+def test_scorable_excludes_other() -> None:
     """The population both KR3 numbers are computed over."""
     loaded = load(FIXTURE)
     golds = {row.gold for row in loaded.scorable}
     assert Topic.OTHER not in golds
-    assert UNSURE not in golds
 
 
 def test_a_changed_row_is_refused(sets_root: Path) -> None:
@@ -89,21 +123,20 @@ def test_a_changed_row_count_is_refused(sets_root: Path) -> None:
     """Belt and braces: the hash catches this too, but the count names what went wrong."""
     base = sets_root / FIXTURE
     rows = [json.loads(line) for line in (base / "rows.jsonl").read_text().splitlines()]
-    _rewrite(sets_root, rows[:-1], refresh_hash=True, row_count=12)
+    _rewrite(sets_root, rows[:-1], refresh_hash=True, row_count=10)
 
-    with pytest.raises(EvalSetError, match="declares 12 rows, found 11"):
+    with pytest.raises(EvalSetError, match="declares 10 rows, found 9"):
         load(FIXTURE, root=sets_root)
 
 
 def test_a_manifest_naming_a_different_set_is_refused(sets_root: Path) -> None:
     """Catches a directory copied to a new version without editing the manifest — which
     verifies perfectly against its own hash and reports itself under the wrong name."""
-    path = sets_root / FIXTURE / "manifest.json"
-    manifest = json.loads(path.read_text())
-    manifest["set"] = "classification/v2"
-    path.write_text(json.dumps(manifest, indent=2))
+    manifest = _manifest(sets_root)
+    manifest["set"] = "classification/v3"
+    _write_manifest(sets_root, manifest)
 
-    with pytest.raises(EvalSetError, match="manifest declares set 'classification/v2'"):
+    with pytest.raises(EvalSetError, match="manifest declares set 'classification/v3'"):
         load(FIXTURE, root=sets_root)
 
 
@@ -116,6 +149,233 @@ def test_an_unknown_gold_label_is_refused(sets_root: Path) -> None:
     )
     with pytest.raises(EvalSetError, match="unknown gold label 'politics'"):
         load(FIXTURE, root=sets_root)
+
+
+# --------------------------------------------------------------------------- unfinished sets
+
+
+def test_a_set_with_unsure_rows_is_refused_and_names_the_count(sets_root: Path) -> None:
+    """An unresolved ``unsure`` is an unmade decision that looks like data (rubric §7.5).
+
+    Excluded quietly, it takes the hardest articles out of both KR3 denominators and the
+    number rises with nothing failing — so the set is refused, not scored. Two rows, not
+    one, so a refusal that stops at the first cannot pass.
+    """
+    rows = [
+        json.loads(line) for line in (sets_root / FIXTURE / "rows.jsonl").read_text().splitlines()
+    ]
+    rows[0]["gold"] = "unsure"
+    rows[3]["gold"] = "unsure"
+    _rewrite(sets_root, rows, refresh_hash=True)
+
+    with pytest.raises(EvalSetError, match=r"2 row\(s\) still carry gold 'unsure'"):
+        load(FIXTURE, root=sets_root)
+
+
+def test_a_manifest_without_drop_counts_is_refused(sets_root: Path) -> None:
+    """A dropped article is not in the set, so its count is the only trace the harness gets.
+    Without it a set would score as if adjudication had dropped nothing."""
+    manifest = _manifest(sets_root)
+    del manifest["drops"]
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(EvalSetError, match="records no drop counts"):
+        load(FIXTURE, root=sets_root)
+
+
+@pytest.mark.parametrize(
+    "drops",
+    [
+        {"genuine_disagreement": 1},
+        {"genuine_disagreement": 1, "unrecoverable_record": 1, "unreadable_input": 0},
+    ],
+    ids=["a-cause-missing", "a-cause-from-another-task"],
+)
+def test_the_drop_causes_are_exactly_the_closed_set(sets_root: Path, drops: dict[str, int]) -> None:
+    """Every cause is recorded, zero included: an absent cause cannot be told from a cause
+    nobody counted."""
+    manifest = _manifest(sets_root)
+    manifest["drops"] = drops
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(EvalSetError, match="drop causes are"):
+        load(FIXTURE, root=sets_root)
+
+
+@pytest.mark.parametrize("count", [-1, True, 1.0])
+def test_a_drop_count_must_be_a_whole_number(sets_root: Path, count: object) -> None:
+    manifest = _manifest(sets_root)
+    manifest["drops"] = {"genuine_disagreement": count, "unrecoverable_record": 1}
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(EvalSetError, match="must be a whole number"):
+        load(FIXTURE, root=sets_root)
+
+
+def test_candidates_must_be_the_rows_plus_the_drops(sets_root: Path) -> None:
+    """The drop rate's denominator. A manifest whose counts do not add up has had one of
+    them edited, and the rate would be computed against a number nobody recorded."""
+    manifest = _manifest(sets_root)
+    manifest["candidates"] = 20
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(
+        EvalSetError, match="declares 20 candidates, but its rows and drops add up to 12"
+    ):
+        load(FIXTURE, root=sets_root)
+
+
+def test_drop_rates_are_per_cause_over_the_candidates() -> None:
+    """One drop per cause out of 12 candidates. Both are above the 3% trigger, so both are
+    for review — the fixture is small, not a sample of production."""
+    loaded = load(FIXTURE)
+    assert loaded.candidates == 12
+    assert loaded.drops == {"genuine_disagreement": 1, "unrecoverable_record": 1}
+    assert loaded.drop_rates == {
+        "genuine_disagreement": pytest.approx(1 / 12),
+        "unrecoverable_record": pytest.approx(1 / 12),
+    }
+    assert loaded.drop_rates_for_review == ("genuine_disagreement", "unrecoverable_record")
+
+
+def test_only_a_cause_above_the_trigger_is_for_review(sets_root: Path) -> None:
+    """With 44 candidates one drop is 2.3% and two are 4.5%: only the second cause is for
+    review. A trigger applied to the summed rate (6.8%) would flag both."""
+    manifest = _manifest(sets_root)
+    manifest["drops"] = {"genuine_disagreement": 1, "unrecoverable_record": 2}
+    _write_manifest(sets_root, manifest)
+    rows_path = sets_root / FIXTURE / "rows.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text().splitlines()]
+    padded = rows + [
+        {"id": f"pad-{n:02d}", "title": f"padding {n}", "body": None, "gold": "world"}
+        for n in range(31)
+    ]
+    _rewrite(sets_root, padded, refresh_hash=True)
+
+    loaded = load(FIXTURE, root=sets_root)
+    assert loaded.candidates == 44
+    assert loaded.drop_rates_for_review == ("unrecoverable_record",)
+
+
+def test_changed_raw_labels_are_refused(sets_root: Path) -> None:
+    """Agreement is computed on the raw labels, so they are as immutable as the rows."""
+    path = sets_root / FIXTURE / "raw_labels.jsonl"
+    path.write_bytes(path.read_bytes().replace(b'"label": "world"', b'"label": "sports"', 1))
+
+    with pytest.raises(EvalSetError, match=r"raw_labels\.jsonl does not match the manifest"):
+        load(FIXTURE, root=sets_root)
+
+
+def test_drops_must_match_what_the_raw_labels_record(sets_root: Path) -> None:
+    """The hash proves the raw labels are the cut's bytes; it says nothing about the
+    manifest. Zeroing the drops there alone must not report a set that dropped nothing."""
+    manifest = _manifest(sets_root)
+    manifest["drops"] = {"genuine_disagreement": 0, "unrecoverable_record": 0}
+    manifest["candidates"] = 10
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(
+        EvalSetError, match=r"raw_labels\.jsonl records \{'genuine_disagreement': 1"
+    ):
+        load(FIXTURE, root=sets_root)
+
+
+def test_the_kept_items_must_be_the_rows(sets_root: Path) -> None:
+    rows = _rows(sets_root)
+    kept = [(str(r["id"]), r["gold"]) for r in rows]
+    _sync_raw_labels(sets_root, [*kept[:-1], ("someone-else", "world")])
+
+    with pytest.raises(EvalSetError, match=r"records as kept differ: fx-010, someone-else"):
+        load(FIXTURE, root=sets_root)
+
+
+def test_a_rows_gold_must_match_what_the_raw_labels_record(sets_root: Path) -> None:
+    """Editing a row's gold and re-hashing the rows is the hand edit the hash cannot see."""
+    rows = _rows(sets_root)
+    rows[0]["gold"] = "science"
+    raw = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in rows).encode()
+    (sets_root / FIXTURE / "rows.jsonl").write_bytes(raw)
+    manifest = _manifest(sets_root)
+    manifest["sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(
+        EvalSetError, match=r"gold in rows\.jsonl differs from raw_labels\.jsonl for fx-001"
+    ):
+        load(FIXTURE, root=sets_root)
+
+
+def test_an_item_recorded_twice_in_the_raw_labels_is_refused(sets_root: Path) -> None:
+    path = sets_root / FIXTURE / "raw_labels.jsonl"
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    (dropped,) = [line for line in lines if line["id"] == "fx-011"]
+    dropped["id"] = "fx-001"
+    raw = "".join(json.dumps(line, sort_keys=True) + "\n" for line in lines).encode()
+    path.write_bytes(raw)
+    manifest = _manifest(sets_root)
+    manifest["raw_labels_sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(EvalSetError, match="'fx-001' is recorded twice"):
+        load(FIXTURE, root=sets_root)
+
+
+@pytest.mark.parametrize(
+    ("file", "content", "message"),
+    [
+        ("manifest.json", b"[]", "must be a JSON object"),
+        ("manifest.json", b"\xff", "manifest.json is not UTF-8"),
+        ("rows.jsonl", b"\xff", "rows.jsonl is not UTF-8"),
+    ],
+)
+def test_malformed_files_are_refused_not_raised(
+    sets_root: Path, file: str, content: bytes, message: str
+) -> None:
+    path = sets_root / FIXTURE / file
+    path.write_bytes(content)
+    if file == "rows.jsonl":
+        manifest = _manifest(sets_root)
+        manifest["sha256"] = hashlib.sha256(content).hexdigest()
+        _write_manifest(sets_root, manifest)
+    with pytest.raises(EvalSetError, match=message):
+        load(FIXTURE, root=sets_root)
+
+
+def test_an_unhashable_drop_cause_is_refused_not_raised(sets_root: Path) -> None:
+    path = sets_root / FIXTURE / "raw_labels.jsonl"
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    (dropped,) = [line for line in lines if line["id"] == "fx-011"]
+    dropped["cause"] = ["genuine_disagreement"]
+    raw = "".join(json.dumps(line, sort_keys=True) + "\n" for line in lines).encode()
+    path.write_bytes(raw)
+    manifest = _manifest(sets_root)
+    manifest["raw_labels_sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(sets_root, manifest)
+
+    with pytest.raises(EvalSetError, match="dropped with unknown cause"):
+        load(FIXTURE, root=sets_root)
+
+
+def test_a_set_with_no_rows_is_refused(sets_root: Path) -> None:
+    """A drop rate over zero candidates is a division by zero, and there is nothing to score."""
+    manifest = _manifest(sets_root)
+    manifest["drops"] = {"genuine_disagreement": 0, "unrecoverable_record": 0}
+    _write_manifest(sets_root, manifest)
+    _rewrite(sets_root, [], refresh_hash=True)
+
+    with pytest.raises(EvalSetError, match="the set holds no rows"):
+        load(FIXTURE, root=sets_root)
+
+
+def test_a_set_without_its_rows_points_at_fetch(sets_root: Path) -> None:
+    """A real set commits only its manifest; the refusal says how to get the rest."""
+    (sets_root / FIXTURE / "raw_labels.jsonl").unlink()
+
+    with pytest.raises(EvalSetError, match=r"eval\.annotate fetch classification/v2"):
+        load(FIXTURE, root=sets_root)
+
+
+# --------------------------------------------------------------------------- rows
 
 
 def test_duplicate_ids_are_refused(sets_root: Path) -> None:
@@ -139,17 +399,18 @@ def test_a_missing_field_names_the_line(sets_root: Path) -> None:
         load(FIXTURE, root=sets_root)
 
 
-def test_whitespace_only_body_counts_as_absent(sets_root: Path) -> None:
+@pytest.mark.parametrize("field", ["body", "lede"])
+def test_whitespace_only_text_counts_as_absent(sets_root: Path, field: str) -> None:
     """Otherwise ``has_body`` counts a row the model learned nothing from, and run-level
     text statistics report coverage we do not have."""
     _rewrite(
         sets_root,
-        [{"id": "a", "title": "t", "body": "   \n ", "gold": "world"}],
+        [{"id": "a", "title": "t", field: "   \n ", "gold": "world"}],
         refresh_hash=True,
     )
     row = load(FIXTURE, root=sets_root).rows[0]
-    assert row.body is None
-    assert row.has_body is False
+    assert getattr(row, field) is None
+    assert row.text == "t"
 
 
 def test_has_body_is_derived_from_the_text_beside_it() -> None:
@@ -160,7 +421,7 @@ def test_has_body_is_derived_from_the_text_beside_it() -> None:
         assert row.has_body == (row.body is not None)
 
 
-def test_text_is_title_alone_when_there_is_no_body() -> None:
+def test_text_is_title_alone_when_there_is_no_lede_or_body() -> None:
     loaded = load(FIXTURE)
     by_id = {row.id: row for row in loaded.rows}
     headline_only = by_id["fx-001"]
@@ -169,6 +430,19 @@ def test_text_is_title_alone_when_there_is_no_body() -> None:
     assert with_body.text.startswith(with_body.title)
     assert with_body.body is not None
     assert with_body.body in with_body.text
+
+
+def test_text_carries_the_lede() -> None:
+    """A headline-only publisher's row is a title and a lede; leaving the lede out would
+    hand a predictor less than the annotator read."""
+    row = {r.id: r for r in load(FIXTURE).rows}["fx-010"]
+    assert row.lede is not None
+    assert row.text == f"{row.title}\n\n{row.lede}"
+
+
+def test_the_publisher_is_carried() -> None:
+    row = {r.id: r for r in load(FIXTURE).rows}["fx-001"]
+    assert row.publisher == "Fixture Wire"
 
 
 def test_a_missing_set_is_refused() -> None:

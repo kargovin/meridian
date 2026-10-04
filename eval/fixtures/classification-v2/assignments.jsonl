@@ -1,0 +1,12 @@
+{"annotators": ["agent-a", "agent-b"], "id": "fx-001"}
+{"annotators": ["agent-a"], "id": "fx-002"}
+{"annotators": ["agent-a"], "id": "fx-003"}
+{"annotators": ["agent-a"], "id": "fx-004"}
+{"annotators": ["agent-a", "agent-b"], "id": "fx-005"}
+{"annotators": ["agent-a"], "id": "fx-006"}
+{"annotators": ["agent-a"], "id": "fx-007"}
+{"annotators": ["agent-a"], "id": "fx-008"}
+{"annotators": ["agent-a", "agent-b"], "id": "fx-009"}
+{"annotators": ["agent-a"], "id": "fx-010"}
+{"annotators": ["agent-a", "agent-b"], "id": "fx-011"}
+{"annotators": ["agent-a", "agent-b"], "id": "fx-012"}
